@@ -66,8 +66,8 @@ class _CameraScreenState extends State<CameraScreen>
   PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
   ImageQualityPreset _qualityPreset = ImageQualityPreset.p720;
 
-  // Siklus timer hanya 2 pilihan: 3s dan 5s
-  int _timerSeconds = 3;
+  // Siklus timer: 0s (jepret langsung), 3s, 5s
+  int _timerSeconds = 0;
   int? _countdownRemaining;
   Timer? _countdownTimer;
   Timer? _preCaptureFocusTimer;
@@ -200,6 +200,11 @@ class _CameraScreenState extends State<CameraScreen>
       await ctrl.setFocusMode(FocusMode.auto);
       await ctrl.setExposureMode(ExposureMode.auto);
     } catch (_) {}
+  }
+
+  int _normalizeTimer(int sec) {
+    if (sec == 3 || sec == 5) return sec;
+    return 0;
   }
 
   DateTime _getActiveDateTime() {
@@ -671,7 +676,9 @@ class _CameraScreenState extends State<CameraScreen>
   ) async {
     final int sw = src.width;
     final int sh = src.height;
-    if (sw <= 0 || sh <= 0) return src;
+    if (sw <= 16 || sh <= 16) {
+      throw Exception('Frame kamera tidak valid (${sw}x$sh)');
+    }
 
     double targetRatio;
     if (ratio == PhotoAspectRatio.ratio1x1) {
@@ -732,7 +739,11 @@ class _CameraScreenState extends State<CameraScreen>
     required PhotoAspectRatio ratio,
     required int qualityHeight,
   }) async {
-    final bytes = await File(rawPhotoPath).readAsBytes();
+    final rawFile = File(rawPhotoPath);
+    if (!await rawFile.exists() || await rawFile.length() == 0) {
+      throw Exception('Berkas hasil kamera kosong');
+    }
+    final bytes = await rawFile.readAsBytes();
     final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
     final ui.Image srcImage = frame.image;
@@ -740,8 +751,11 @@ class _CameraScreenState extends State<CameraScreen>
         await _cropAndScaleImageAsync(srcImage, ratio, qualityHeight);
 
     final byteData = await processed.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      throw Exception('Gagal mengodekan gambar mentah');
+    }
     await File(outputPath)
-        .writeAsBytes(byteData!.buffer.asUint8List(), flush: true);
+        .writeAsBytes(byteData.buffer.asUint8List(), flush: true);
 
     if (!identical(processed, srcImage)) {
       processed.dispose();
@@ -965,10 +979,12 @@ class _CameraScreenState extends State<CameraScreen>
         .toImage(srcImage.width, srcImage.height);
     final byteData =
         await finalImage.toByteData(format: ui.ImageByteFormat.png);
-    final outBytes = byteData!.buffer.asUint8List();
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      throw Exception('Gagal mengodekan gambar ber-stempel');
+    }
 
     final outFile = File(outputPath);
-    await outFile.writeAsBytes(outBytes, flush: true);
+    await outFile.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
 
     srcImage.dispose();
     finalImage.dispose();
@@ -983,9 +999,13 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    final int activeTimer = _timerSeconds == 5 ? 5 : 3;
+    final int activeTimer = _normalizeTimer(_timerSeconds);
+    if (activeTimer == 0) {
+      await _executeTakePicture(usedTimer: 0);
+      return;
+    }
+
     setState(() {
-      _timerSeconds = activeTimer;
       _openDrawer = ActiveDrawer.none;
       _countdownRemaining = activeTimer;
     });
@@ -1011,7 +1031,7 @@ class _CameraScreenState extends State<CameraScreen>
         timer.cancel();
         _preCaptureFocusTimer?.cancel();
         setState(() => _countdownRemaining = null);
-        unawaited(_executeTakePicture());
+        unawaited(_executeTakePicture(usedTimer: activeTimer));
       } else {
         final int nextVal = current - 1;
         setState(() => _countdownRemaining = nextVal);
@@ -1022,7 +1042,7 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  Future<void> _executeTakePicture() async {
+  Future<void> _executeTakePicture({required int usedTimer}) async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized || _isSaving) {
       return;
@@ -1046,6 +1066,12 @@ class _CameraScreenState extends State<CameraScreen>
     int savedCount = 0;
 
     try {
+      if (usedTimer == 0) {
+        unawaited(_wakeUpCameraFocusAndExposure());
+      } else {
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
+
       final DateTime activeDt = _getActiveDateTime();
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
@@ -1080,10 +1106,11 @@ class _CameraScreenState extends State<CameraScreen>
       savedCount++;
 
       if (mounted) {
+        final String timerText = usedTimer == 0 ? '0s' : '${usedTimer}s';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '$savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()} • ${_timerSeconds}s)',
+              '$savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()} • $timerText)',
             ),
             backgroundColor: Colors.green,
           ),
@@ -1208,7 +1235,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Widget _buildTopBarAndDrawer() {
     final bool drawerOpen = _openDrawer == ActiveDrawer.topDrawer;
-    final int displayedTimer = _timerSeconds == 5 ? 5 : 3;
+    final int displayedTimer = _normalizeTimer(_timerSeconds);
 
     return Container(
       width: double.infinity,
@@ -1239,7 +1266,7 @@ class _CameraScreenState extends State<CameraScreen>
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          '${_getAspectRatioLabel()} • ${_getQualityLabel()} • ${displayedTimer}s',
+                          '${_getAspectRatioLabel()} • ${_getQualityLabel()}${displayedTimer > 0 ? ' • ${displayedTimer}s' : ' • 0s'}',
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
@@ -1279,16 +1306,20 @@ class _CameraScreenState extends State<CameraScreen>
                     ),
                     IconButton(
                       onPressed: () {
-                        final next = displayedTimer == 3 ? 5 : 3;
+                        final next = displayedTimer == 0
+                            ? 3
+                            : (displayedTimer == 3 ? 5 : 0);
                         setState(() => _timerSeconds = next);
                       },
-                      icon: const Icon(
+                      icon: Icon(
                         Icons.timer,
                         size: 20,
-                        color: Color(0xFFFFD000),
+                        color: displayedTimer > 0
+                            ? const Color(0xFFFFD000)
+                            : Colors.white,
                       ),
                       visualDensity: VisualDensity.compact,
-                      tooltip: 'Waktu Foto (Timer: 3s / 5s)',
+                      tooltip: 'Waktu Foto (Timer: 0s / 3s / 5s)',
                     ),
                   ],
                 ),
@@ -1376,12 +1407,12 @@ class _CameraScreenState extends State<CameraScreen>
                   ),
                   const SizedBox(height: 6),
                   Row(
-                    children: [3, 5].map((sec) {
+                    children: [0, 3, 5].map((sec) {
                       return Expanded(
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 3),
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
                           child: _MiniChipButton(
-                            label: '${sec}s',
+                            label: sec == 0 ? '0s (Off)' : '${sec}s',
                             selected: displayedTimer == sec,
                             onTap: () => setState(() => _timerSeconds = sec),
                           ),

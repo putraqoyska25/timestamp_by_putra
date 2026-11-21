@@ -500,7 +500,6 @@ class _CameraScreenState extends State<CameraScreen>
         foundIndex = 0;
       }
 
-      // Lepas controller lama terlebih dahulu agar hardware kamera tidak bentrok
       await _disposeControllerSafely();
       await Future.delayed(const Duration(milliseconds: 120));
 
@@ -554,7 +553,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _toggleFrontBackCamera() async {
-    if (_isInitializingCamera) return;
+    if (_isInitializingCamera || _isSaving) return;
     if (cameras.length < 2) {
       await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
       return;
@@ -651,11 +650,11 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  ui.Image _cropAndScaleImage(
+  Future<ui.Image> _cropAndScaleImageAsync(
     ui.Image src,
     PhotoAspectRatio ratio,
     int targetShortEdgeOrHeight,
-  ) {
+  ) async {
     final int sw = src.width;
     final int sh = src.height;
     if (sw <= 0 || sh <= 0) return src;
@@ -687,11 +686,12 @@ class _CameraScreenState extends State<CameraScreen>
     final double offsetX = ((sw - cropW) / 2.0).floorToDouble();
     final double offsetY = ((sh - cropH) / 2.0).floorToDouble();
 
+    // Hindari upscaling berlebihan yang rawan artefak blok piksel di Android
     int outW = cropW;
     int outH = cropH;
     final int baseRef = min(cropW, cropH);
-    if (baseRef > 0 && targetShortEdgeOrHeight > 0) {
-      final double scaleFactor = min(1.5, targetShortEdgeOrHeight / baseRef);
+    if (baseRef > 0 && targetShortEdgeOrHeight > 0 && baseRef > targetShortEdgeOrHeight) {
+      final double scaleFactor = targetShortEdgeOrHeight / baseRef;
       outW = max(1, (cropW * scaleFactor).round());
       outH = max(1, (cropH * scaleFactor).round());
     }
@@ -705,10 +705,10 @@ class _CameraScreenState extends State<CameraScreen>
       src,
       Rect.fromLTWH(offsetX, offsetY, cropW.toDouble(), cropH.toDouble()),
       Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
-      Paint()..filterQuality = FilterQuality.high,
+      Paint()..filterQuality = FilterQuality.medium,
     );
     final picture = recorder.endRecording();
-    return picture.toImageSync(outW, outH);
+    return picture.toImage(outW, outH);
   }
 
   Future<String> _saveCroppedAndScaledRawPhoto({
@@ -722,7 +722,7 @@ class _CameraScreenState extends State<CameraScreen>
     final frame = await codec.getNextFrame();
     final ui.Image srcImage = frame.image;
     final ui.Image processed =
-        _cropAndScaleImage(srcImage, ratio, qualityHeight);
+        await _cropAndScaleImageAsync(srcImage, ratio, qualityHeight);
 
     final byteData = await processed.toByteData(format: ui.ImageByteFormat.png);
     await File(outputPath)
@@ -962,7 +962,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _onShutterPressed() async {
-    if (_isSaving) return;
+    if (_isSaving || _isInitializingCamera) return;
     if (_countdownRemaining != null) {
       _cancelCountdown();
       return;
@@ -983,7 +983,7 @@ class _CameraScreenState extends State<CameraScreen>
         if (current <= 1) {
           timer.cancel();
           setState(() => _countdownRemaining = null);
-          _executeTakePicture();
+          unawaited(_executeTakePicture());
         } else {
           setState(() => _countdownRemaining = current - 1);
         }
@@ -1014,6 +1014,7 @@ class _CameraScreenState extends State<CameraScreen>
     String? cameraRawPath;
     String? tempRawPath;
     String? tempStampedPath;
+    int savedCount = 0;
 
     try {
       final DateTime activeDt = _getActiveDateTime();
@@ -1044,13 +1045,16 @@ class _CameraScreenState extends State<CameraScreen>
       );
 
       await Gal.putImage(tempRawPath);
+      savedCount++;
+
       await Gal.putImage(tempStampedPath);
+      savedCount++;
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '2 foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+              '$savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
             ),
             backgroundColor: Colors.green,
           ),
@@ -1060,7 +1064,11 @@ class _CameraScreenState extends State<CameraScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Gagal menyimpan 2 foto: $e'),
+            content: Text(
+              savedCount > 0
+                  ? '$savedCount dari 2 foto tersimpan. Detail error: $e'
+                  : 'Gagal menyimpan foto: $e',
+            ),
             backgroundColor: Colors.red,
           ),
         );

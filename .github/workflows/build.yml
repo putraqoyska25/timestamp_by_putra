@@ -48,7 +48,7 @@ jobs:
         run: flutter build apk --release
 
       - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: timestamp-by-putra-apk
           path: build/app/outputs/flutter-apk/app-release.apk

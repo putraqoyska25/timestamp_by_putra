@@ -31,19 +31,14 @@ jobs:
       - name: Configure Android Permissions & Lint
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' $MANIFEST
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' "$MANIFEST"
 
-          GRADLE_FILE="android/app/build.gradle"
-          if [ -f "$GRADLE_FILE" ]; then
-            cat << 'EOF' >> "$GRADLE_FILE"
+          if [ -f "android/app/build.gradle" ]; then
+            printf '\nandroid {\n    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }\n}\n' >> "android/app/build.gradle"
+          fi
 
-android {
-    lint {
-        checkReleaseBuilds false
-        abortOnError false
-    }
-}
-EOF
+          if [ -f "android/app/build.gradle.kts" ]; then
+            printf '\nandroid {\n    lint {\n        checkReleaseBuilds = false\n        abortOnError = false\n    }\n}\n' >> "android/app/build.gradle.kts"
           fi
 
       - name: Get dependencies

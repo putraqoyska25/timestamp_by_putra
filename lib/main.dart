@@ -66,7 +66,8 @@ class _CameraScreenState extends State<CameraScreen>
   PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
   ImageQualityPreset _qualityPreset = ImageQualityPreset.p720;
 
-  int _timerSeconds = 0;
+  // Siklus timer hanya 2 pilihan: 3s dan 5s
+  int _timerSeconds = 3;
   int? _countdownRemaining;
   Timer? _countdownTimer;
   Timer? _preCaptureFocusTimer;
@@ -982,49 +983,46 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    if (_timerSeconds > 0) {
-      setState(() {
-        _openDrawer = ActiveDrawer.none;
-        _countdownRemaining = _timerSeconds;
-      });
-      _countdownTimer?.cancel();
-      _preCaptureFocusTimer?.cancel();
+    final int activeTimer = _timerSeconds == 5 ? 5 : 3;
+    setState(() {
+      _timerSeconds = activeTimer;
+      _openDrawer = ActiveDrawer.none;
+      _countdownRemaining = activeTimer;
+    });
+    _countdownTimer?.cancel();
+    _preCaptureFocusTimer?.cancel();
 
-      // Wake-up fokus & eksposur beberapa ratus milidetik sebelum detik ke-0 (berlaku untuk 3s, 5s, 10s)
-      final int preFocusDelayMs = max(200, (_timerSeconds * 1000) - 420);
-      _preCaptureFocusTimer = Timer(
-        Duration(milliseconds: preFocusDelayMs),
-        () {
-          if (!mounted || _countdownRemaining == null) return;
+    final int preFocusDelayMs = max(200, (activeTimer * 1000) - 400);
+    _preCaptureFocusTimer = Timer(
+      Duration(milliseconds: preFocusDelayMs),
+      () {
+        if (!mounted || _countdownRemaining == null) return;
+        unawaited(_wakeUpCameraFocusAndExposure());
+      },
+    );
+
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final int current = _countdownRemaining ?? 0;
+      if (current <= 1) {
+        timer.cancel();
+        _preCaptureFocusTimer?.cancel();
+        setState(() => _countdownRemaining = null);
+        unawaited(_executeTakePicture());
+      } else {
+        final int nextVal = current - 1;
+        setState(() => _countdownRemaining = nextVal);
+        if (nextVal == 2 || nextVal == 1) {
           unawaited(_wakeUpCameraFocusAndExposure());
-        },
-      );
-
-      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (!mounted) {
-          timer.cancel();
-          return;
         }
-        final int current = _countdownRemaining ?? 0;
-        if (current <= 1) {
-          timer.cancel();
-          _preCaptureFocusTimer?.cancel();
-          setState(() => _countdownRemaining = null);
-          unawaited(_executeTakePicture(isTimerCapture: true));
-        } else {
-          final int nextVal = current - 1;
-          setState(() => _countdownRemaining = nextVal);
-          if (nextVal == 1) {
-            unawaited(_wakeUpCameraFocusAndExposure());
-          }
-        }
-      });
-    } else {
-      await _executeTakePicture(isTimerCapture: false);
-    }
+      }
+    });
   }
 
-  Future<void> _executeTakePicture({bool isTimerCapture = false}) async {
+  Future<void> _executeTakePicture() async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized || _isSaving) {
       return;
@@ -1048,11 +1046,6 @@ class _CameraScreenState extends State<CameraScreen>
     int savedCount = 0;
 
     try {
-      // Pada mode langsung (0s) segarkan fokus sejenak; pada mode timer fokus sudah di-wake-up saat sisa 1s
-      if (!isTimerCapture) {
-        unawaited(_wakeUpCameraFocusAndExposure());
-      }
-
       final DateTime activeDt = _getActiveDateTime();
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
@@ -1090,7 +1083,7 @@ class _CameraScreenState extends State<CameraScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '$savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+              '$savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()} • ${_timerSeconds}s)',
             ),
             backgroundColor: Colors.green,
           ),
@@ -1215,6 +1208,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Widget _buildTopBarAndDrawer() {
     final bool drawerOpen = _openDrawer == ActiveDrawer.topDrawer;
+    final int displayedTimer = _timerSeconds == 5 ? 5 : 3;
 
     return Container(
       width: double.infinity,
@@ -1245,7 +1239,7 @@ class _CameraScreenState extends State<CameraScreen>
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          '${_getAspectRatioLabel()} • ${_getQualityLabel()}${_timerSeconds > 0 ? ' • ${_timerSeconds}s' : ''}',
+                          '${_getAspectRatioLabel()} • ${_getQualityLabel()} • ${displayedTimer}s',
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
@@ -1285,22 +1279,16 @@ class _CameraScreenState extends State<CameraScreen>
                     ),
                     IconButton(
                       onPressed: () {
-                        final next = _timerSeconds == 0
-                            ? 3
-                            : (_timerSeconds == 3
-                                ? 5
-                                : (_timerSeconds == 5 ? 10 : 0));
+                        final next = displayedTimer == 3 ? 5 : 3;
                         setState(() => _timerSeconds = next);
                       },
-                      icon: Icon(
+                      icon: const Icon(
                         Icons.timer,
                         size: 20,
-                        color: _timerSeconds > 0
-                            ? const Color(0xFFFFD000)
-                            : Colors.white,
+                        color: Color(0xFFFFD000),
                       ),
                       visualDensity: VisualDensity.compact,
-                      tooltip: 'Waktu Foto (Timer)',
+                      tooltip: 'Waktu Foto (Timer: 3s / 5s)',
                     ),
                   ],
                 ),
@@ -1388,13 +1376,13 @@ class _CameraScreenState extends State<CameraScreen>
                   ),
                   const SizedBox(height: 6),
                   Row(
-                    children: [0, 3, 5, 10].map((sec) {
+                    children: [3, 5].map((sec) {
                       return Expanded(
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 3),
                           child: _MiniChipButton(
-                            label: sec == 0 ? 'Off' : '${sec}s',
-                            selected: _timerSeconds == sec,
+                            label: '${sec}s',
+                            selected: displayedTimer == sec,
                             onTap: () => setState(() => _timerSeconds = sec),
                           ),
                         ),

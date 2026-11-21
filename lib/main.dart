@@ -102,8 +102,8 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  String _buildTempFileName(String prefix, String uniqueId) {
-    return '${prefix}_$uniqueId.jpg';
+  String _buildTempFileName(String prefix, String uniqueId, String ext) {
+    return '${prefix}_$uniqueId.$ext';
   }
 
   Future<void> _safeDeleteFile(String? path) async {
@@ -230,7 +230,7 @@ class _CameraScreenState extends State<CameraScreen> {
         .endRecording()
         .toImage(srcImage.width, srcImage.height);
     final byteData =
-        await finalImage.toByteData(format: ui.ImageByteFormat.jpeg);
+        await finalImage.toByteData(format: ui.ImageByteFormat.png);
     final outBytes = byteData!.buffer.asUint8List();
 
     final outFile = File(outputPath);
@@ -264,9 +264,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
       final Directory tempDir = await getTemporaryDirectory();
       tempRawPath =
-          '${tempDir.path}/${_buildTempFileName('raw', uniqueId)}';
+          '${tempDir.path}/${_buildTempFileName('raw', uniqueId, 'jpg')}';
       tempStampedPath =
-          '${tempDir.path}/${_buildTempFileName('stamped', uniqueId)}';
+          '${tempDir.path}/${_buildTempFileName('stamped', uniqueId, 'png')}';
 
       await File(cameraRawPath).copy(tempRawPath);
 

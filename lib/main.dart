@@ -35,9 +35,13 @@ class TimestampByPutraApp extends StatelessWidget {
   }
 }
 
-enum ActiveDrawer { none, address, editSize, templateTime }
+enum ActiveDrawer { none, topDrawer, address, editSize, templateTime }
 
 enum StampFormSize { small, medium, large }
+
+enum PhotoAspectRatio { ratio1x1, ratio4x3, ratio16x9 }
+
+enum ImageQualityPreset { p1080, p720, p480, p360 }
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -53,7 +57,18 @@ class _CameraScreenState extends State<CameraScreen>
   final ImagePicker _picker = ImagePicker();
 
   int _cameraIndex = 0;
-  FlashMode _flashMode = FlashMode.off;
+  CameraLensDirection _currentLens = CameraLensDirection.back;
+  bool _flashEnabled = false;
+  bool _screenFlashActive = false;
+
+  PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
+  ImageQualityPreset _qualityPreset = ImageQualityPreset.p720;
+
+  // Timer foto (0 = nonaktif, 3 / 5 / 10 detik)
+  int _timerSeconds = 0;
+  int? _countdownRemaining;
+  Timer? _countdownTimer;
+
   bool _isSaving = false;
 
   // Status aktif tiap komponen di laci Sunting tanda air
@@ -67,7 +82,8 @@ class _CameraScreenState extends State<CameraScreen>
   Timer? _clockTimer;
 
   bool _showAddress = true;
-  String _customAddress = 'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku';
+  String _customAddress =
+      'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku';
 
   bool _showCoords = false;
   String _gpsCoordsText = 'Mencari GPS...';
@@ -110,7 +126,7 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initCamera(0);
+    _initCameraByDirection(CameraLensDirection.back);
     _getLocation();
     _startClockTimer();
   }
@@ -120,13 +136,19 @@ class _CameraScreenState extends State<CameraScreen>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
-      if (_isManualTime || _openDrawer != ActiveDrawer.none) {
+      _cancelCountdown();
+      _flashEnabled = false;
+      _screenFlashActive = false;
+      if (_isManualTime ||
+          _openDrawer != ActiveDrawer.none ||
+          _currentLens != CameraLensDirection.back) {
         setState(() {
           _isManualTime = false;
           _openDrawer = ActiveDrawer.none;
           _systemNow = DateTime.now();
         });
       }
+      _initCameraByDirection(CameraLensDirection.back);
     } else if (state == AppLifecycleState.resumed) {
       setState(() {
         _systemNow = DateTime.now();
@@ -144,6 +166,14 @@ class _CameraScreenState extends State<CameraScreen>
         });
       }
     });
+  }
+
+  void _cancelCountdown() {
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    if (_countdownRemaining != null && mounted) {
+      setState(() => _countdownRemaining = null);
+    }
   }
 
   DateTime _getActiveDateTime() {
@@ -169,6 +199,67 @@ class _CameraScreenState extends State<CameraScreen>
         return 'Sedang';
       case StampFormSize.large:
         return 'Besar';
+    }
+  }
+
+  double _getAspectRatioValue() {
+    switch (_aspectRatio) {
+      case PhotoAspectRatio.ratio1x1:
+        return 1.0;
+      case PhotoAspectRatio.ratio4x3:
+        return 3.0 / 4.0;
+      case PhotoAspectRatio.ratio16x9:
+        return 9.0 / 16.0;
+    }
+  }
+
+  String _getAspectRatioLabel() {
+    switch (_aspectRatio) {
+      case PhotoAspectRatio.ratio1x1:
+        return '1:1';
+      case PhotoAspectRatio.ratio4x3:
+        return '4:3';
+      case PhotoAspectRatio.ratio16x9:
+        return '16:9';
+    }
+  }
+
+  int _getQualityHeightPixels() {
+    switch (_qualityPreset) {
+      case ImageQualityPreset.p1080:
+        return 1080;
+      case ImageQualityPreset.p720:
+        return 720;
+      case ImageQualityPreset.p480:
+        return 480;
+      case ImageQualityPreset.p360:
+        return 360;
+    }
+  }
+
+  String _getQualityLabel() {
+    switch (_qualityPreset) {
+      case ImageQualityPreset.p1080:
+        return '1080p';
+      case ImageQualityPreset.p720:
+        return '720p';
+      case ImageQualityPreset.p480:
+        return '480p';
+      case ImageQualityPreset.p360:
+        return '360p';
+    }
+  }
+
+  ResolutionPreset _getCameraResolutionPreset() {
+    switch (_qualityPreset) {
+      case ImageQualityPreset.p1080:
+        return ResolutionPreset.high;
+      case ImageQualityPreset.p720:
+        return ResolutionPreset.high;
+      case ImageQualityPreset.p480:
+        return ResolutionPreset.medium;
+      case ImageQualityPreset.p360:
+        return ResolutionPreset.low;
     }
   }
 
@@ -347,54 +438,79 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  Future<void> _initCamera(int index) async {
-    if (cameras.isEmpty) return;
-    final int safeIndex = index % cameras.length;
-    final oldController = _controller;
+  Future<void> _applyFlashHardwareState() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    try {
+      if (_currentLens == CameraLensDirection.back) {
+        await _controller!.setFlashMode(
+          _flashEnabled ? FlashMode.torch : FlashMode.off,
+        );
+      } else {
+        await _controller!.setFlashMode(FlashMode.off);
+      }
+    } catch (e) {
+      debugPrint('Gagal mengatur flash hardware: $e');
+    }
+  }
 
+  Future<void> _initCameraByDirection(CameraLensDirection targetDir) async {
+    if (cameras.isEmpty) return;
+
+    int foundIndex = cameras.indexWhere((c) => c.lensDirection == targetDir);
+    if (foundIndex == -1) {
+      foundIndex = 0;
+    }
+
+    final oldController = _controller;
     final newController = CameraController(
-      cameras[safeIndex],
-      ResolutionPreset.high,
+      cameras[foundIndex],
+      _getCameraResolutionPreset(),
       enableAudio: false,
     );
 
     try {
       await newController.initialize();
-      await newController.setFlashMode(_flashMode);
       if (!mounted) {
         await newController.dispose();
         return;
       }
       setState(() {
-        _cameraIndex = safeIndex;
-        _controller = newController;
+        _cameraIndex = foundIndex;
+        _currentLens = cameras[foundIndex].lensDirection;
+        _screenFlashActive = false;
       });
       await oldController?.dispose();
+      await _applyFlashHardwareState();
     } catch (e) {
       debugPrint('Gagal inisialisasi kamera: $e');
       await newController.dispose();
     }
   }
 
-  Future<void> _switchCamera() async {
-    if (cameras.length < 2) return;
-    await _initCamera(_cameraIndex + 1);
+  Future<void> _setQualityPreset(ImageQualityPreset preset) async {
+    if (_qualityPreset == preset) return;
+    setState(() => _qualityPreset = preset);
+    await _initCameraByDirection(_currentLens);
   }
 
-  Future<void> _cycleFlashMode() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-    final FlashMode nextMode = _flashMode == FlashMode.off
-        ? FlashMode.auto
-        : (_flashMode == FlashMode.auto ? FlashMode.torch : FlashMode.off);
+  Future<void> _toggleFrontBackCamera() async {
+    if (cameras.length < 2) return;
+    final CameraLensDirection nextDir =
+        _currentLens == CameraLensDirection.back
+            ? CameraLensDirection.front
+            : CameraLensDirection.back;
+    await _initCameraByDirection(nextDir);
+  }
 
-    try {
-      await _controller!.setFlashMode(nextMode);
-      if (mounted) {
-        setState(() => _flashMode = nextMode);
+  Future<void> _toggleFlash() async {
+    final bool nextFlash = !_flashEnabled;
+    setState(() {
+      _flashEnabled = nextFlash;
+      if (_currentLens == CameraLensDirection.front) {
+        _screenFlashActive = nextFlash;
       }
-    } catch (e) {
-      debugPrint('Gagal mengubah flash: $e');
-    }
+    });
+    await _applyFlashHardwareState();
   }
 
   Future<void> _getLocation() async {
@@ -471,13 +587,98 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<String> _burnTimestampToImage({
+  ui.Image _cropAndScaleImage(
+    ui.Image src,
+    PhotoAspectRatio ratio,
+    int targetShortEdgeOrHeight,
+  ) {
+    final int sw = src.width;
+    final int sh = src.height;
+    if (sw <= 0 || sh <= 0) return src;
+
+    double targetRatio;
+    if (ratio == PhotoAspectRatio.ratio1x1) {
+      targetRatio = 1.0;
+    } else if (ratio == PhotoAspectRatio.ratio4x3) {
+      targetRatio = sh >= sw ? (3.0 / 4.0) : (4.0 / 3.0);
+    } else {
+      targetRatio = sh >= sw ? (9.0 / 16.0) : (16.0 / 9.0);
+    }
+
+    final double currentRatio = sw / sh;
+    int cropW = sw;
+    int cropH = sh;
+
+    if ((currentRatio - targetRatio).abs() > 0.01) {
+      if (currentRatio > targetRatio) {
+        cropW = (sh * targetRatio).round();
+      } else {
+        cropH = (sw / targetRatio).round();
+      }
+    }
+
+    cropW = max(1, min(sw, cropW));
+    cropH = max(1, min(sh, cropH));
+
+    final double offsetX = ((sw - cropW) / 2.0).floorToDouble();
+    final double offsetY = ((sh - cropH) / 2.0).floorToDouble();
+
+    // Skala output berdasarkan kualitas yang dipilih (1080p, 720p, 480p, 360p)
+    int outW = cropW;
+    int outH = cropH;
+    final int baseRef = min(cropW, cropH);
+    if (baseRef > 0 && targetShortEdgeOrHeight > 0) {
+      final double scaleFactor = min(1.5, targetShortEdgeOrHeight / baseRef);
+      outW = max(1, (cropW * scaleFactor).round());
+      outH = max(1, (cropH * scaleFactor).round());
+    }
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(
+      recorder,
+      Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
+    );
+    canvas.drawImageRect(
+      src,
+      Rect.fromLTWH(offsetX, offsetY, cropW.toDouble(), cropH.toDouble()),
+      Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
+      Paint()..filterQuality = FilterQuality.high,
+    );
+    final picture = recorder.endRecording();
+    return picture.toImageSync(outW, outH);
+  }
+
+  Future<String> _saveCroppedAndScaledRawPhoto({
     required String rawPhotoPath,
+    required String outputPath,
+    required PhotoAspectRatio ratio,
+    required int qualityHeight,
+  }) async {
+    final bytes = await File(rawPhotoPath).readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final ui.Image srcImage = frame.image;
+    final ui.Image processed =
+        _cropAndScaleImage(srcImage, ratio, qualityHeight);
+
+    final byteData = await processed.toByteData(format: ui.ImageByteFormat.png);
+    await File(outputPath)
+        .writeAsBytes(byteData!.buffer.asUint8List(), flush: true);
+
+    if (!identical(processed, srcImage)) {
+      processed.dispose();
+    }
+    srcImage.dispose();
+    return outputPath;
+  }
+
+  Future<String> _burnTimestampToImage({
+    required String croppedPhotoPath,
     required String outputPath,
     required DateTime activeDt,
     required double sizeMultiplier,
   }) async {
-    final bytes = await File(rawPhotoPath).readAsBytes();
+    final bytes = await File(croppedPhotoPath).readAsBytes();
     final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
     final ui.Image srcImage = frame.image;
@@ -488,7 +689,7 @@ class _CameraScreenState extends State<CameraScreen>
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
 
-    // 1. Gambar foto asli
+    // 1. Gambar foto yang sudah sesuai rasio & kualitas
     canvas.drawImage(srcImage, Offset.zero, Paint());
 
     final double baseScale = w / 1080.0;
@@ -506,7 +707,6 @@ class _CameraScreenState extends State<CameraScreen>
       ),
     ];
 
-    // Logo opsional jika diaktifkan dan ada file gambar
     ui.Image? logoImg;
     if (_showLogo && _logoFilePath != null && _logoFilePath!.isNotEmpty) {
       final logoFile = File(_logoFilePath!);
@@ -699,7 +899,39 @@ class _CameraScreenState extends State<CameraScreen>
     return outputPath;
   }
 
-  Future<void> _takePicture() async {
+  Future<void> _onShutterPressed() async {
+    if (_isSaving) return;
+    if (_countdownRemaining != null) {
+      _cancelCountdown();
+      return;
+    }
+
+    if (_timerSeconds > 0) {
+      setState(() {
+        _openDrawer = ActiveDrawer.none;
+        _countdownRemaining = _timerSeconds;
+      });
+      _countdownTimer?.cancel();
+      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+        final int current = _countdownRemaining ?? 0;
+        if (current <= 1) {
+          timer.cancel();
+          setState(() => _countdownRemaining = null);
+          _executeTakePicture();
+        } else {
+          setState(() => _countdownRemaining = current - 1);
+        }
+      });
+    } else {
+      await _executeTakePicture();
+    }
+  }
+
+  Future<void> _executeTakePicture() async {
     if (_controller == null || !_controller!.value.isInitialized || _isSaving) {
       return;
     }
@@ -707,7 +939,14 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() {
       _isSaving = true;
       _openDrawer = ActiveDrawer.none;
+      if (_currentLens == CameraLensDirection.front && _flashEnabled) {
+        _screenFlashActive = true;
+      }
     });
+
+    if (_currentLens == CameraLensDirection.front && _flashEnabled) {
+      await Future.delayed(const Duration(milliseconds: 220));
+    }
 
     String? cameraRawPath;
     String? tempRawPath;
@@ -723,14 +962,19 @@ class _CameraScreenState extends State<CameraScreen>
 
       final Directory tempDir = await getTemporaryDirectory();
       tempRawPath =
-          '${tempDir.path}/${_buildTempFileName('raw', uniqueId, 'jpg')}';
+          '${tempDir.path}/${_buildTempFileName('raw', uniqueId, 'png')}';
       tempStampedPath =
           '${tempDir.path}/${_buildTempFileName('stamped', uniqueId, 'png')}';
 
-      await File(cameraRawPath).copy(tempRawPath);
+      await _saveCroppedAndScaledRawPhoto(
+        rawPhotoPath: cameraRawPath,
+        outputPath: tempRawPath,
+        ratio: _aspectRatio,
+        qualityHeight: _getQualityHeightPixels(),
+      );
 
       await _burnTimestampToImage(
-        rawPhotoPath: tempRawPath,
+        croppedPhotoPath: tempRawPath,
         outputPath: tempStampedPath,
         activeDt: activeDt,
         sizeMultiplier: _getUiSizeMultiplier(),
@@ -741,8 +985,10 @@ class _CameraScreenState extends State<CameraScreen>
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('2 foto tersimpan ke Galeri (Foto biasa & ber-stempel)'),
+          SnackBar(
+            content: Text(
+              '2 foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+            ),
             backgroundColor: Colors.green,
           ),
         );
@@ -760,8 +1006,216 @@ class _CameraScreenState extends State<CameraScreen>
       await _safeDeleteFile(cameraRawPath);
       await _safeDeleteFile(tempRawPath);
       await _safeDeleteFile(tempStampedPath);
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+          _screenFlashActive = false;
+        });
+      }
     }
+  }
+
+  Widget _buildTopBarAndDrawer() {
+    final bool drawerOpen = _openDrawer == ActiveDrawer.topDrawer;
+
+    return Container(
+      width: double.infinity,
+      color: Colors.black.withOpacity(0.85),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                InkWell(
+                  onTap: () => _toggleDrawer(ActiveDrawer.topDrawer),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          drawerOpen
+                              ? Icons.keyboard_arrow_up
+                              : Icons.keyboard_arrow_down,
+                          size: 18,
+                          color: const Color(0xFFFFD000),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_getAspectRatioLabel()} • ${_getQualityLabel()}${_timerSeconds > 0 ? ' • ${_timerSeconds}s' : ''}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      onPressed: _toggleFlash,
+                      icon: Icon(
+                        _flashEnabled ? Icons.flash_on : Icons.flash_off,
+                        size: 20,
+                        color: _flashEnabled
+                            ? const Color(0xFFFFD000)
+                            : Colors.white,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Kilat / Pencahayaan',
+                    ),
+                    IconButton(
+                      onPressed: _toggleFrontBackCamera,
+                      icon: Icon(
+                        Icons.sync,
+                        size: 20,
+                        color: _currentLens == CameraLensDirection.front
+                            ? const Color(0xFFFFD000)
+                            : Colors.white,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Rotasi Kamera',
+                    ),
+                    IconButton(
+                      onPressed: () {
+                        final next = _timerSeconds == 0
+                            ? 3
+                            : (_timerSeconds == 3
+                                ? 5
+                                : (_timerSeconds == 5 ? 10 : 0));
+                        setState(() => _timerSeconds = next);
+                      },
+                      icon: Icon(
+                        Icons.timer,
+                        size: 20,
+                        color: _timerSeconds > 0
+                            ? const Color(0xFFFFD000)
+                            : Colors.white,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Waktu Foto (Timer)',
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (drawerOpen)
+            Container(
+              width: double.infinity,
+              color: const Color(0xFF161920),
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Rasio Gambar',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      _MiniChipButton(
+                        label: '1:1',
+                        selected: _aspectRatio == PhotoAspectRatio.ratio1x1,
+                        onTap: () => setState(
+                          () => _aspectRatio = PhotoAspectRatio.ratio1x1,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      _MiniChipButton(
+                        label: '4:3',
+                        selected: _aspectRatio == PhotoAspectRatio.ratio4x3,
+                        onTap: () => setState(
+                          () => _aspectRatio = PhotoAspectRatio.ratio4x3,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      _MiniChipButton(
+                        label: '16:9',
+                        selected: _aspectRatio == PhotoAspectRatio.ratio16x9,
+                        onTap: () => setState(
+                          () => _aspectRatio = PhotoAspectRatio.ratio16x9,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Kualitas Gambar',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      _MiniChipButton(
+                        label: '1080p',
+                        selected: _qualityPreset == ImageQualityPreset.p1080,
+                        onTap: () => _setQualityPreset(ImageQualityPreset.p1080),
+                      ),
+                      const SizedBox(width: 6),
+                      _MiniChipButton(
+                        label: '720p',
+                        selected: _qualityPreset == ImageQualityPreset.p720,
+                        onTap: () => _setQualityPreset(ImageQualityPreset.p720),
+                      ),
+                      const SizedBox(width: 6),
+                      _MiniChipButton(
+                        label: '480p',
+                        selected: _qualityPreset == ImageQualityPreset.p480,
+                        onTap: () => _setQualityPreset(ImageQualityPreset.p480),
+                      ),
+                      const SizedBox(width: 6),
+                      _MiniChipButton(
+                        label: '360p',
+                        selected: _qualityPreset == ImageQualityPreset.p360,
+                        onTap: () => _setQualityPreset(ImageQualityPreset.p360),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Foto Menggunakan Waktu (Timer)',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [0, 3, 5, 10].map((sec) {
+                      return Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: _MiniChipButton(
+                            label: sec == 0 ? 'Off' : '${sec}s',
+                            selected: _timerSeconds == sec,
+                            onTap: () => setState(() => _timerSeconds = sec),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _currentLens == CameraLensDirection.front
+                        ? 'Kamera depan aktif: kilat menyalakan layar putih.'
+                        : 'Kamera belakang aktif: kilat menyalakan lampu kamera belakang.',
+                    style: const TextStyle(fontSize: 11, color: Colors.white60),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildStampPreviewOverlay(DateTime activeDt) {
@@ -882,7 +1336,8 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildDrawerPanel() {
-    if (_openDrawer == ActiveDrawer.none) {
+    if (_openDrawer == ActiveDrawer.none ||
+        _openDrawer == ActiveDrawer.topDrawer) {
       return const SizedBox.shrink();
     }
 
@@ -915,7 +1370,8 @@ class _CameraScreenState extends State<CameraScreen>
                   ),
                 ),
                 IconButton(
-                  onPressed: () => setState(() => _openDrawer = ActiveDrawer.none),
+                  onPressed: () =>
+                      setState(() => _openDrawer = ActiveDrawer.none),
                   icon: const Icon(Icons.close, color: Colors.white70),
                   visualDensity: VisualDensity.compact,
                 ),
@@ -1063,9 +1519,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildBottomBar() {
-    final IconData flashIcon = _flashMode == FlashMode.off
-        ? Icons.flash_off
-        : (_flashMode == FlashMode.auto ? Icons.flash_auto : Icons.flash_on);
+    final bool counting = _countdownRemaining != null;
 
     return Container(
       color: Colors.black,
@@ -1073,15 +1527,15 @@ class _CameraScreenState extends State<CameraScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
+          const Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Text(
+              Text(
                 'Album',
                 style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
-              const SizedBox(width: 22),
-              const Text(
+              SizedBox(width: 24),
+              Text(
                 'Foto',
                 style: TextStyle(
                   color: Colors.white,
@@ -1089,27 +1543,9 @@ class _CameraScreenState extends State<CameraScreen>
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              const SizedBox(width: 22),
-              IconButton(
-                onPressed: _cycleFlashMode,
-                icon: Icon(flashIcon, size: 18, color: Colors.white70),
-                visualDensity: VisualDensity.compact,
-                tooltip: 'Mode Flash',
-              ),
-              if (cameras.length > 1)
-                IconButton(
-                  onPressed: _switchCamera,
-                  icon: const Icon(
-                    Icons.cameraswitch,
-                    size: 18,
-                    color: Colors.white70,
-                  ),
-                  visualDensity: VisualDensity.compact,
-                  tooltip: 'Ganti Kamera',
-                ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -1134,26 +1570,42 @@ class _CameraScreenState extends State<CameraScreen>
                 onTap: () => _toggleDrawer(ActiveDrawer.address),
               ),
               GestureDetector(
-                onTap: _isSaving ? null : _takePicture,
+                onTap: _isSaving ? null : _onShutterPressed,
                 child: Container(
                   width: 68,
                   height: 68,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 4),
+                    border: Border.all(
+                      color: counting ? const Color(0xFFFFD000) : Colors.white,
+                      width: 4,
+                    ),
                   ),
                   padding: const EdgeInsets.all(5),
                   child: Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: _isSaving ? Colors.grey : Colors.white,
+                      color: _isSaving
+                          ? Colors.grey
+                          : (counting ? const Color(0xFFFFD000) : Colors.white),
                     ),
                     child: _isSaving
                         ? const Padding(
                             padding: EdgeInsets.all(14),
                             child: CircularProgressIndicator(strokeWidth: 2.5),
                           )
-                        : null,
+                        : (counting
+                            ? Center(
+                                child: Text(
+                                  '${_countdownRemaining}s',
+                                  style: const TextStyle(
+                                    color: Colors.black,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                              )
+                            : null),
                   ),
                 ),
               ),
@@ -1167,7 +1619,8 @@ class _CameraScreenState extends State<CameraScreen>
               _BottomActionIcon(
                 icon: Icons.calendar_today_outlined,
                 label: 'Templat',
-                active: _openDrawer == ActiveDrawer.templateTime || _isManualTime,
+                active:
+                    _openDrawer == ActiveDrawer.templateTime || _isManualTime,
                 onTap: () => _toggleDrawer(ActiveDrawer.templateTime),
               ),
             ],
@@ -1181,6 +1634,7 @@ class _CameraScreenState extends State<CameraScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _clockTimer?.cancel();
+    _countdownTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }
@@ -1192,27 +1646,106 @@ class _CameraScreenState extends State<CameraScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            Expanded(
-              child: _controller != null && _controller!.value.isInitialized
-                  ? Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        CameraPreview(_controller!),
-                        Positioned(
-                          left: 0,
-                          bottom: 0,
-                          right: 0,
-                          child: _buildStampPreviewOverlay(activeDt),
-                        ),
-                      ],
-                    )
-                  : const Center(child: CircularProgressIndicator()),
+            Column(
+              children: [
+                _buildTopBarAndDrawer(),
+                Expanded(
+                  child: Center(
+                    child: _controller != null && _controller!.value.isInitialized
+                        ? AspectRatio(
+                            aspectRatio: _getAspectRatioValue(),
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                CameraPreview(_controller!),
+                                if (_countdownRemaining != null)
+                                  Center(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 24,
+                                        vertical: 14,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.65),
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: Text(
+                                        '${_countdownRemaining}',
+                                        style: const TextStyle(
+                                          color: Color(0xFFFFD000),
+                                          fontSize: 52,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                Positioned(
+                                  left: 0,
+                                  bottom: 0,
+                                  right: 0,
+                                  child: _buildStampPreviewOverlay(activeDt),
+                                ),
+                              ],
+                            ),
+                          )
+                        : const CircularProgressIndicator(),
+                  ),
+                ),
+                _buildDrawerPanel(),
+                _buildBottomBar(),
+              ],
             ),
-            _buildDrawerPanel(),
-            _buildBottomBar(),
+            if (_screenFlashActive)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: AnimatedOpacity(
+                    opacity: _screenFlashActive ? 0.92 : 0.0,
+                    duration: const Duration(milliseconds: 120),
+                    child: Container(color: Colors.white),
+                  ),
+                ),
+              ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniChipButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MiniChipButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFFFD000) : const Color(0xFF252932),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ),
       ),
     );

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -70,7 +71,6 @@ class _CameraScreenState extends State<CameraScreen>
   int _timerSeconds = 0;
   int? _countdownRemaining;
   Timer? _countdownTimer;
-  Timer? _preCaptureFocusTimer;
 
   bool _isSaving = false;
 
@@ -186,8 +186,6 @@ class _CameraScreenState extends State<CameraScreen>
   void _cancelCountdown() {
     _countdownTimer?.cancel();
     _countdownTimer = null;
-    _preCaptureFocusTimer?.cancel();
-    _preCaptureFocusTimer = null;
     if (_countdownRemaining != null && mounted) {
       setState(() => _countdownRemaining = null);
     }
@@ -733,9 +731,8 @@ class _CameraScreenState extends State<CameraScreen>
     return picture.toImage(outW, outH);
   }
 
-  Future<String> _saveCroppedAndScaledRawPhoto({
+  Future<Uint8List> _buildCroppedRawPngBytes({
     required String rawPhotoPath,
-    required String outputPath,
     required PhotoAspectRatio ratio,
     required int qualityHeight,
   }) async {
@@ -752,26 +749,27 @@ class _CameraScreenState extends State<CameraScreen>
 
     final byteData = await processed.toByteData(format: ui.ImageByteFormat.png);
     if (byteData == null || byteData.lengthInBytes == 0) {
+      if (!identical(processed, srcImage)) {
+        processed.dispose();
+      }
+      srcImage.dispose();
       throw Exception('Gagal mengodekan gambar mentah');
     }
-    await File(outputPath)
-        .writeAsBytes(byteData.buffer.asUint8List(), flush: true);
 
+    final Uint8List outBytes = Uint8List.fromList(byteData.buffer.asUint8List());
     if (!identical(processed, srcImage)) {
       processed.dispose();
     }
     srcImage.dispose();
-    return outputPath;
+    return outBytes;
   }
 
-  Future<String> _burnTimestampToImage({
-    required String croppedPhotoPath,
-    required String outputPath,
+  Future<Uint8List> _buildStampedPngBytesFromRawBytes({
+    required Uint8List cleanRawPngBytes,
     required DateTime activeDt,
     required double sizeMultiplier,
   }) async {
-    final bytes = await File(croppedPhotoPath).readAsBytes();
-    final codec = await ui.instantiateImageCodec(bytes);
+    final codec = await ui.instantiateImageCodec(cleanRawPngBytes);
     final frame = await codec.getNextFrame();
     final ui.Image srcImage = frame.image;
 
@@ -979,17 +977,15 @@ class _CameraScreenState extends State<CameraScreen>
         .toImage(srcImage.width, srcImage.height);
     final byteData =
         await finalImage.toByteData(format: ui.ImageByteFormat.png);
-    if (byteData == null || byteData.lengthInBytes == 0) {
-      throw Exception('Gagal mengodekan gambar ber-stempel');
-    }
-
-    final outFile = File(outputPath);
-    await outFile.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
 
     srcImage.dispose();
     finalImage.dispose();
 
-    return outputPath;
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      throw Exception('Gagal mengodekan gambar ber-stempel');
+    }
+
+    return Uint8List.fromList(byteData.buffer.asUint8List());
   }
 
   Future<void> _onShutterPressed() async {
@@ -1010,16 +1006,6 @@ class _CameraScreenState extends State<CameraScreen>
       _countdownRemaining = activeTimer;
     });
     _countdownTimer?.cancel();
-    _preCaptureFocusTimer?.cancel();
-
-    final int preFocusDelayMs = max(200, (activeTimer * 1000) - 400);
-    _preCaptureFocusTimer = Timer(
-      Duration(milliseconds: preFocusDelayMs),
-      () {
-        if (!mounted || _countdownRemaining == null) return;
-        unawaited(_wakeUpCameraFocusAndExposure());
-      },
-    );
 
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
@@ -1029,13 +1015,12 @@ class _CameraScreenState extends State<CameraScreen>
       final int current = _countdownRemaining ?? 0;
       if (current <= 1) {
         timer.cancel();
-        _preCaptureFocusTimer?.cancel();
         setState(() => _countdownRemaining = null);
         unawaited(_executeTakePicture(usedTimer: activeTimer));
       } else {
         final int nextVal = current - 1;
         setState(() => _countdownRemaining = nextVal);
-        if (nextVal == 2 || nextVal == 1) {
+        if (nextVal == 1) {
           unawaited(_wakeUpCameraFocusAndExposure());
         }
       }
@@ -1066,12 +1051,6 @@ class _CameraScreenState extends State<CameraScreen>
     int savedCount = 0;
 
     try {
-      if (usedTimer == 0) {
-        unawaited(_wakeUpCameraFocusAndExposure());
-      } else {
-        await Future.delayed(const Duration(milliseconds: 150));
-      }
-
       final DateTime activeDt = _getActiveDateTime();
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
@@ -1079,28 +1058,33 @@ class _CameraScreenState extends State<CameraScreen>
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
-      final Directory tempDir = await getTemporaryDirectory();
-      tempRawPath =
-          '${tempDir.path}/${_buildTempFileName('raw', uniqueId, 'png')}';
-      tempStampedPath =
-          '${tempDir.path}/${_buildTempFileName('stamped', uniqueId, 'png')}';
-
-      await _saveCroppedAndScaledRawPhoto(
+      // 1. Buat byte PNG polos terpisah terlebih dahulu
+      final Uint8List cleanRawPngBytes = await _buildCroppedRawPngBytes(
         rawPhotoPath: cameraRawPath,
-        outputPath: tempRawPath,
         ratio: _aspectRatio,
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      await _burnTimestampToImage(
-        croppedPhotoPath: tempRawPath,
-        outputPath: tempStampedPath,
+      // 2. Buat byte PNG ber-stempel dari salinan byte polos
+      final Uint8List stampedPngBytes = await _buildStampedPngBytesFromRawBytes(
+        cleanRawPngBytes: cleanRawPngBytes,
         activeDt: activeDt,
         sizeMultiplier: _getUiSizeMultiplier(),
       );
 
+      final Directory tempDir = await getTemporaryDirectory();
+      tempRawPath =
+          '${tempDir.path}/${_buildTempFileName('clean_raw', uniqueId, 'png')}';
+      tempStampedPath =
+          '${tempDir.path}/${_buildTempFileName('with_stamp', uniqueId, 'png')}';
+
+      await File(tempRawPath).writeAsBytes(cleanRawPngBytes, flush: true);
+      await File(tempStampedPath).writeAsBytes(stampedPngBytes, flush: true);
+
       await Gal.putImage(tempRawPath);
       savedCount++;
+
+      await Future.delayed(const Duration(milliseconds: 300));
 
       await Gal.putImage(tempStampedPath);
       savedCount++;
@@ -1110,7 +1094,7 @@ class _CameraScreenState extends State<CameraScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '$savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()} • $timerText)',
+              'Mode $timerText: $savedCount foto tersimpan (1 polos + 1 stempel • ${_getAspectRatioLabel()} • ${_getQualityLabel()})',
             ),
             backgroundColor: Colors.green,
           ),
@@ -1845,7 +1829,6 @@ class _CameraScreenState extends State<CameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     _clockTimer?.cancel();
     _countdownTimer?.cancel();
-    _preCaptureFocusTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }

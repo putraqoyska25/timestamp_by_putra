@@ -69,6 +69,7 @@ class _CameraScreenState extends State<CameraScreen>
   int _timerSeconds = 0;
   int? _countdownRemaining;
   Timer? _countdownTimer;
+  Timer? _preCaptureFocusTimer;
 
   bool _isSaving = false;
 
@@ -184,9 +185,20 @@ class _CameraScreenState extends State<CameraScreen>
   void _cancelCountdown() {
     _countdownTimer?.cancel();
     _countdownTimer = null;
+    _preCaptureFocusTimer?.cancel();
+    _preCaptureFocusTimer = null;
     if (_countdownRemaining != null && mounted) {
       setState(() => _countdownRemaining = null);
     }
+  }
+
+  Future<void> _wakeUpCameraFocusAndExposure() async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    try {
+      await ctrl.setFocusMode(FocusMode.auto);
+      await ctrl.setExposureMode(ExposureMode.auto);
+    } catch (_) {}
   }
 
   DateTime _getActiveDateTime() {
@@ -507,6 +519,7 @@ class _CameraScreenState extends State<CameraScreen>
         cameras[foundIndex],
         _getCameraResolutionPreset(),
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
       await newController.initialize().timeout(const Duration(seconds: 10));
@@ -686,11 +699,12 @@ class _CameraScreenState extends State<CameraScreen>
     final double offsetX = ((sw - cropW) / 2.0).floorToDouble();
     final double offsetY = ((sh - cropH) / 2.0).floorToDouble();
 
-    // Hindari upscaling berlebihan yang rawan artefak blok piksel di Android
     int outW = cropW;
     int outH = cropH;
     final int baseRef = min(cropW, cropH);
-    if (baseRef > 0 && targetShortEdgeOrHeight > 0 && baseRef > targetShortEdgeOrHeight) {
+    if (baseRef > 0 &&
+        targetShortEdgeOrHeight > 0 &&
+        baseRef > targetShortEdgeOrHeight) {
       final double scaleFactor = targetShortEdgeOrHeight / baseRef;
       outW = max(1, (cropW * scaleFactor).round());
       outH = max(1, (cropH * scaleFactor).round());
@@ -974,6 +988,18 @@ class _CameraScreenState extends State<CameraScreen>
         _countdownRemaining = _timerSeconds;
       });
       _countdownTimer?.cancel();
+      _preCaptureFocusTimer?.cancel();
+
+      // Wake-up fokus & eksposur beberapa ratus milidetik sebelum detik ke-0 (berlaku untuk 3s, 5s, 10s)
+      final int preFocusDelayMs = max(200, (_timerSeconds * 1000) - 420);
+      _preCaptureFocusTimer = Timer(
+        Duration(milliseconds: preFocusDelayMs),
+        () {
+          if (!mounted || _countdownRemaining == null) return;
+          unawaited(_wakeUpCameraFocusAndExposure());
+        },
+      );
+
       _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
         if (!mounted) {
           timer.cancel();
@@ -982,18 +1008,23 @@ class _CameraScreenState extends State<CameraScreen>
         final int current = _countdownRemaining ?? 0;
         if (current <= 1) {
           timer.cancel();
+          _preCaptureFocusTimer?.cancel();
           setState(() => _countdownRemaining = null);
-          unawaited(_executeTakePicture());
+          unawaited(_executeTakePicture(isTimerCapture: true));
         } else {
-          setState(() => _countdownRemaining = current - 1);
+          final int nextVal = current - 1;
+          setState(() => _countdownRemaining = nextVal);
+          if (nextVal == 1) {
+            unawaited(_wakeUpCameraFocusAndExposure());
+          }
         }
       });
     } else {
-      await _executeTakePicture();
+      await _executeTakePicture(isTimerCapture: false);
     }
   }
 
-  Future<void> _executeTakePicture() async {
+  Future<void> _executeTakePicture({bool isTimerCapture = false}) async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized || _isSaving) {
       return;
@@ -1017,6 +1048,11 @@ class _CameraScreenState extends State<CameraScreen>
     int savedCount = 0;
 
     try {
+      // Pada mode langsung (0s) segarkan fokus sejenak; pada mode timer fokus sudah di-wake-up saat sisa 1s
+      if (!isTimerCapture) {
+        unawaited(_wakeUpCameraFocusAndExposure());
+      }
+
       final DateTime activeDt = _getActiveDateTime();
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
@@ -1790,6 +1826,7 @@ class _CameraScreenState extends State<CameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     _clockTimer?.cancel();
     _countdownTimer?.cancel();
+    _preCaptureFocusTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }

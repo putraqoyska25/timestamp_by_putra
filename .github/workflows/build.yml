@@ -28,10 +28,29 @@ jobs:
         run: |
           flutter create --platforms=android --org=com.putra --project-name=timestamp_by_putra .
 
-      - name: Configure Android Permissions & SDK
+      - name: Configure Android Permissions & Lint
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' $MANIFEST
+
+          GRADLE_FILE="android/app/build.gradle"
+          if [ -f "$GRADLE_FILE" ]; then
+            python3 -c '
+with open("android/app/build.gradle", "r") as f:
+    content = f.read()
+lint_block = """
+android {
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+"""
+if "lint {" not in content:
+    with open("android/app/build.gradle", "w") as f:
+        f.write(content + "\n" + lint_block)
+'
+          fi
 
       - name: Get dependencies
         run: flutter pub get

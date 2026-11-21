@@ -16,7 +16,7 @@ Future<void> main() async {
   try {
     cameras = await availableCameras();
   } catch (e) {
-    debugPrint('Error kamera: $e');
+    debugPrint('Error kamera awal: $e');
   }
   runApp(const TimestampByPutraApp());
 }
@@ -60,18 +60,18 @@ class _CameraScreenState extends State<CameraScreen>
   CameraLensDirection _currentLens = CameraLensDirection.back;
   bool _flashEnabled = false;
   bool _screenFlashActive = false;
+  String? _cameraErrorMessage;
+  bool _isInitializingCamera = false;
 
   PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
   ImageQualityPreset _qualityPreset = ImageQualityPreset.p720;
 
-  // Timer foto (0 = nonaktif, 3 / 5 / 10 detik)
   int _timerSeconds = 0;
   int? _countdownRemaining;
   Timer? _countdownTimer;
 
   bool _isSaving = false;
 
-  // Status aktif tiap komponen di laci Sunting tanda air
   bool _showLogo = false;
   String? _logoFilePath;
 
@@ -126,7 +126,7 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initCameraByDirection(CameraLensDirection.back);
+    _initCameraByDirection(CameraLensDirection.back, refreshList: true);
     _getLocation();
     _startClockTimer();
   }
@@ -148,11 +148,14 @@ class _CameraScreenState extends State<CameraScreen>
           _systemNow = DateTime.now();
         });
       }
-      _initCameraByDirection(CameraLensDirection.back);
+      _initCameraByDirection(CameraLensDirection.back, refreshList: false);
     } else if (state == AppLifecycleState.resumed) {
       setState(() {
         _systemNow = DateTime.now();
       });
+      if (_controller == null || !_controller!.value.isInitialized) {
+        _initCameraByDirection(_currentLens, refreshList: true);
+      }
     }
   }
 
@@ -453,53 +456,91 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _initCameraByDirection(CameraLensDirection targetDir) async {
-    if (cameras.isEmpty) return;
-
-    int foundIndex = cameras.indexWhere((c) => c.lensDirection == targetDir);
-    if (foundIndex == -1) {
-      foundIndex = 0;
+  Future<void> _initCameraByDirection(
+    CameraLensDirection targetDir, {
+    bool refreshList = false,
+  }) async {
+    if (_isInitializingCamera) return;
+    if (mounted) {
+      setState(() {
+        _isInitializingCamera = true;
+        _cameraErrorMessage = null;
+      });
     }
 
-    final oldController = _controller;
-    final newController = CameraController(
-      cameras[foundIndex],
-      _getCameraResolutionPreset(),
-      enableAudio: false,
-    );
-
     try {
-      await newController.initialize();
+      if (refreshList || cameras.isEmpty) {
+        cameras = await availableCameras().timeout(const Duration(seconds: 8));
+      }
+
+      if (cameras.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _isInitializingCamera = false;
+            _cameraErrorMessage =
+                'Kamera tidak terdeteksi atau izin kamera belum diberikan.';
+          });
+        }
+        return;
+      }
+
+      int foundIndex = cameras.indexWhere((c) => c.lensDirection == targetDir);
+      if (foundIndex == -1) {
+        foundIndex = 0;
+      }
+
+      final oldController = _controller;
+      final newController = CameraController(
+        cameras[foundIndex],
+        _getCameraResolutionPreset(),
+        enableAudio: false,
+      );
+
+      await newController.initialize().timeout(const Duration(seconds: 10));
+
       if (!mounted) {
         await newController.dispose();
         return;
       }
+
       setState(() {
         _cameraIndex = foundIndex;
         _currentLens = cameras[foundIndex].lensDirection;
+        _controller = newController;
         _screenFlashActive = false;
+        _isInitializingCamera = false;
+        _cameraErrorMessage = null;
       });
+
       await oldController?.dispose();
       await _applyFlashHardwareState();
     } catch (e) {
       debugPrint('Gagal inisialisasi kamera: $e');
-      await newController.dispose();
+      if (mounted) {
+        setState(() {
+          _isInitializingCamera = false;
+          _cameraErrorMessage = 'Gagal membuka kamera: $e';
+        });
+      }
     }
   }
 
   Future<void> _setQualityPreset(ImageQualityPreset preset) async {
     if (_qualityPreset == preset) return;
     setState(() => _qualityPreset = preset);
-    await _initCameraByDirection(_currentLens);
+    await _initCameraByDirection(_currentLens, refreshList: false);
   }
 
   Future<void> _toggleFrontBackCamera() async {
-    if (cameras.length < 2) return;
+    if (cameras.length < 2) {
+      await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
+      return;
+    }
     final CameraLensDirection nextDir =
         _currentLens == CameraLensDirection.back
             ? CameraLensDirection.front
             : CameraLensDirection.back;
-    await _initCameraByDirection(nextDir);
+    await _initCameraByDirection(nextDir, refreshList: false);
   }
 
   Future<void> _toggleFlash() async {
@@ -623,7 +664,6 @@ class _CameraScreenState extends State<CameraScreen>
     final double offsetX = ((sw - cropW) / 2.0).floorToDouble();
     final double offsetY = ((sh - cropH) / 2.0).floorToDouble();
 
-    // Skala output berdasarkan kualitas yang dipilih (1080p, 720p, 480p, 360p)
     int outW = cropW;
     int outH = cropH;
     final int baseRef = min(cropW, cropH);
@@ -689,7 +729,6 @@ class _CameraScreenState extends State<CameraScreen>
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
 
-    // 1. Gambar foto yang sudah sesuai rasio & kualitas
     canvas.drawImage(srcImage, Offset.zero, Paint());
 
     final double baseScale = w / 1080.0;
@@ -1015,6 +1054,95 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  Widget _buildCameraViewport() {
+    final bool isReady =
+        _controller != null && _controller!.value.isInitialized;
+
+    if (isReady) {
+      return AspectRatio(
+        aspectRatio: _getAspectRatioValue(),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            CameraPreview(_controller!),
+            if (_countdownRemaining != null)
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 14,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.65),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Text(
+                    '$_countdownRemaining',
+                    style: const TextStyle(
+                      color: Color(0xFFFFD000),
+                      fontSize: 52,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              left: 0,
+              bottom: 0,
+              right: 0,
+              child: _buildStampPreviewOverlay(_getActiveDateTime()),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_cameraErrorMessage != null && !_isInitializingCamera) {
+      return Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _cameraErrorMessage!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () => _initCameraByDirection(
+                CameraLensDirection.back,
+                refreshList: true,
+              ),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Muat Ulang Kamera'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const CircularProgressIndicator(),
+        const SizedBox(height: 12),
+        const Text(
+          'Menyiapkan kamera...',
+          style: TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+        const SizedBox(height: 10),
+        TextButton(
+          onPressed: () => _initCameraByDirection(
+            CameraLensDirection.back,
+            refreshList: true,
+          ),
+          child: const Text('Coba Muat Ulang'),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTopBarAndDrawer() {
     final bool drawerOpen = _openDrawer == ActiveDrawer.topDrawer;
 
@@ -1202,13 +1330,6 @@ class _CameraScreenState extends State<CameraScreen>
                         ),
                       );
                     }).toList(),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _currentLens == CameraLensDirection.front
-                        ? 'Kamera depan aktif: kilat menyalakan layar putih.'
-                        : 'Kamera belakang aktif: kilat menyalakan lampu kamera belakang.',
-                    style: const TextStyle(fontSize: 11, color: Colors.white60),
                   ),
                 ],
               ),
@@ -1653,44 +1774,7 @@ class _CameraScreenState extends State<CameraScreen>
                 _buildTopBarAndDrawer(),
                 Expanded(
                   child: Center(
-                    child: _controller != null && _controller!.value.isInitialized
-                        ? AspectRatio(
-                            aspectRatio: _getAspectRatioValue(),
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                CameraPreview(_controller!),
-                                if (_countdownRemaining != null)
-                                  Center(
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 24,
-                                        vertical: 14,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.black.withOpacity(0.65),
-                                        borderRadius: BorderRadius.circular(14),
-                                      ),
-                                      child: Text(
-                                        '${_countdownRemaining}',
-                                        style: const TextStyle(
-                                          color: Color(0xFFFFD000),
-                                          fontSize: 52,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                Positioned(
-                                  left: 0,
-                                  bottom: 0,
-                                  right: 0,
-                                  child: _buildStampPreviewOverlay(activeDt),
-                                ),
-                              ],
-                            ),
-                          )
-                        : const CircularProgressIndicator(),
+                    child: _buildCameraViewport(),
                   ),
                 ),
                 _buildDrawerPanel(),

@@ -62,6 +62,8 @@ class _CameraScreenState extends State<CameraScreen>
   CameraLensDirection _currentLens = CameraLensDirection.back;
   bool _flashEnabled = false;
   bool _screenFlashActive = false;
+  bool _shutterBlinkActive = false;
+  Timer? _shutterBlinkTimer;
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
 
@@ -144,8 +146,11 @@ class _CameraScreenState extends State<CameraScreen>
       _cancelCountdown();
       _cooldownTimer?.cancel();
       _cooldownTimer = null;
+      _shutterBlinkTimer?.cancel();
+      _shutterBlinkTimer = null;
       _flashEnabled = false;
       _screenFlashActive = false;
+      _shutterBlinkActive = false;
       if (_isManualTime ||
           _openDrawer != ActiveDrawer.none ||
           _currentLens != CameraLensDirection.back ||
@@ -208,13 +213,14 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  Future<void> _wakeUpCameraFocusAndExposure() async {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) return;
-    try {
-      await ctrl.setFocusMode(FocusMode.auto);
-      await ctrl.setExposureMode(ExposureMode.auto);
-    } catch (_) {}
+  void _triggerShutterBlink({int milliseconds = 110}) {
+    _shutterBlinkTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _shutterBlinkActive = true);
+    _shutterBlinkTimer = Timer(Duration(milliseconds: milliseconds), () {
+      if (!mounted) return;
+      setState(() => _shutterBlinkActive = false);
+    });
   }
 
   int _normalizeTimer(int sec) {
@@ -684,34 +690,24 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<Uint8List> _uiImageToJpgBytes(
-    ui.Image uiImg, {
-    int quality = 90,
+  Future<Uint8List> _buildCroppedRawJpgBytes({
+    required String rawPhotoPath,
+    required PhotoAspectRatio ratio,
+    required int qualityHeight,
   }) async {
-    final byteData = await uiImg.toByteData(format: ui.ImageByteFormat.rawRgba);
-    if (byteData == null || byteData.lengthInBytes == 0) {
-      throw Exception('Gagal membaca piksel gambar');
+    final rawFile = File(rawPhotoPath);
+    if (!await rawFile.exists() || await rawFile.length() == 0) {
+      throw Exception('Berkas hasil kamera kosong');
     }
-    final img.Image converted = img.Image.fromBytes(
-      width: uiImg.width,
-      height: uiImg.height,
-      bytes: byteData.buffer,
-      numChannels: 4,
-      order: img.ChannelOrder.rgba,
-    );
-    return Uint8List.fromList(img.encodeJpg(converted, quality: quality));
-  }
+    final bytes = await rawFile.readAsBytes();
+    final img.Image? decoded = img.decodeImage(bytes);
+    if (decoded == null || decoded.width <= 16 || decoded.height <= 16) {
+      throw Exception('Gagal mendekode frame kamera');
+    }
 
-  Future<ui.Image> _cropAndScaleImageAsync(
-    ui.Image src,
-    PhotoAspectRatio ratio,
-    int targetShortEdgeOrHeight,
-  ) async {
-    final int sw = src.width;
-    final int sh = src.height;
-    if (sw <= 16 || sh <= 16) {
-      throw Exception('Frame kamera tidak valid (${sw}x$sh)');
-    }
+    final img.Image oriented = img.bakeOrientation(decoded);
+    final int sw = oriented.width;
+    final int sh = oriented.height;
 
     double targetRatio;
     if (ratio == PhotoAspectRatio.ratio1x1) {
@@ -737,80 +733,44 @@ class _CameraScreenState extends State<CameraScreen>
     cropW = max(1, min(sw, cropW));
     cropH = max(1, min(sh, cropH));
 
-    final double offsetX = ((sw - cropW) / 2.0).floorToDouble();
-    final double offsetY = ((sh - cropH) / 2.0).floorToDouble();
+    final int offsetX = ((sw - cropW) / 2.0).floor();
+    final int offsetY = ((sh - cropH) / 2.0).floor();
 
-    int outW = cropW;
-    int outH = cropH;
-    final int baseRef = min(cropW, cropH);
-    if (baseRef > 0 &&
-        targetShortEdgeOrHeight > 0 &&
-        baseRef > targetShortEdgeOrHeight) {
-      final double scaleFactor = targetShortEdgeOrHeight / baseRef;
-      outW = max(1, (cropW * scaleFactor).round());
-      outH = max(1, (cropH * scaleFactor).round());
+    img.Image cropped = img.copyCrop(
+      oriented,
+      x: offsetX,
+      y: offsetY,
+      width: cropW,
+      height: cropH,
+    );
+
+    final int baseRef = min(cropped.width, cropped.height);
+    if (baseRef > 0 && qualityHeight > 0 && baseRef > qualityHeight) {
+      final double scaleFactor = qualityHeight / baseRef;
+      final int outW = max(1, (cropped.width * scaleFactor).round());
+      final int outH = max(1, (cropped.height * scaleFactor).round());
+      cropped = img.copyResize(
+        cropped,
+        width: outW,
+        height: outH,
+        interpolation: img.Interpolation.linear,
+      );
     }
 
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(
-      recorder,
-      Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
-    );
-    canvas.drawImageRect(
-      src,
-      Rect.fromLTWH(offsetX, offsetY, cropW.toDouble(), cropH.toDouble()),
-      Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
-      Paint()..filterQuality = FilterQuality.medium,
-    );
-    final picture = recorder.endRecording();
-    return picture.toImage(outW, outH);
+    return Uint8List.fromList(img.encodeJpg(cropped, quality: 90));
   }
 
-  Future<Uint8List> _buildCroppedRawJpgBytes({
-    required String rawPhotoPath,
-    required PhotoAspectRatio ratio,
-    required int qualityHeight,
-  }) async {
-    final rawFile = File(rawPhotoPath);
-    if (!await rawFile.exists() || await rawFile.length() == 0) {
-      throw Exception('Berkas hasil kamera kosong');
-    }
-    final bytes = await rawFile.readAsBytes();
-    final codec = await ui.instantiateImageCodec(bytes);
-    final frame = await codec.getNextFrame();
-    final ui.Image srcImage = frame.image;
-    final ui.Image processed =
-        await _cropAndScaleImageAsync(srcImage, ratio, qualityHeight);
-
-    final Uint8List outBytes = await _uiImageToJpgBytes(processed, quality: 90);
-
-    if (!identical(processed, srcImage)) {
-      processed.dispose();
-    }
-    srcImage.dispose();
-
-    if (outBytes.isEmpty) {
-      throw Exception('Gagal mengodekan gambar JPEG mentah');
-    }
-    return outBytes;
-  }
-
-  Future<Uint8List> _buildStampedJpgBytesFromRawBytes({
-    required Uint8List cleanRawJpgBytes,
+  Future<ui.Image> _renderStampOverlayImage({
+    required int targetW,
+    required int targetH,
     required DateTime activeDt,
     required double sizeMultiplier,
   }) async {
-    final codec = await ui.instantiateImageCodec(cleanRawJpgBytes);
-    final frame = await codec.getNextFrame();
-    final ui.Image srcImage = frame.image;
-
-    final double w = srcImage.width.toDouble();
-    final double h = srcImage.height.toDouble();
+    final double w = targetW.toDouble();
+    final double h = targetH.toDouble();
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
-
-    canvas.drawImage(srcImage, Offset.zero, Paint());
 
     final double baseScale = w / 1080.0;
     final double s = baseScale * sizeMultiplier;
@@ -1003,19 +963,42 @@ class _CameraScreenState extends State<CameraScreen>
       detailsPainter.paint(canvas, Offset(padLeft, addressY));
     }
 
-    final ui.Image finalImage = await recorder
-        .endRecording()
-        .toImage(srcImage.width, srcImage.height);
-    final Uint8List outBytes = await _uiImageToJpgBytes(finalImage, quality: 90);
+    return recorder.endRecording().toImage(targetW, targetH);
+  }
 
-    srcImage.dispose();
-    finalImage.dispose();
-
-    if (outBytes.isEmpty) {
-      throw Exception('Gagal mengodekan gambar JPEG ber-stempel');
+  Future<Uint8List> _buildStampedJpgBytesFromRawBytes({
+    required Uint8List cleanRawJpgBytes,
+    required DateTime activeDt,
+    required double sizeMultiplier,
+  }) async {
+    final img.Image? baseImg = img.decodeJpg(cleanRawJpgBytes);
+    if (baseImg == null) {
+      throw Exception('Gagal mendekode JPEG mentah');
     }
 
-    return outBytes;
+    final ui.Image overlayUi = await _renderStampOverlayImage(
+      targetW: baseImg.width,
+      targetH: baseImg.height,
+      activeDt: activeDt,
+      sizeMultiplier: sizeMultiplier,
+    );
+
+    final byteData =
+        await overlayUi.toByteData(format: ui.ImageByteFormat.rawRgba);
+    overlayUi.dispose();
+
+    if (byteData != null && byteData.lengthInBytes > 0) {
+      final img.Image overlayImg = img.Image.fromBytes(
+        width: baseImg.width,
+        height: baseImg.height,
+        bytes: byteData.buffer,
+        numChannels: 4,
+        order: img.ChannelOrder.rgba,
+      );
+      img.compositeImage(baseImg, overlayImg);
+    }
+
+    return Uint8List.fromList(img.encodeJpg(baseImg, quality: 90));
   }
 
   Future<void> _onShutterPressed() async {
@@ -1050,9 +1033,6 @@ class _CameraScreenState extends State<CameraScreen>
       } else {
         final int nextVal = current - 1;
         setState(() => _countdownRemaining = nextVal);
-        if (nextVal == 1) {
-          unawaited(_wakeUpCameraFocusAndExposure());
-        }
       }
     });
   }
@@ -1085,6 +1065,7 @@ class _CameraScreenState extends State<CameraScreen>
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
 
+      _triggerShutterBlink(milliseconds: 110);
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
@@ -1897,6 +1878,7 @@ class _CameraScreenState extends State<CameraScreen>
     _clockTimer?.cancel();
     _countdownTimer?.cancel();
     _cooldownTimer?.cancel();
+    _shutterBlinkTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }
@@ -1922,6 +1904,14 @@ class _CameraScreenState extends State<CameraScreen>
                 _buildBottomBar(),
               ],
             ),
+            if (_shutterBlinkActive)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(
+                    color: Colors.black.withOpacity(0.55),
+                  ),
+                ),
+              ),
             if (_screenFlashActive)
               Positioned.fill(
                 child: IgnorePointer(

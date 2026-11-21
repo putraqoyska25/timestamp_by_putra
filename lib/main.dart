@@ -1033,6 +1033,8 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
+    final CameraLensDirection lensUsed = _currentLens;
+
     setState(() {
       _isSaving = true;
       _openDrawer = ActiveDrawer.none;
@@ -1058,14 +1060,12 @@ class _CameraScreenState extends State<CameraScreen>
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
-      // 1. Buat byte PNG polos terpisah terlebih dahulu
       final Uint8List cleanRawPngBytes = await _buildCroppedRawPngBytes(
         rawPhotoPath: cameraRawPath,
         ratio: _aspectRatio,
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      // 2. Buat byte PNG ber-stempel dari salinan byte polos
       final Uint8List stampedPngBytes = await _buildStampedPngBytesFromRawBytes(
         cleanRawPngBytes: cleanRawPngBytes,
         activeDt: activeDt,
@@ -1094,7 +1094,7 @@ class _CameraScreenState extends State<CameraScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Mode $timerText: $savedCount foto tersimpan (1 polos + 1 stempel • ${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+              'Mode $timerText: $savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
             ),
             backgroundColor: Colors.green,
           ),
@@ -1122,6 +1122,11 @@ class _CameraScreenState extends State<CameraScreen>
           _isSaving = false;
           _screenFlashActive = false;
         });
+      }
+      // Soft-reset CameraController otomatis setelah jepret pada 0s, 3s, maupun 5s
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (mounted && !_isInitializingCamera) {
+        await _initCameraByDirection(lensUsed, refreshList: false);
       }
     }
   }

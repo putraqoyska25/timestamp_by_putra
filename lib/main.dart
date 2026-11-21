@@ -148,13 +148,23 @@ class _CameraScreenState extends State<CameraScreen>
           _systemNow = DateTime.now();
         });
       }
-      _initCameraByDirection(CameraLensDirection.back, refreshList: false);
+      _disposeControllerSafely();
     } else if (state == AppLifecycleState.resumed) {
       setState(() {
         _systemNow = DateTime.now();
       });
-      if (_controller == null || !_controller!.value.isInitialized) {
-        _initCameraByDirection(_currentLens, refreshList: true);
+      _initCameraByDirection(CameraLensDirection.back, refreshList: true);
+    }
+  }
+
+  Future<void> _disposeControllerSafely() async {
+    final prev = _controller;
+    _controller = null;
+    if (prev != null) {
+      try {
+        await prev.dispose();
+      } catch (e) {
+        debugPrint('Error dispose controller: $e');
       }
     }
   }
@@ -442,14 +452,15 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _applyFlashHardwareState() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
     try {
       if (_currentLens == CameraLensDirection.back) {
-        await _controller!.setFlashMode(
+        await ctrl.setFlashMode(
           _flashEnabled ? FlashMode.torch : FlashMode.off,
         );
       } else {
-        await _controller!.setFlashMode(FlashMode.off);
+        await ctrl.setFlashMode(FlashMode.off);
       }
     } catch (e) {
       debugPrint('Gagal mengatur flash hardware: $e');
@@ -468,6 +479,7 @@ class _CameraScreenState extends State<CameraScreen>
       });
     }
 
+    CameraController? newController;
     try {
       if (refreshList || cameras.isEmpty) {
         cameras = await availableCameras().timeout(const Duration(seconds: 8));
@@ -476,7 +488,6 @@ class _CameraScreenState extends State<CameraScreen>
       if (cameras.isEmpty) {
         if (mounted) {
           setState(() {
-            _isInitializingCamera = false;
             _cameraErrorMessage =
                 'Kamera tidak terdeteksi atau izin kamera belum diberikan.';
           });
@@ -489,8 +500,11 @@ class _CameraScreenState extends State<CameraScreen>
         foundIndex = 0;
       }
 
-      final oldController = _controller;
-      final newController = CameraController(
+      // Lepas controller lama terlebih dahulu agar hardware kamera tidak bentrok
+      await _disposeControllerSafely();
+      await Future.delayed(const Duration(milliseconds: 120));
+
+      newController = CameraController(
         cameras[foundIndex],
         _getCameraResolutionPreset(),
         enableAudio: false,
@@ -503,23 +517,31 @@ class _CameraScreenState extends State<CameraScreen>
         return;
       }
 
+      _controller = newController;
       setState(() {
         _cameraIndex = foundIndex;
         _currentLens = cameras[foundIndex].lensDirection;
-        _controller = newController;
         _screenFlashActive = false;
-        _isInitializingCamera = false;
         _cameraErrorMessage = null;
       });
 
-      await oldController?.dispose();
       await _applyFlashHardwareState();
     } catch (e) {
       debugPrint('Gagal inisialisasi kamera: $e');
+      if (newController != null) {
+        try {
+          await newController.dispose();
+        } catch (_) {}
+      }
+      if (mounted) {
+        setState(() {
+          _cameraErrorMessage = 'Gagal membuka kamera: $e';
+        });
+      }
+    } finally {
       if (mounted) {
         setState(() {
           _isInitializingCamera = false;
-          _cameraErrorMessage = 'Gagal membuka kamera: $e';
         });
       }
     }
@@ -532,6 +554,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _toggleFrontBackCamera() async {
+    if (_isInitializingCamera) return;
     if (cameras.length < 2) {
       await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
       return;
@@ -971,7 +994,8 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _executeTakePicture() async {
-    if (_controller == null || !_controller!.value.isInitialized || _isSaving) {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized || _isSaving) {
       return;
     }
 
@@ -996,7 +1020,7 @@ class _CameraScreenState extends State<CameraScreen>
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
 
-      final XFile photo = await _controller!.takePicture();
+      final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
       final Directory tempDir = await getTemporaryDirectory();
@@ -1055,8 +1079,10 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildCameraViewport() {
-    final bool isReady =
-        _controller != null && _controller!.value.isInitialized;
+    final ctrl = _controller;
+    final bool isReady = ctrl != null &&
+        ctrl.value.isInitialized &&
+        !_isInitializingCamera;
 
     if (isReady) {
       return AspectRatio(
@@ -1064,7 +1090,7 @@ class _CameraScreenState extends State<CameraScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            CameraPreview(_controller!),
+            CameraPreview(ctrl),
             if (_countdownRemaining != null)
               Center(
                 child: Container(
@@ -1128,16 +1154,16 @@ class _CameraScreenState extends State<CameraScreen>
         const CircularProgressIndicator(),
         const SizedBox(height: 12),
         const Text(
-          'Menyiapkan kamera...',
+          'Mengganti kamera...',
           style: TextStyle(color: Colors.white70, fontSize: 12),
         ),
         const SizedBox(height: 10),
         TextButton(
-          onPressed: () => _initCameraByDirection(
-            CameraLensDirection.back,
-            refreshList: true,
-          ),
-          child: const Text('Coba Muat Ulang'),
+          onPressed: () {
+            _isInitializingCamera = false;
+            _initCameraByDirection(CameraLensDirection.back, refreshList: true);
+          },
+          child: const Text('Reset Kamera'),
         ),
       ],
     );

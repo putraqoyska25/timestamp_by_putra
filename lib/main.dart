@@ -760,6 +760,7 @@ class _CameraScreenState extends State<CameraScreen>
     return Uint8List.fromList(img.encodeJpg(cropped, quality: 90));
   }
 
+  // Skala proporsional yang meniru ukuran relatif _buildStampPreviewOverlay di layar preview
   Future<ui.Image> _renderStampOverlayImage({
     required int targetW,
     required int targetH,
@@ -772,18 +773,19 @@ class _CameraScreenState extends State<CameraScreen>
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
 
-    final double baseScale = w / 1080.0;
-    final double s = baseScale * sizeMultiplier;
-    final double padLeft = 32.0 * baseScale;
-    final double padRight = 32.0 * baseScale;
-    final double padBottom = 38.0 * baseScale;
+    // Acuan lebar preview potret ~390 px agar proporsi teks & pembungkusan alamat sama seperti di aplikasi
+    final double refScale = w / 390.0;
+    final double s = refScale * sizeMultiplier;
+    final double padLeft = 14.0 * refScale;
+    final double padRight = 14.0 * refScale;
+    final double padBottom = 14.0 * refScale;
     final double maxTextWidth = w - padLeft - padRight;
 
     final List<Shadow> textShadows = [
       Shadow(
-        color: Colors.black.withOpacity(0.85),
-        offset: Offset(0, 2.0 * baseScale),
-        blurRadius: 6.0 * baseScale,
+        color: Colors.black87,
+        offset: Offset(0, 1.5 * refScale),
+        blurRadius: 4.0 * refScale,
       ),
     ];
 
@@ -798,8 +800,8 @@ class _CameraScreenState extends State<CameraScreen>
       }
     }
 
-    final double logoSize = logoImg != null ? (86.0 * s) : 0.0;
-    final double logoGap = logoImg != null ? (14.0 * s) : 0.0;
+    final double logoSize = logoImg != null ? (44.0 * s) : 0.0;
+    final double logoGap = logoImg != null ? (10.0 * s) : 0.0;
 
     TextPainter? jamPainter;
     TextPainter? tanggalPainter;
@@ -812,9 +814,9 @@ class _CameraScreenState extends State<CameraScreen>
           text: _formatJamMenit(activeDt),
           style: TextStyle(
             color: Colors.white,
-            fontSize: 66.0 * s,
+            fontSize: 36.0 * s,
             fontWeight: FontWeight.w700,
-            letterSpacing: -1.0 * s,
+            height: 1.0,
             shadows: textShadows,
           ),
         ),
@@ -823,8 +825,8 @@ class _CameraScreenState extends State<CameraScreen>
       )..layout();
 
       final double rightColMaxWidth = max(
-        120.0 * baseScale,
-        maxTextWidth - logoSize - logoGap - jamPainter.width - (34.0 * s),
+        80.0 * refScale,
+        maxTextWidth - logoSize - logoGap - jamPainter.width - (24.0 * s),
       );
 
       tanggalPainter = TextPainter(
@@ -832,7 +834,7 @@ class _CameraScreenState extends State<CameraScreen>
           text: _formatTanggalLengkap(activeDt),
           style: TextStyle(
             color: Colors.white,
-            fontSize: 28.0 * s,
+            fontSize: 15.0 * s,
             fontWeight: FontWeight.w600,
             shadows: textShadows,
           ),
@@ -847,7 +849,7 @@ class _CameraScreenState extends State<CameraScreen>
           text: _formatHari(activeDt),
           style: TextStyle(
             color: Colors.white,
-            fontSize: 26.0 * s,
+            fontSize: 14.0 * s,
             fontWeight: FontWeight.w400,
             shadows: textShadows,
           ),
@@ -860,7 +862,7 @@ class _CameraScreenState extends State<CameraScreen>
         logoSize,
         max(
           jamPainter.height,
-          tanggalPainter.height + (4.0 * s) + hariPainter.height,
+          tanggalPainter.height + (2.0 * s) + hariPainter.height,
         ),
       );
     } else if (logoImg != null) {
@@ -877,7 +879,7 @@ class _CameraScreenState extends State<CameraScreen>
           text: detailsCombined,
           style: TextStyle(
             color: Colors.white,
-            fontSize: 26.0 * s,
+            fontSize: 13.5 * s,
             fontWeight: FontWeight.w400,
             height: 1.25,
             shadows: textShadows,
@@ -890,13 +892,13 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     final double gapBelowHeader =
-        (topBlockHeight > 0 && detailsPainter != null) ? (12.0 * s) : 0.0;
+        (topBlockHeight > 0 && detailsPainter != null) ? (8.0 * s) : 0.0;
     final double totalStampHeight =
         topBlockHeight + gapBelowHeader + (detailsPainter?.height ?? 0.0);
     final double stampTopY = h - padBottom - totalStampHeight;
 
     if (totalStampHeight > 0) {
-      final double gradTop = max(0.0, stampTopY - (48.0 * baseScale));
+      final double gradTop = max(0.0, stampTopY - (28.0 * refScale));
       final gradPaint = Paint()
         ..shader = ui.Gradient.linear(
           Offset(0, gradTop),
@@ -935,26 +937,26 @@ class _CameraScreenState extends State<CameraScreen>
         Offset(curX, stampTopY + ((topBlockHeight - jamPainter.height) / 2)),
       );
 
-      final double dividerX = curX + jamPainter.width + (15.0 * s);
-      final double dividerHeight = jamPainter.height * 0.88;
+      final double dividerX = curX + jamPainter.width + (10.0 * s);
+      final double dividerHeight = 36.0 * s;
       final double dividerTopY =
           stampTopY + ((topBlockHeight - dividerHeight) / 2);
 
       canvas.drawRect(
-        Rect.fromLTWH(dividerX, dividerTopY, 3.5 * s, dividerHeight),
+        Rect.fromLTWH(dividerX, dividerTopY, 2.5 * s, dividerHeight),
         Paint()..color = const Color(0xFFFFD000),
       );
 
-      final double rightColX = dividerX + (15.0 * s);
+      final double rightColX = dividerX + (10.0 * s);
       final double rightColHeight =
-          tanggalPainter.height + (4.0 * s) + hariPainter.height;
+          tanggalPainter.height + (2.0 * s) + hariPainter.height;
       final double rightColTopY =
           stampTopY + ((topBlockHeight - rightColHeight) / 2);
 
       tanggalPainter.paint(canvas, Offset(rightColX, rightColTopY));
       hariPainter.paint(
         canvas,
-        Offset(rightColX, rightColTopY + tanggalPainter.height + (4.0 * s)),
+        Offset(rightColX, rightColTopY + tanggalPainter.height + (2.0 * s)),
       );
     }
 
@@ -1152,7 +1154,8 @@ class _CameraScreenState extends State<CameraScreen>
         sourceH = min(previewSize.width, previewSize.height);
       }
     } else {
-      final double ar = ctrl.value.aspectRatio > 0 ? ctrl.value.aspectRatio : (4 / 3);
+      final double ar =
+          ctrl.value.aspectRatio > 0 ? ctrl.value.aspectRatio : (4 / 3);
       if (isPortrait) {
         sourceW = 300;
         sourceH = 300 * ar;

@@ -1136,6 +1136,44 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  Widget _buildProportionalPreview(CameraController ctrl) {
+    final Size? previewSize = ctrl.value.previewSize;
+    final bool isPortrait =
+        MediaQuery.of(context).orientation == Orientation.portrait;
+
+    double sourceW = 4;
+    double sourceH = 3;
+    if (previewSize != null && previewSize.width > 0 && previewSize.height > 0) {
+      if (isPortrait) {
+        sourceW = min(previewSize.width, previewSize.height);
+        sourceH = max(previewSize.width, previewSize.height);
+      } else {
+        sourceW = max(previewSize.width, previewSize.height);
+        sourceH = min(previewSize.width, previewSize.height);
+      }
+    } else {
+      final double ar = ctrl.value.aspectRatio > 0 ? ctrl.value.aspectRatio : (4 / 3);
+      if (isPortrait) {
+        sourceW = 300;
+        sourceH = 300 * ar;
+      } else {
+        sourceW = 300 * ar;
+        sourceH = 300;
+      }
+    }
+
+    return ClipRect(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: sourceW,
+          height: sourceH,
+          child: CameraPreview(ctrl),
+        ),
+      ),
+    );
+  }
+
   Widget _buildCameraViewport() {
     final ctrl = _controller;
     final bool isReady = ctrl != null &&
@@ -1148,7 +1186,7 @@ class _CameraScreenState extends State<CameraScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            CameraPreview(ctrl),
+            _buildProportionalPreview(ctrl),
             if (_countdownRemaining != null)
               Center(
                 child: Container(

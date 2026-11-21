@@ -35,21 +35,15 @@ jobs:
 
           GRADLE_FILE="android/app/build.gradle"
           if [ -f "$GRADLE_FILE" ]; then
-            python3 -c '
-with open("android/app/build.gradle", "r") as f:
-    content = f.read()
-lint_block = """
+            cat << 'EOF' >> "$GRADLE_FILE"
+
 android {
     lint {
         checkReleaseBuilds false
         abortOnError false
     }
 }
-"""
-if "lint {" not in content:
-    with open("android/app/build.gradle", "w") as f:
-        f.write(content + "\n" + lint_block)
-'
+EOF
           fi
 
       - name: Get dependencies

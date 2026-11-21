@@ -1706,7 +1706,7 @@ class _CameraScreenState extends State<CameraScreen>
                   ? _companyText
                   : 'Ketuk untuk mengedit',
               value: _showCompany,
-              onChanged: (val) => setState(() => _showCompany = val),
+              onChanged: (val) => setState(() => _companyText = val),
               onTapContent: () => _showEditTextDialog(
                 title: 'Edit Perusahaan',
                 hint: 'Nama instansi / perusahaan...',
@@ -1722,7 +1722,7 @@ class _CameraScreenState extends State<CameraScreen>
                   ? _personNameText
                   : 'Ketuk untuk mengedit',
               value: _showPersonName,
-              onChanged: (val) => setState(() => _showPersonName = val),
+              onChanged: (val) => setState(() => _personNameText = val),
               onTapContent: () => _showEditTextDialog(
                 title: 'Edit Nama',
                 hint: 'Nama petugas / pengguna...',

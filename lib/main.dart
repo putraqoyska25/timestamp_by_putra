@@ -7,6 +7,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -73,6 +74,8 @@ class _CameraScreenState extends State<CameraScreen>
   Timer? _countdownTimer;
 
   bool _isSaving = false;
+  bool _isCoolingDown = false;
+  Timer? _cooldownTimer;
 
   bool _showLogo = false;
   String? _logoFilePath;
@@ -139,14 +142,18 @@ class _CameraScreenState extends State<CameraScreen>
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
       _cancelCountdown();
+      _cooldownTimer?.cancel();
+      _cooldownTimer = null;
       _flashEnabled = false;
       _screenFlashActive = false;
       if (_isManualTime ||
           _openDrawer != ActiveDrawer.none ||
-          _currentLens != CameraLensDirection.back) {
+          _currentLens != CameraLensDirection.back ||
+          _isCoolingDown) {
         setState(() {
           _isManualTime = false;
           _openDrawer = ActiveDrawer.none;
+          _isCoolingDown = false;
           _systemNow = DateTime.now();
         });
       }
@@ -189,6 +196,16 @@ class _CameraScreenState extends State<CameraScreen>
     if (_countdownRemaining != null && mounted) {
       setState(() => _countdownRemaining = null);
     }
+  }
+
+  void _startPostCaptureCooldown({int milliseconds = 600}) {
+    _cooldownTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _isCoolingDown = true);
+    _cooldownTimer = Timer(Duration(milliseconds: milliseconds), () {
+      if (!mounted) return;
+      setState(() => _isCoolingDown = false);
+    });
   }
 
   Future<void> _wakeUpCameraFocusAndExposure() async {
@@ -570,7 +587,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _toggleFrontBackCamera() async {
-    if (_isInitializingCamera || _isSaving) return;
+    if (_isInitializingCamera || _isSaving || _isCoolingDown) return;
     if (cameras.length < 2) {
       await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
       return;
@@ -667,6 +684,24 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  Future<Uint8List> _uiImageToJpgBytes(
+    ui.Image uiImg, {
+    int quality = 90,
+  }) async {
+    final byteData = await uiImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      throw Exception('Gagal membaca piksel gambar');
+    }
+    final img.Image converted = img.Image.fromBytes(
+      width: uiImg.width,
+      height: uiImg.height,
+      bytes: byteData.buffer,
+      numChannels: 4,
+      order: img.ChannelOrder.rgba,
+    );
+    return Uint8List.fromList(img.encodeJpg(converted, quality: quality));
+  }
+
   Future<ui.Image> _cropAndScaleImageAsync(
     ui.Image src,
     PhotoAspectRatio ratio,
@@ -731,7 +766,7 @@ class _CameraScreenState extends State<CameraScreen>
     return picture.toImage(outW, outH);
   }
 
-  Future<Uint8List> _buildCroppedRawPngBytes({
+  Future<Uint8List> _buildCroppedRawJpgBytes({
     required String rawPhotoPath,
     required PhotoAspectRatio ratio,
     required int qualityHeight,
@@ -747,29 +782,25 @@ class _CameraScreenState extends State<CameraScreen>
     final ui.Image processed =
         await _cropAndScaleImageAsync(srcImage, ratio, qualityHeight);
 
-    final byteData = await processed.toByteData(format: ui.ImageByteFormat.png);
-    if (byteData == null || byteData.lengthInBytes == 0) {
-      if (!identical(processed, srcImage)) {
-        processed.dispose();
-      }
-      srcImage.dispose();
-      throw Exception('Gagal mengodekan gambar mentah');
-    }
+    final Uint8List outBytes = await _uiImageToJpgBytes(processed, quality: 90);
 
-    final Uint8List outBytes = Uint8List.fromList(byteData.buffer.asUint8List());
     if (!identical(processed, srcImage)) {
       processed.dispose();
     }
     srcImage.dispose();
+
+    if (outBytes.isEmpty) {
+      throw Exception('Gagal mengodekan gambar JPEG mentah');
+    }
     return outBytes;
   }
 
-  Future<Uint8List> _buildStampedPngBytesFromRawBytes({
-    required Uint8List cleanRawPngBytes,
+  Future<Uint8List> _buildStampedJpgBytesFromRawBytes({
+    required Uint8List cleanRawJpgBytes,
     required DateTime activeDt,
     required double sizeMultiplier,
   }) async {
-    final codec = await ui.instantiateImageCodec(cleanRawPngBytes);
+    final codec = await ui.instantiateImageCodec(cleanRawJpgBytes);
     final frame = await codec.getNextFrame();
     final ui.Image srcImage = frame.image;
 
@@ -975,21 +1006,20 @@ class _CameraScreenState extends State<CameraScreen>
     final ui.Image finalImage = await recorder
         .endRecording()
         .toImage(srcImage.width, srcImage.height);
-    final byteData =
-        await finalImage.toByteData(format: ui.ImageByteFormat.png);
+    final Uint8List outBytes = await _uiImageToJpgBytes(finalImage, quality: 90);
 
     srcImage.dispose();
     finalImage.dispose();
 
-    if (byteData == null || byteData.lengthInBytes == 0) {
-      throw Exception('Gagal mengodekan gambar ber-stempel');
+    if (outBytes.isEmpty) {
+      throw Exception('Gagal mengodekan gambar JPEG ber-stempel');
     }
 
-    return Uint8List.fromList(byteData.buffer.asUint8List());
+    return outBytes;
   }
 
   Future<void> _onShutterPressed() async {
-    if (_isSaving || _isInitializingCamera) return;
+    if (_isSaving || _isCoolingDown || _isInitializingCamera) return;
     if (_countdownRemaining != null) {
       _cancelCountdown();
       return;
@@ -1033,8 +1063,6 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    final CameraLensDirection lensUsed = _currentLens;
-
     setState(() {
       _isSaving = true;
       _openDrawer = ActiveDrawer.none;
@@ -1060,31 +1088,31 @@ class _CameraScreenState extends State<CameraScreen>
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
-      final Uint8List cleanRawPngBytes = await _buildCroppedRawPngBytes(
+      final Uint8List cleanRawJpgBytes = await _buildCroppedRawJpgBytes(
         rawPhotoPath: cameraRawPath,
         ratio: _aspectRatio,
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      final Uint8List stampedPngBytes = await _buildStampedPngBytesFromRawBytes(
-        cleanRawPngBytes: cleanRawPngBytes,
+      final Uint8List stampedJpgBytes = await _buildStampedJpgBytesFromRawBytes(
+        cleanRawJpgBytes: cleanRawJpgBytes,
         activeDt: activeDt,
         sizeMultiplier: _getUiSizeMultiplier(),
       );
 
       final Directory tempDir = await getTemporaryDirectory();
       tempRawPath =
-          '${tempDir.path}/${_buildTempFileName('clean_raw', uniqueId, 'png')}';
+          '${tempDir.path}/${_buildTempFileName('clean_raw', uniqueId, 'jpg')}';
       tempStampedPath =
-          '${tempDir.path}/${_buildTempFileName('with_stamp', uniqueId, 'png')}';
+          '${tempDir.path}/${_buildTempFileName('with_stamp', uniqueId, 'jpg')}';
 
-      await File(tempRawPath).writeAsBytes(cleanRawPngBytes, flush: true);
-      await File(tempStampedPath).writeAsBytes(stampedPngBytes, flush: true);
+      await File(tempRawPath).writeAsBytes(cleanRawJpgBytes, flush: true);
+      await File(tempStampedPath).writeAsBytes(stampedJpgBytes, flush: true);
 
       await Gal.putImage(tempRawPath);
       savedCount++;
 
-      await Future.delayed(const Duration(milliseconds: 300));
+      await Future.delayed(const Duration(milliseconds: 200));
 
       await Gal.putImage(tempStampedPath);
       savedCount++;
@@ -1094,7 +1122,7 @@ class _CameraScreenState extends State<CameraScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Mode $timerText: $savedCount foto tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+              'Mode $timerText: $savedCount foto JPG tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
             ),
             backgroundColor: Colors.green,
           ),
@@ -1122,11 +1150,7 @@ class _CameraScreenState extends State<CameraScreen>
           _isSaving = false;
           _screenFlashActive = false;
         });
-      }
-      // Soft-reset CameraController otomatis setelah jepret pada 0s, 3s, maupun 5s
-      await Future.delayed(const Duration(milliseconds: 300));
-      if (mounted && !_isInitializingCamera) {
-        await _initCameraByDirection(lensUsed, refreshList: false);
+        _startPostCaptureCooldown(milliseconds: 600);
       }
     }
   }
@@ -1162,6 +1186,43 @@ class _CameraScreenState extends State<CameraScreen>
                       fontSize: 52,
                       fontWeight: FontWeight.bold,
                     ),
+                  ),
+                ),
+              ),
+            if (_isSaving || _isCoolingDown)
+              Positioned(
+                top: 12,
+                right: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.72),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFFFFD000),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        _isSaving ? 'Memproses...' : 'Menyiapkan...',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -1719,6 +1780,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Widget _buildBottomBar() {
     final bool counting = _countdownRemaining != null;
+    final bool shutterLocked = _isSaving || _isCoolingDown;
 
     return Container(
       color: Colors.black,
@@ -1769,7 +1831,7 @@ class _CameraScreenState extends State<CameraScreen>
                 onTap: () => _toggleDrawer(ActiveDrawer.address),
               ),
               GestureDetector(
-                onTap: _isSaving ? null : _onShutterPressed,
+                onTap: shutterLocked ? null : _onShutterPressed,
                 child: Container(
                   width: 68,
                   height: 68,
@@ -1784,11 +1846,11 @@ class _CameraScreenState extends State<CameraScreen>
                   child: Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: _isSaving
+                      color: shutterLocked
                           ? Colors.grey
                           : (counting ? const Color(0xFFFFD000) : Colors.white),
                     ),
-                    child: _isSaving
+                    child: shutterLocked
                         ? const Padding(
                             padding: EdgeInsets.all(14),
                             child: CircularProgressIndicator(strokeWidth: 2.5),
@@ -1834,6 +1896,7 @@ class _CameraScreenState extends State<CameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     _clockTimer?.cancel();
     _countdownTimer?.cancel();
+    _cooldownTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }

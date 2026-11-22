@@ -152,6 +152,20 @@ class _StampRenderer {
     }
   }
 
+  static double aspectScaleFactor(int width, int height) {
+    if (width <= 0 || height <= 0) return 1.0;
+    final double ratio = width / height;
+    // 1:1 -> 1.0, 4:3 portrait (0.75) -> 0.75, 16:9 portrait (0.5625) -> 0.5625
+    // Dibuat proporsional terhadap aspek foto agar stamp di 1:1, 4:3, dan 16:9 serasi
+    if (ratio >= 0.95) {
+      return 0.92;
+    } else if (ratio >= 0.70) {
+      return 1.0;
+    } else {
+      return 0.86;
+    }
+  }
+
   static String formatJamMenit(DateTime dt) {
     final String hh = dt.hour.toString().padLeft(2, '0');
     final String mm = dt.minute.toString().padLeft(2, '0');
@@ -199,10 +213,11 @@ class _StampRenderer {
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
 
     final double refScale = w / 390.0;
-    final double s = refScale * sizeMultiplier(cfg.formSize);
+    final double ratioFactor = aspectScaleFactor(targetW, targetH);
+    final double s = refScale * sizeMultiplier(cfg.formSize) * ratioFactor;
     final double padLeft = 14.0 * refScale;
     final double padRight = 14.0 * refScale;
-    final double padBottom = 14.0 * refScale;
+    final double padBottom = 12.0 * refScale;
     final double maxTextWidth = w - padLeft - padRight;
 
     final List<Shadow> textShadows = [
@@ -324,14 +339,14 @@ class _StampRenderer {
     final double stampTopY = h - padBottom - totalStampHeight;
 
     if (totalStampHeight > 0) {
-      final double gradTop = max(0.0, stampTopY - (28.0 * refScale));
+      final double gradTop = max(0.0, stampTopY - (18.0 * refScale));
       final gradPaint = Paint()
         ..shader = ui.Gradient.linear(
           Offset(0, gradTop),
           Offset(0, h),
           [
             Colors.black.withOpacity(0.0),
-            Colors.black.withOpacity(0.45),
+            Colors.black.withOpacity(0.42),
           ],
         );
       canvas.drawRect(Rect.fromLTWH(0, gradTop, w, h - gradTop), gradPaint);
@@ -435,8 +450,14 @@ class _StampRenderer {
 Widget _buildStampOverlayWidget({
   required DateTime activeDt,
   required _WatermarkConfig cfg,
+  double? boxWidth,
+  double? boxHeight,
 }) {
-  final double mult = _StampRenderer.sizeMultiplier(cfg.formSize);
+  final double ratioFactor = (boxWidth != null && boxHeight != null)
+      ? _StampRenderer.aspectScaleFactor(boxWidth.round(), boxHeight.round())
+      : 1.0;
+  final double mult = _StampRenderer.sizeMultiplier(cfg.formSize) * ratioFactor;
+
   const List<Shadow> previewShadows = [
     Shadow(
       color: Colors.black87,
@@ -457,14 +478,14 @@ Widget _buildStampOverlayWidget({
 
   return IgnorePointer(
     child: Container(
-      padding: const EdgeInsets.fromLTRB(14, 28, 14, 12),
+      padding: const EdgeInsets.fromLTRB(14, 18, 14, 12),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
             Colors.black.withOpacity(0.0),
-            Colors.black.withOpacity(0.45),
+            Colors.black.withOpacity(0.42),
           ],
         ),
       ),
@@ -1694,81 +1715,95 @@ class _CameraScreenState extends State<CameraScreen>
         !_isInitializingCamera;
 
     if (isReady) {
-      return AspectRatio(
-        aspectRatio: _getAspectRatioValue(),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            _buildProportionalPreview(ctrl),
-            if (_countdownRemaining != null)
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 14,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.65),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Text(
-                    '$_countdownRemaining',
-                    style: const TextStyle(
-                      color: Color(0xFFFFD000),
-                      fontSize: 52,
-                      fontWeight: FontWeight.bold,
+      return LayoutBuilder(
+        builder: (context, outerBox) {
+          final double ar = _getAspectRatioValue();
+          double boxW = outerBox.maxWidth;
+          double boxH = boxW / ar;
+          if (outerBox.maxHeight.isFinite && boxH > outerBox.maxHeight) {
+            boxH = outerBox.maxHeight;
+            boxW = boxH * ar;
+          }
+          return SizedBox(
+            width: boxW,
+            height: boxH,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _buildProportionalPreview(ctrl),
+                if (_countdownRemaining != null)
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 14,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.65),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Text(
+                        '$_countdownRemaining',
+                        style: const TextStyle(
+                          color: Color(0xFFFFD000),
+                          fontSize: 52,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-            if (_isSaving || _isCoolingDown)
-              Positioned(
-                top: 12,
-                right: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.72),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Color(0xFFFFD000),
-                        ),
+                if (_isSaving || _isCoolingDown)
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
                       ),
-                      const SizedBox(width: 6),
-                      Text(
-                        _isSaving ? 'Memproses...' : 'Menyiapkan...',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.72),
+                        borderRadius: BorderRadius.circular(20),
                       ),
-                    ],
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFFFFD000),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _isSaving ? 'Memproses...' : 'Menyiapkan...',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  left: 0,
+                  bottom: 0,
+                  right: 0,
+                  child: _buildStampOverlayWidget(
+                    activeDt: _getActiveDateTime(),
+                    cfg: _currentWatermarkConfig(),
+                    boxWidth: boxW,
+                    boxHeight: boxH,
                   ),
                 ),
-              ),
-            Positioned(
-              left: 0,
-              bottom: 0,
-              right: 0,
-              child: _buildStampOverlayWidget(
-                activeDt: _getActiveDateTime(),
-                cfg: _currentWatermarkConfig(),
-              ),
+              ],
             ),
-          ],
-        ),
+          );
+        },
       );
     }
 
@@ -3030,6 +3065,7 @@ class _GalleryWatermarkEditorScreenState
   final ImagePicker _picker = ImagePicker();
   DateTime _nowClock = DateTime.now();
   Timer? _clockTimer;
+  bool _stampVisible = false;
   bool _editorDrawerOpen = false;
   bool _isSaving = false;
 
@@ -3037,6 +3073,7 @@ class _GalleryWatermarkEditorScreenState
   void initState() {
     super.initState();
     _cfg = widget.initialConfig;
+    _stampVisible = false;
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (!_cfg.isManualTime) {
@@ -3084,6 +3121,7 @@ class _GalleryWatermarkEditorScreenState
             showLogo: true,
           ),
         );
+        setState(() => _stampVisible = true);
       }
     } catch (e) {
       debugPrint('Gagal memilih logo di editor album: $e');
@@ -3122,6 +3160,7 @@ class _GalleryWatermarkEditorScreenState
         showTime: true,
       ),
     );
+    setState(() => _stampVisible = true);
   }
 
   Future<void> _editFieldDialog({
@@ -3160,6 +3199,7 @@ class _GalleryWatermarkEditorScreenState
 
     if (result != null && mounted) {
       applyText(result.trim());
+      setState(() => _stampVisible = true);
     }
   }
 
@@ -3215,75 +3255,10 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
-  Future<void> _showTemplateSheet() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1A1D24),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Pilih Templat Stempel',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 12),
-              ListTile(
-                leading: const Icon(Icons.schedule, color: Color(0xFFFFD000)),
-                title: const Text('Waktu + Alamat'),
-                subtitle: const Text('Tampilkan jam, tanggal, dan alamat'),
-                onTap: () {
-                  _updateCfg(
-                    _cfg.copyWith(
-                      showTime: true,
-                      showAddress: true,
-                    ),
-                  );
-                  Navigator.pop(ctx);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.public, color: Color(0xFF4EA8FF)),
-                title: const Text('Waktu + Alamat + Koordinat'),
-                subtitle: const Text('Sertakan titik koordinat GPS'),
-                onTap: () {
-                  _updateCfg(
-                    _cfg.copyWith(
-                      showTime: true,
-                      showAddress: true,
-                      showCoords: true,
-                    ),
-                  );
-                  Navigator.pop(ctx);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.access_time, color: Colors.white),
-                title: const Text('Hanya Waktu'),
-                subtitle: const Text('Hanya jam, tanggal, dan hari'),
-                onTap: () {
-                  _updateCfg(
-                    _cfg.copyWith(
-                      showTime: true,
-                      showAddress: false,
-                      showCoords: false,
-                    ),
-                  );
-                  Navigator.pop(ctx);
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  void _toggleStampFromTemplateButton() {
+    setState(() {
+      _stampVisible = !_stampVisible;
+    });
   }
 
   Future<void> _saveStampedPhotoToGallery() async {
@@ -3296,24 +3271,30 @@ class _GalleryWatermarkEditorScreenState
         throw Exception('File foto tidak ditemukan');
       }
       final Uint8List rawBytes = await widget.photoFile.readAsBytes();
-      final Uint8List stampedBytes = await _StampRenderer.buildStampedJpgBytes(
-        baseJpgBytes: rawBytes,
-        activeDt: _activeDateTime(),
-        cfg: _cfg,
-      );
+      final Uint8List outputBytes = _stampVisible
+          ? await _StampRenderer.buildStampedJpgBytes(
+              baseJpgBytes: rawBytes,
+              activeDt: _activeDateTime(),
+              cfg: _cfg,
+            )
+          : rawBytes;
 
       final Directory tempDir = await getTemporaryDirectory();
       tempOutPath =
           '${tempDir.path}/album_stamp_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      await File(tempOutPath).writeAsBytes(stampedBytes, flush: true);
+      await File(tempOutPath).writeAsBytes(outputBytes, flush: true);
 
       await Gal.putImage(tempOutPath);
       _LatestPhotosGridScreen.invalidateCache();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Foto bertanda air berhasil disimpan ke galeri'),
+        SnackBar(
+          content: Text(
+            _stampVisible
+                ? 'Foto bertanda air berhasil disimpan ke galeri'
+                : 'Foto berhasil disimpan ke galeri',
+          ),
           backgroundColor: Colors.green,
         ),
       );
@@ -3386,6 +3367,7 @@ class _GalleryWatermarkEditorScreenState
                   _pickLogo();
                 } else {
                   _updateCfg(_cfg.copyWith(showLogo: val));
+                  if (val) setState(() => _stampVisible = true);
                 }
               },
               onTapContent: _pickLogo,
@@ -3402,6 +3384,7 @@ class _GalleryWatermarkEditorScreenState
                     isManualTime: val ? _cfg.isManualTime : false,
                   ),
                 );
+                if (val) setState(() => _stampVisible = true);
               },
               onTapContent: _pickManualDateTime,
             ),
@@ -3412,7 +3395,10 @@ class _GalleryWatermarkEditorScreenState
                   ? _cfg.customAddress
                   : 'Ketuk untuk mengedit alamat',
               value: _cfg.showAddress,
-              onChanged: (val) => _updateCfg(_cfg.copyWith(showAddress: val)),
+              onChanged: (val) {
+                _updateCfg(_cfg.copyWith(showAddress: val));
+                if (val) setState(() => _stampVisible = true);
+              },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Alamat',
                 hint: 'Masukkan alamat lokasi...',
@@ -3427,7 +3413,10 @@ class _GalleryWatermarkEditorScreenState
               title: 'Koordinat',
               subtitle: _cfg.gpsCoordsText,
               value: _cfg.showCoords,
-              onChanged: (val) => _updateCfg(_cfg.copyWith(showCoords: val)),
+              onChanged: (val) {
+                _updateCfg(_cfg.copyWith(showCoords: val));
+                if (val) setState(() => _stampVisible = true);
+              },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Koordinat',
                 hint: 'Contoh: 3.695432°S, 128.181405°T',
@@ -3444,7 +3433,10 @@ class _GalleryWatermarkEditorScreenState
                   ? _cfg.companyText
                   : 'Ketuk untuk mengedit',
               value: _cfg.showCompany,
-              onChanged: (val) => _updateCfg(_cfg.copyWith(showCompany: val)),
+              onChanged: (val) {
+                _updateCfg(_cfg.copyWith(showCompany: val));
+                if (val) setState(() => _stampVisible = true);
+              },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Perusahaan',
                 hint: 'Nama instansi / perusahaan...',
@@ -3461,8 +3453,10 @@ class _GalleryWatermarkEditorScreenState
                   ? _cfg.personNameText
                   : 'Ketuk untuk mengedit',
               value: _cfg.showPersonName,
-              onChanged: (val) =>
-                  _updateCfg(_cfg.copyWith(showPersonName: val)),
+              onChanged: (val) {
+                _updateCfg(_cfg.copyWith(showPersonName: val));
+                if (val) setState(() => _stampVisible = true);
+              },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Nama',
                 hint: 'Nama petugas / pengguna...',
@@ -3573,29 +3567,36 @@ class _GalleryWatermarkEditorScreenState
           children: [
             Expanded(
               child: Center(
-                child: Stack(
-                  alignment: Alignment.bottomLeft,
-                  children: [
-                    Image.file(
-                      widget.photoFile,
-                      fit: BoxFit.contain,
-                      width: double.infinity,
-                      height: double.infinity,
-                      errorBuilder: (_, __, ___) => const Text(
-                        'Gagal memuat foto',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                    ),
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: _buildStampOverlayWidget(
-                        activeDt: _activeDateTime(),
-                        cfg: _cfg,
-                      ),
-                    ),
-                  ],
+                child: LayoutBuilder(
+                  builder: (context, imgBox) {
+                    return Stack(
+                      alignment: Alignment.bottomLeft,
+                      children: [
+                        Image.file(
+                          widget.photoFile,
+                          fit: BoxFit.contain,
+                          width: double.infinity,
+                          height: double.infinity,
+                          errorBuilder: (_, __, ___) => const Text(
+                            'Gagal memuat foto',
+                            style: TextStyle(color: Colors.white70),
+                          ),
+                        ),
+                        if (_stampVisible)
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: _buildStampOverlayWidget(
+                              activeDt: _activeDateTime(),
+                              cfg: _cfg,
+                              boxWidth: imgBox.maxWidth,
+                              boxHeight: imgBox.maxHeight,
+                            ),
+                          ),
+                      ],
+                    );
+                  },
                 ),
               ),
             ),
@@ -3608,16 +3609,27 @@ class _GalleryWatermarkEditorScreenState
                   Expanded(
                     child: OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white,
-                        side: const BorderSide(color: Colors.white24),
+                        foregroundColor:
+                            _stampVisible ? Colors.black : Colors.white,
+                        backgroundColor: _stampVisible
+                            ? const Color(0xFFFFD000)
+                            : Colors.transparent,
+                        side: BorderSide(
+                          color: _stampVisible
+                              ? const Color(0xFFFFD000)
+                              : Colors.white24,
+                        ),
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
                         ),
                       ),
-                      onPressed: _isSaving ? null : _showTemplateSheet,
-                      icon: const Icon(
-                        Icons.dashboard_customize_outlined,
+                      onPressed:
+                          _isSaving ? null : _toggleStampFromTemplateButton,
+                      icon: Icon(
+                        _stampVisible
+                            ? Icons.check_circle_outline
+                            : Icons.dashboard_customize_outlined,
                         size: 18,
                       ),
                       label: const Text('Templat'),

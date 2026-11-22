@@ -444,37 +444,11 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _openGalleryAlbumBrowser() async {
     if (!mounted) return;
-    try {
-      final List<XFile> pickedList = await _picker.pickMultiImage(
-        imageQuality: 90,
-      );
-      if (pickedList.isEmpty || !mounted) return;
-
-      final List<File> files = pickedList
-          .map((x) => File(x.path))
-          .where((f) => f.path.isNotEmpty)
-          .toList();
-      if (files.isEmpty || !mounted) return;
-
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => _FullPhotoViewerScreen(
-            files: files,
-            initialIndex: 0,
-          ),
-        ),
-      );
-    } catch (e) {
-      debugPrint('Gagal membuka galeri perangkat: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Gagal membuka galeri perangkat: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const _LatestPhotosGridScreen(),
+      ),
+    );
   }
 
   Future<void> _pickLogoImage() async {
@@ -1256,6 +1230,8 @@ class _CameraScreenState extends State<CameraScreen>
 
       await Gal.putImage(tempStampedPath);
       savedCount++;
+
+      _LatestPhotosGridScreen.invalidateCache();
 
       if (mounted) {
         final String timerText = usedTimer == 0 ? '0s' : '${usedTimer}s';
@@ -2233,6 +2209,320 @@ class _CameraScreenState extends State<CameraScreen>
   }
 }
 
+class _MediaEntry {
+  final File file;
+  final DateTime modified;
+
+  const _MediaEntry({
+    required this.file,
+    required this.modified,
+  });
+}
+
+class _LatestPhotosGridScreen extends StatefulWidget {
+  const _LatestPhotosGridScreen();
+
+  static List<_MediaEntry>? _cachedEntries;
+
+  static void invalidateCache() {
+    _cachedEntries = null;
+  }
+
+  @override
+  State<_LatestPhotosGridScreen> createState() => _LatestPhotosGridScreenState();
+}
+
+class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
+  static const int _maxFilesScan = 2500;
+  static const int _pageSize = 60;
+
+  late final ScrollController _scrollController;
+  bool _isLoading = true;
+  List<_MediaEntry> _entries = [];
+  int _visibleCount = 0;
+
+  static const Set<String> _imageExts = {
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.webp',
+    '.heic',
+    '.heif',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController()..addListener(_onScroll);
+    final cached = _LatestPhotosGridScreen._cachedEntries;
+    if (cached != null && cached.isNotEmpty) {
+      _entries = cached;
+      _visibleCount = min(_pageSize, _entries.length);
+      _isLoading = false;
+    } else {
+      _loadAllPhotos();
+    }
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final total = _entries.length;
+    if (_visibleCount >= total) return;
+
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 360) {
+      setState(() {
+        _visibleCount = min(total, _visibleCount + _pageSize);
+      });
+    }
+  }
+
+  bool _isImageFile(String path) {
+    final lower = path.toLowerCase();
+    for (final ext in _imageExts) {
+      if (lower.endsWith(ext)) return true;
+    }
+    return false;
+  }
+
+  Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
+    if (!forceRefresh &&
+        _LatestPhotosGridScreen._cachedEntries != null &&
+        _LatestPhotosGridScreen._cachedEntries!.isNotEmpty) {
+      if (mounted) {
+        setState(() {
+          _entries = _LatestPhotosGridScreen._cachedEntries!;
+          _visibleCount = min(_pageSize, _entries.length);
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    if (mounted) setState(() => _isLoading = true);
+
+    final List<_MediaEntry> allEntries = [];
+    final List<Directory> candidateDirs = [];
+
+    if (Platform.isAndroid) {
+      for (final p in [
+        '/storage/emulated/0/DCIM',
+        '/storage/emulated/0/Pictures',
+        '/storage/emulated/0/Download',
+      ]) {
+        final d = Directory(p);
+        if (await d.exists()) candidateDirs.add(d);
+      }
+    }
+
+    final Set<String> visitedPaths = {};
+
+    Future<void> scanDir(Directory dir, {int depth = 0}) async {
+      if (depth > 3 || allEntries.length >= _maxFilesScan) return;
+      try {
+        await for (final entity in dir.list(followLinks: false)) {
+          if (allEntries.length >= _maxFilesScan) break;
+          final path = entity.path;
+          if (visitedPaths.contains(path)) continue;
+          visitedPaths.add(path);
+
+          if (entity is Directory) {
+            final baseName = path.split(Platform.pathSeparator).last;
+            if (baseName.startsWith('.')) continue;
+            await scanDir(entity, depth: depth + 1);
+          } else if (entity is File && _isImageFile(path)) {
+            DateTime mod = DateTime.fromMillisecondsSinceEpoch(0);
+            try {
+              mod = entity.statSync().modified;
+            } catch (_) {}
+            allEntries.add(_MediaEntry(file: entity, modified: mod));
+          }
+        }
+      } catch (_) {}
+    }
+
+    for (final d in candidateDirs) {
+      await scanDir(d);
+    }
+
+    allEntries.sort((a, b) => b.modified.compareTo(a.modified));
+    _LatestPhotosGridScreen._cachedEntries = allEntries;
+
+    if (!mounted) return;
+    setState(() {
+      _entries = allEntries;
+      _visibleCount = min(_pageSize, _entries.length);
+      _isLoading = false;
+    });
+  }
+
+  String _formatSectionLabel(List<_MediaEntry> entries) {
+    if (entries.isEmpty) return 'Terbaru (0)';
+    final now = DateTime.now();
+    final todayCount = entries.where((e) {
+      return e.modified.year == now.year &&
+          e.modified.month == now.month &&
+          e.modified.day == now.day;
+    }).length;
+    if (todayCount > 0) {
+      return 'Hari ini ($todayCount) • Total ${entries.length}';
+    }
+    return 'Semua Foto (${entries.length})';
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _entries.length;
+    final visibleFiles =
+        _entries.take(_visibleCount).map((e) => e.file).toList();
+    final hasMore = _visibleCount < total;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text(
+          'Terbaru',
+          style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+        ),
+        actions: [
+          IconButton(
+            onPressed: () => _loadAllPhotos(forceRefresh: true),
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Muat Ulang Foto',
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : total == 0
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.photo_library_outlined,
+                          size: 48,
+                          color: Colors.white54,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Foto belum terbaca. Pastikan izin akses foto/media sudah diizinkan.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                        const SizedBox(height: 14),
+                        FilledButton(
+                          onPressed: () => _loadAllPhotos(forceRefresh: true),
+                          child: const Text('Muat Ulang'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : RefreshIndicator(
+                  onRefresh: () => _loadAllPhotos(forceRefresh: true),
+                  child: CustomScrollView(
+                    controller: _scrollController,
+                    slivers: [
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                          child: Text(
+                            _formatSectionLabel(_entries),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                      SliverPadding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        sliver: SliverGrid(
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 3,
+                            mainAxisSpacing: 3,
+                          ),
+                          delegate: SliverChildBuilderDelegate(
+                            (ctx, idx) {
+                              final file = visibleFiles[idx];
+                              return InkWell(
+                                onTap: () {
+                                  Navigator.of(ctx).push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => _FullPhotoViewerScreen(
+                                        files: visibleFiles,
+                                        initialIndex: idx,
+                                      ),
+                                    ),
+                                  );
+                                },
+                                child: Image.file(
+                                  file,
+                                  cacheWidth: 240,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) =>
+                                      const ColoredBox(
+                                    color: Color(0xFF1C2029),
+                                    child: Icon(
+                                      Icons.broken_image_outlined,
+                                      color: Colors.white54,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                            childCount: visibleFiles.length,
+                          ),
+                        ),
+                      ),
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          child: Center(
+                            child: hasMore
+                                ? TextButton.icon(
+                                    onPressed: () {
+                                      setState(() {
+                                        _visibleCount =
+                                            min(total, _visibleCount + _pageSize);
+                                      });
+                                    },
+                                    icon: const Icon(Icons.expand_more),
+                                    label: Text(
+                                      'Muat lagi ($_visibleCount dari $total foto)',
+                                    ),
+                                  )
+                                : Text(
+                                    'Semua foto dimuat ($total foto)',
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+    );
+  }
+}
+
 class _FullPhotoViewerScreen extends StatelessWidget {
   final List<File> files;
   final int initialIndex;
@@ -2249,7 +2539,7 @@ class _FullPhotoViewerScreen extends StatelessWidget {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: Text('Pratinjau Foto (${files.length})'),
+        title: const Text('Pratinjau Foto'),
       ),
       body: PageView.builder(
         controller: controller,

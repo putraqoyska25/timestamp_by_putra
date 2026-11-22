@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -119,6 +120,240 @@ class _WatermarkConfig {
       personNameText: personNameText ?? this.personNameText,
       formSize: formSize ?? this.formSize,
       textColor: textColor ?? this.textColor,
+    );
+  }
+}
+
+class _PersistentAppSettings {
+  final bool showLogo;
+  final String? logoFilePath;
+  final bool showTime;
+  final bool showAddress;
+  final String customAddress;
+  final bool showCoords;
+  final bool showCompany;
+  final String companyText;
+  final bool showPersonName;
+  final String personNameText;
+  final StampFormSize formSize;
+  final StampTextColor textColor;
+  final PhotoAspectRatio aspectRatio;
+  final ImageQualityPreset qualityPreset;
+  final bool shutterSoundEnabled;
+  final bool gridEnabled;
+
+  const _PersistentAppSettings({
+    this.showLogo = false,
+    this.logoFilePath,
+    this.showTime = true,
+    this.showAddress = true,
+    this.customAddress =
+        'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku',
+    this.showCoords = false,
+    this.showCompany = false,
+    this.companyText = '',
+    this.showPersonName = false,
+    this.personNameText = '',
+    this.formSize = StampFormSize.medium,
+    this.textColor = StampTextColor.white,
+    this.aspectRatio = PhotoAspectRatio.ratio4x3,
+    this.qualityPreset = ImageQualityPreset.p720,
+    this.shutterSoundEnabled = true,
+    this.gridEnabled = false,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'showLogo': showLogo,
+      'logoFilePath': logoFilePath,
+      'showTime': showTime,
+      'showAddress': showAddress,
+      'customAddress': customAddress,
+      'showCoords': showCoords,
+      'showCompany': showCompany,
+      'companyText': companyText,
+      'showPersonName': showPersonName,
+      'personNameText': personNameText,
+      'formSize': formSize.name,
+      'textColor': textColor.name,
+      'aspectRatio': aspectRatio.name,
+      'qualityPreset': qualityPreset.name,
+      'shutterSoundEnabled': shutterSoundEnabled,
+      'gridEnabled': gridEnabled,
+    };
+  }
+
+  factory _PersistentAppSettings.fromJson(Map<String, dynamic> map) {
+    T parseEnum<T extends Enum>(List<T> values, dynamic raw, T fallback) {
+      if (raw is String) {
+        for (final v in values) {
+          if (v.name == raw) return v;
+        }
+      }
+      return fallback;
+    }
+
+    return _PersistentAppSettings(
+      showLogo: map['showLogo'] is bool ? map['showLogo'] as bool : false,
+      logoFilePath: map['logoFilePath'] is String
+          ? (map['logoFilePath'] as String).trim()
+          : null,
+      showTime: map['showTime'] is bool ? map['showTime'] as bool : true,
+      showAddress:
+          map['showAddress'] is bool ? map['showAddress'] as bool : true,
+      customAddress: map['customAddress'] is String
+          ? map['customAddress'] as String
+          : 'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku',
+      showCoords: map['showCoords'] is bool ? map['showCoords'] as bool : false,
+      showCompany:
+          map['showCompany'] is bool ? map['showCompany'] as bool : false,
+      companyText:
+          map['companyText'] is String ? map['companyText'] as String : '',
+      showPersonName:
+          map['showPersonName'] is bool ? map['showPersonName'] as bool : false,
+      personNameText: map['personNameText'] is String
+          ? map['personNameText'] as String
+          : '',
+      formSize: parseEnum(
+        StampFormSize.values,
+        map['formSize'],
+        StampFormSize.medium,
+      ),
+      textColor: parseEnum(
+        StampTextColor.values,
+        map['textColor'],
+        StampTextColor.white,
+      ),
+      aspectRatio: parseEnum(
+        PhotoAspectRatio.values,
+        map['aspectRatio'],
+        PhotoAspectRatio.ratio4x3,
+      ),
+      qualityPreset: parseEnum(
+        ImageQualityPreset.values,
+        map['qualityPreset'],
+        ImageQualityPreset.p720,
+      ),
+      shutterSoundEnabled: map['shutterSoundEnabled'] is bool
+          ? map['shutterSoundEnabled'] as bool
+          : true,
+      gridEnabled:
+          map['gridEnabled'] is bool ? map['gridEnabled'] as bool : false,
+    );
+  }
+}
+
+class _AppPrefsStore {
+  static _PersistentAppSettings _current = const _PersistentAppSettings();
+  static Future<void> _writeChain = Future<void>.value();
+
+  static _PersistentAppSettings get current => _current;
+
+  static Future<File> _prefsFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}${Platform.pathSeparator}app_prefs_v1.json');
+  }
+
+  static Future<String> persistLogoFile(String sourcePath) async {
+    final src = File(sourcePath);
+    if (!await src.exists()) {
+      return sourcePath;
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    String ext = 'png';
+    final dotIdx = sourcePath.lastIndexOf('.');
+    if (dotIdx != -1 && dotIdx < sourcePath.length - 1) {
+      final candidate = sourcePath.substring(dotIdx + 1).toLowerCase();
+      if (candidate.length <= 5 && RegExp(r'^[a-z0-9]+$').hasMatch(candidate)) {
+        ext = candidate;
+      }
+    }
+    final destPath =
+        '${dir.path}${Platform.pathSeparator}watermark_logo_saved.$ext';
+    if (src.path != destPath) {
+      await src.copy(destPath);
+    }
+    return destPath;
+  }
+
+  static Future<_PersistentAppSettings> load() async {
+    try {
+      final file = await _prefsFile();
+      if (!await file.exists()) {
+        return _current;
+      }
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) return _current;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        var loaded = _PersistentAppSettings.fromJson(decoded);
+        final lp = loaded.logoFilePath;
+        if (lp != null && lp.isNotEmpty && !await File(lp).exists()) {
+          loaded = _PersistentAppSettings(
+            showLogo: false,
+            logoFilePath: null,
+            showTime: loaded.showTime,
+            showAddress: loaded.showAddress,
+            customAddress: loaded.customAddress,
+            showCoords: loaded.showCoords,
+            showCompany: loaded.showCompany,
+            companyText: loaded.companyText,
+            showPersonName: loaded.showPersonName,
+            personNameText: loaded.personNameText,
+            formSize: loaded.formSize,
+            textColor: loaded.textColor,
+            aspectRatio: loaded.aspectRatio,
+            qualityPreset: loaded.qualityPreset,
+            shutterSoundEnabled: loaded.shutterSoundEnabled,
+            gridEnabled: loaded.gridEnabled,
+          );
+        }
+        _current = loaded;
+      }
+    } catch (e) {
+      debugPrint('Gagal membaca app_prefs: $e');
+    }
+    return _current;
+  }
+
+  static Future<void> save(_PersistentAppSettings next) {
+    _current = next;
+    _writeChain = _writeChain.then((_) async {
+      try {
+        final file = await _prefsFile();
+        final tmpFile = File('${file.path}.tmp');
+        await tmpFile.writeAsString(jsonEncode(next.toJson()), flush: true);
+        if (await file.exists()) {
+          await file.delete();
+        }
+        await tmpFile.rename(file.path);
+      } catch (e) {
+        debugPrint('Gagal menyimpan app_prefs: $e');
+      }
+    });
+    return _writeChain;
+  }
+
+  static Future<void> updateFromWatermarkConfig(_WatermarkConfig cfg) {
+    return save(
+      _PersistentAppSettings(
+        showLogo: cfg.showLogo,
+        logoFilePath: cfg.logoFilePath,
+        showTime: cfg.showTime,
+        showAddress: cfg.showAddress,
+        customAddress: cfg.customAddress,
+        showCoords: cfg.showCoords,
+        showCompany: cfg.showCompany,
+        companyText: cfg.companyText,
+        showPersonName: cfg.showPersonName,
+        personNameText: cfg.personNameText,
+        formSize: cfg.formSize,
+        textColor: cfg.textColor,
+        aspectRatio: _current.aspectRatio,
+        qualityPreset: _current.qualityPreset,
+        shutterSoundEnabled: _current.shutterSoundEnabled,
+        gridEnabled: _current.gridEnabled,
+      ),
     );
   }
 }
@@ -1247,7 +1482,57 @@ class _CameraScreenState extends State<CameraScreen>
     _startClockTimer();
   }
 
+  void _applyLoadedPersistentSettings(_PersistentAppSettings saved) {
+    if (!mounted) return;
+    setState(() {
+      _showLogo = saved.showLogo;
+      _logoFilePath = saved.logoFilePath;
+      _showTime = saved.showTime;
+      _isManualTime = false;
+      _systemNow = DateTime.now();
+      _showAddress = saved.showAddress;
+      _customAddress = saved.customAddress;
+      _showCoords = saved.showCoords;
+      _showCompany = saved.showCompany;
+      _companyText = saved.companyText;
+      _showPersonName = saved.showPersonName;
+      _personNameText = saved.personNameText;
+      _formSize = saved.formSize;
+      _textColor = saved.textColor;
+      _aspectRatio = saved.aspectRatio;
+      _qualityPreset = saved.qualityPreset;
+      _shutterSoundEnabled = saved.shutterSoundEnabled;
+      _gridEnabled = saved.gridEnabled;
+    });
+  }
+
+  Future<void> _persistCurrentSettings() async {
+    await _AppPrefsStore.save(
+      _PersistentAppSettings(
+        showLogo: _showLogo,
+        logoFilePath: _logoFilePath,
+        showTime: _showTime,
+        showAddress: _showAddress,
+        customAddress: _customAddress,
+        showCoords: _showCoords,
+        showCompany: _showCompany,
+        companyText: _companyText,
+        showPersonName: _showPersonName,
+        personNameText: _personNameText,
+        formSize: _formSize,
+        textColor: _textColor,
+        aspectRatio: _aspectRatio,
+        qualityPreset: _qualityPreset,
+        shutterSoundEnabled: _shutterSoundEnabled,
+        gridEnabled: _gridEnabled,
+      ),
+    );
+  }
+
   Future<void> _bootstrapStartupSequence() async {
+    final saved = await _AppPrefsStore.load();
+    _applyLoadedPersistentSettings(saved);
+
     await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
     if (!mounted || _startupPermissionsRequested) return;
     _startupPermissionsRequested = true;
@@ -1298,6 +1583,7 @@ class _CameraScreenState extends State<CameraScreen>
       _disposeControllerSafely();
     } else if (state == AppLifecycleState.resumed) {
       setState(() {
+        _isManualTime = false;
         _systemNow = DateTime.now();
       });
       unawaited(
@@ -1321,13 +1607,22 @@ class _CameraScreenState extends State<CameraScreen>
           aspectRatio: _aspectRatio,
           qualityPreset: _qualityPreset,
           onShutterSoundChanged: (val) {
-            if (mounted) setState(() => _shutterSoundEnabled = val);
+            if (mounted) {
+              setState(() => _shutterSoundEnabled = val);
+              unawaited(_persistCurrentSettings());
+            }
           },
           onGridChanged: (val) {
-            if (mounted) setState(() => _gridEnabled = val);
+            if (mounted) {
+              setState(() => _gridEnabled = val);
+              unawaited(_persistCurrentSettings());
+            }
           },
           onAspectRatioChanged: (ratio) {
-            if (mounted) setState(() => _aspectRatio = ratio);
+            if (mounted) {
+              setState(() => _aspectRatio = ratio);
+              unawaited(_persistCurrentSettings());
+            }
           },
           onQualityPresetChanged: (preset) {
             unawaited(_setQualityPreset(preset));
@@ -1531,6 +1826,7 @@ class _CameraScreenState extends State<CameraScreen>
       _formSize = cfg.formSize;
       _textColor = cfg.textColor;
     });
+    unawaited(_persistCurrentSettings());
   }
 
   String _getFormSizeLabel() {
@@ -1624,10 +1920,13 @@ class _CameraScreenState extends State<CameraScreen>
         imageQuality: 85,
       );
       if (picked != null && mounted) {
+        final permanentPath = await _AppPrefsStore.persistLogoFile(picked.path);
+        if (!mounted) return;
         setState(() {
-          _logoFilePath = picked.path;
+          _logoFilePath = permanentPath;
           _showLogo = true;
         });
+        await _persistCurrentSettings();
       }
     } catch (e) {
       debugPrint('Gagal memilih logo: $e');
@@ -1663,6 +1962,7 @@ class _CameraScreenState extends State<CameraScreen>
       _isManualTime = true;
       _showTime = true;
     });
+    await _persistCurrentSettings();
   }
 
   Future<void> _showEditTextDialog({
@@ -1706,6 +2006,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (autoEnableOnSave && onEnableChanged != null) {
         onEnableChanged();
       }
+      await _persistCurrentSettings();
     }
   }
 
@@ -1732,6 +2033,7 @@ class _CameraScreenState extends State<CameraScreen>
                     if (val == null) return;
                     setState(() => _formSize = val);
                     setDialogState(() {});
+                    unawaited(_persistCurrentSettings());
                   },
                 ),
                 RadioListTile<StampFormSize>(
@@ -1742,6 +2044,7 @@ class _CameraScreenState extends State<CameraScreen>
                     if (val == null) return;
                     setState(() => _formSize = val);
                     setDialogState(() {});
+                    unawaited(_persistCurrentSettings());
                   },
                 ),
                 RadioListTile<StampFormSize>(
@@ -1752,6 +2055,7 @@ class _CameraScreenState extends State<CameraScreen>
                     if (val == null) return;
                     setState(() => _formSize = val);
                     setDialogState(() {});
+                    unawaited(_persistCurrentSettings());
                   },
                 ),
                 const SizedBox(height: 8),
@@ -1775,6 +2079,7 @@ class _CameraScreenState extends State<CameraScreen>
                       onSelected: (_) {
                         setState(() => _textColor = c);
                         setDialogState(() {});
+                        unawaited(_persistCurrentSettings());
                       },
                     );
                   }).toList(),
@@ -1917,6 +2222,7 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _setQualityPreset(ImageQualityPreset preset) async {
     if (_qualityPreset == preset) return;
     setState(() => _qualityPreset = preset);
+    await _persistCurrentSettings();
     await _initCameraByDirection(_currentLens, refreshList: false);
   }
 
@@ -2172,7 +2478,7 @@ class _CameraScreenState extends State<CameraScreen>
 
       _LatestPhotosGridScreen.invalidateCache();
 
-      if (mounted) {
+      if (mounted && (ModalRoute.of(context)?.isCurrent ?? true)) {
         final String timerText = usedTimer == 0 ? '0s' : '${usedTimer}s';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -2184,7 +2490,7 @@ class _CameraScreenState extends State<CameraScreen>
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && (ModalRoute.of(context)?.isCurrent ?? true)) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -2636,6 +2942,10 @@ class _CameraScreenState extends State<CameraScreen>
         ? '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)} (Manual)'
         : '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)}';
 
+    final bool hasSavedLogo = _logoFilePath != null &&
+        _logoFilePath!.isNotEmpty &&
+        File(_logoFilePath!).existsSync();
+
     return Container(
       constraints: const BoxConstraints(maxHeight: 370),
       width: double.infinity,
@@ -2671,15 +2981,18 @@ class _CameraScreenState extends State<CameraScreen>
             _WatermarkRowTile(
               icon: Icons.image_outlined,
               title: 'Logo',
-              subtitle: _showLogo && _logoFilePath != null
-                  ? 'Logo ditambahkan'
+              subtitle: hasSavedLogo
+                  ? (_showLogo
+                      ? 'Logo aktif (tersimpan permanen)'
+                      : 'Logo tersimpan (ketuk untuk ganti)')
                   : 'Ketuk untuk memilih logo',
               value: _showLogo,
               onChanged: (val) {
-                if (val && _logoFilePath == null) {
+                if (val && !hasSavedLogo) {
                   _pickLogoImage();
                 } else {
                   setState(() => _showLogo = val);
+                  unawaited(_persistCurrentSettings());
                 }
               },
               onTapContent: _pickLogoImage,
@@ -2696,6 +3009,7 @@ class _CameraScreenState extends State<CameraScreen>
                     _isManualTime = false;
                   }
                 });
+                unawaited(_persistCurrentSettings());
               },
               onTapContent: _pickManualDateTime,
             ),
@@ -2706,7 +3020,10 @@ class _CameraScreenState extends State<CameraScreen>
                   ? _customAddress
                   : 'Ketuk untuk mengedit alamat',
               value: _showAddress,
-              onChanged: (val) => setState(() => _showAddress = val),
+              onChanged: (val) {
+                setState(() => _showAddress = val);
+                unawaited(_persistCurrentSettings());
+              },
               onTapContent: () => _showEditTextDialog(
                 title: 'Edit Alamat',
                 hint: 'Masukkan alamat lokasi...',
@@ -2722,10 +3039,12 @@ class _CameraScreenState extends State<CameraScreen>
               value: _showCoords,
               onChanged: (val) {
                 setState(() => _showCoords = val);
+                unawaited(_persistCurrentSettings());
                 if (val) _getLocation(requestIfDenied: true);
               },
               onTapContent: () {
                 setState(() => _showCoords = true);
+                unawaited(_persistCurrentSettings());
                 _getLocation(requestIfDenied: true);
               },
             ),
@@ -2736,7 +3055,10 @@ class _CameraScreenState extends State<CameraScreen>
                   ? _companyText
                   : 'Ketuk untuk mengedit',
               value: _showCompany,
-              onChanged: (val) => setState(() => _showCompany = val),
+              onChanged: (val) {
+                setState(() => _showCompany = val);
+                unawaited(_persistCurrentSettings());
+              },
               onTapContent: () => _showEditTextDialog(
                 title: 'Edit Perusahaan',
                 hint: 'Nama instansi / perusahaan...',
@@ -2752,7 +3074,10 @@ class _CameraScreenState extends State<CameraScreen>
                   ? _personNameText
                   : 'Ketuk untuk mengedit',
               value: _showPersonName,
-              onChanged: (val) => setState(() => _showPersonName = val),
+              onChanged: (val) {
+                setState(() => _showPersonName = val);
+                unawaited(_persistCurrentSettings());
+              },
               onTapContent: () => _showEditTextDialog(
                 title: 'Edit Nama',
                 hint: 'Nama petugas / pengguna...',
@@ -3141,29 +3466,23 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  String _resolveMonthLabelAtFraction(
-    double fraction,
-    List<_MonthlyPhotoSection> sections,
-  ) {
-    if (sections.isEmpty) return 'Terbaru';
-    final int idx = (fraction * (sections.length - 1))
+  String _resolveMonthLabelAtFraction(double fraction) {
+    if (_entries.isEmpty) return 'Terbaru';
+    final int idx = (fraction * (_entries.length - 1))
         .round()
-        .clamp(0, sections.length - 1);
-    final sec = sections[idx];
-    return sec.year == DateTime.now().year
-        ? sec.monthName
-        : '${sec.monthName} ${sec.year}';
+        .clamp(0, _entries.length - 1);
+    final dt = _entries[idx].modified;
+    final String monthName = (dt.month >= 1 && dt.month <= 12)
+        ? _bulanIndo[dt.month - 1]
+        : 'Bulan ${dt.month}';
+    return dt.year == DateTime.now().year ? monthName : '$monthName ${dt.year}';
   }
 
-  void _updateScrubThumbPosition(
-    double localY,
-    double trackHeight,
-    List<_MonthlyPhotoSection> sections,
-  ) {
+  void _updateScrubThumbPosition(double localY, double trackHeight) {
     if (trackHeight <= 0) return;
     final frac = (localY / trackHeight).clamp(0.0, 1.0);
     final now = DateTime.now();
-    final nextPill = _resolveMonthLabelAtFraction(frac, sections);
+    final nextPill = _resolveMonthLabelAtFraction(frac);
 
     if (!_isDraggingScrubber ||
         nextPill != _activeMonthPill ||
@@ -3409,7 +3728,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  Widget _buildRightFastScrubber(List<_MonthlyPhotoSection> sections) {
+  Widget _buildRightFastScrubber() {
     if (_entries.length < 18) return const SizedBox.shrink();
 
     return LayoutBuilder(
@@ -3466,12 +3785,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                 onVerticalDragStart: (details) => _updateScrubThumbPosition(
                   details.localPosition.dy,
                   box.maxHeight - 24,
-                  sections,
                 ),
                 onVerticalDragUpdate: (details) => _updateScrubThumbPosition(
                   details.localPosition.dy,
                   box.maxHeight - 24,
-                  sections,
                 ),
                 onVerticalDragEnd: (_) => _commitScrubJump(),
                 onVerticalDragCancel: () => _commitScrubJump(),
@@ -3479,7 +3796,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                   _updateScrubThumbPosition(
                     details.localPosition.dy,
                     box.maxHeight - 24,
-                    sections,
                   );
                   _commitScrubJump();
                 },
@@ -3770,7 +4086,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                         ],
                       ),
                     ),
-                    _buildRightFastScrubber(sections),
+                    _buildRightFastScrubber(),
                   ],
                 ),
     );
@@ -3867,6 +4183,7 @@ class _GalleryWatermarkEditorScreenState
   void _updateCfg(_WatermarkConfig next) {
     setState(() => _cfg = next);
     widget.onConfigUpdated(next);
+    unawaited(_AppPrefsStore.updateFromWatermarkConfig(next));
   }
 
   String _sizeLabel() {
@@ -3887,9 +4204,11 @@ class _GalleryWatermarkEditorScreenState
         imageQuality: 85,
       );
       if (picked != null && mounted) {
+        final permanentPath = await _AppPrefsStore.persistLogoFile(picked.path);
+        if (!mounted) return;
         _updateCfg(
           _cfg.copyWith(
-            logoFilePath: picked.path,
+            logoFilePath: permanentPath,
             showLogo: true,
           ),
         );
@@ -4204,6 +4523,10 @@ class _GalleryWatermarkEditorScreenState
     final String timeSub =
         '${_StampRenderer.formatHari(dt)}, ${_StampRenderer.formatTanggalLengkap(dt)} ${_StampRenderer.formatJamMenit(dt)}${_cfg.isManualTime ? ' (Manual)' : ''}';
 
+    final bool hasSavedLogo = _cfg.logoFilePath != null &&
+        _cfg.logoFilePath!.isNotEmpty &&
+        File(_cfg.logoFilePath!).existsSync();
+
     return Container(
       constraints: const BoxConstraints(maxHeight: 360),
       width: double.infinity,
@@ -4237,12 +4560,14 @@ class _GalleryWatermarkEditorScreenState
             _WatermarkRowTile(
               icon: Icons.image_outlined,
               title: 'Logo',
-              subtitle: _cfg.showLogo && _cfg.logoFilePath != null
-                  ? 'Logo ditambahkan'
+              subtitle: hasSavedLogo
+                  ? (_cfg.showLogo
+                      ? 'Logo aktif (tersimpan permanen)'
+                      : 'Logo tersimpan (ketuk untuk ganti)')
                   : 'Ketuk untuk memilih logo',
               value: _cfg.showLogo,
               onChanged: (val) {
-                if (val && _cfg.logoFilePath == null) {
+                if (val && !hasSavedLogo) {
                   _pickLogo();
                 } else {
                   _updateCfg(_cfg.copyWith(showLogo: val));

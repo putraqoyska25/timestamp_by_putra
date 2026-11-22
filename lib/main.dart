@@ -108,9 +108,8 @@ class _WatermarkConfig {
       gpsCoordsText: gpsCoordsText ?? this.gpsCoordsText,
       showCompany: showCompany ?? this.showCompany,
       companyText: companyText ?? this.companyText,
-      showPersonName: showPersonName ?? this.personNameText.isNotEmpty
-          ? (showPersonName ?? this.showPersonName)
-          : (showPersonName ?? this.showPersonName),
+      showPersonName: showPersonName ?? this.showPersonName,
+      personNameText: personNameText ?? this.personNameText,
       formSize: formSize ?? this.formSize,
     );
   }
@@ -3617,7 +3616,10 @@ class _GalleryWatermarkEditorScreenState
                         ),
                       ),
                       onPressed: _isSaving ? null : _showTemplateSheet,
-                      icon: const Icon(Icons.dashboard_customize_outlined, size: 18),
+                      icon: const Icon(
+                        Icons.dashboard_customize_outlined,
+                        size: 18,
+                      ),
                       label: const Text('Templat'),
                     ),
                   ),

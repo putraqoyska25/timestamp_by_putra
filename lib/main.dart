@@ -460,7 +460,6 @@ class _StampRenderer {
     ];
   }
 
-  // Kecil = 0.85, Sedang = 1.00, Besar = 1.24 agar muat rapi tanpa terpotong atau mendorong jam.
   static double sizeMultiplier(StampFormSize size) {
     switch (size) {
       case StampFormSize.small:
@@ -555,7 +554,6 @@ class _StampRenderer {
       }
     }
 
-    // Logo ditempatkan di atas baris jam, bukan di sampingnya.
     final double logoSize = logoImg != null ? (38.0 * s) : 0.0;
     final double logoBottomGap = logoImg != null ? (6.0 * s) : 0.0;
 
@@ -565,7 +563,7 @@ class _StampRenderer {
     double timeRowHeight = 0.0;
 
     if (cfg.showTime) {
-      jamPainter = TextPainter(
+      final jp = TextPainter(
         text: TextSpan(
           text: formatJamMenit(activeDt),
           style: TextStyle(
@@ -583,10 +581,10 @@ class _StampRenderer {
       final double dividerWidth = 2.5 * s;
       final double rightColMaxWidth = max(
         90.0 * refScale,
-        maxTextWidth - jamPainter.width - dividerWidth - (20.0 * s),
+        maxTextWidth - jp.width - dividerWidth - (20.0 * s),
       );
 
-      tanggalPainter = TextPainter(
+      final tp = TextPainter(
         text: TextSpan(
           text: formatTanggalLengkap(activeDt),
           style: TextStyle(
@@ -598,11 +596,10 @@ class _StampRenderer {
         ),
         textDirection: ui.TextDirection.ltr,
         maxLines: 1,
-        softWrap: false,
         ellipsis: '...',
       )..layout(maxWidth: rightColMaxWidth);
 
-      hariPainter = TextPainter(
+      final hp = TextPainter(
         text: TextSpan(
           text: formatHari(activeDt),
           style: TextStyle(
@@ -614,12 +611,15 @@ class _StampRenderer {
         ),
         textDirection: ui.TextDirection.ltr,
         maxLines: 1,
-        softWrap: false,
+        ellipsis: '...',
       )..layout(maxWidth: rightColMaxWidth);
 
+      jamPainter = jp;
+      tanggalPainter = tp;
+      hariPainter = hp;
       timeRowHeight = max(
-        jamPainter.height,
-        tanggalPainter.height + (2.0 * s) + hariPainter.height,
+        jp.height,
+        tp.height + (2.0 * s) + hp.height,
       );
     }
 
@@ -685,13 +685,17 @@ class _StampRenderer {
         jamPainter != null &&
         tanggalPainter != null &&
         hariPainter != null) {
+      final jp = jamPainter;
+      final tp = tanggalPainter;
+      final hp = hariPainter;
+
       double curX = padLeft;
-      jamPainter.paint(
+      jp.paint(
         canvas,
-        Offset(curX, currentY + ((timeRowHeight - jamPainter.height) / 2)),
+        Offset(curX, currentY + ((timeRowHeight - jp.height) / 2)),
       );
 
-      final double dividerX = curX + jamPainter.width + (10.0 * s);
+      final double dividerX = curX + jp.width + (10.0 * s);
       final double dividerHeight = 34.0 * s;
       final double dividerTopY =
           currentY + ((timeRowHeight - dividerHeight) / 2);
@@ -702,15 +706,14 @@ class _StampRenderer {
       );
 
       final double rightColX = dividerX + (10.0 * s);
-      final double rightColHeight =
-          tanggalPainter.height + (2.0 * s) + hariPainter.height;
+      final double rightColHeight = tp.height + (2.0 * s) + hp.height;
       final double rightColTopY =
           currentY + ((timeRowHeight - rightColHeight) / 2);
 
-      tanggalPainter.paint(canvas, Offset(rightColX, rightColTopY));
-      hariPainter.paint(
+      tp.paint(canvas, Offset(rightColX, rightColTopY));
+      hp.paint(
         canvas,
-        Offset(rightColX, rightColTopY + tanggalPainter.height + (2.0 * s)),
+        Offset(rightColX, rightColTopY + tp.height + (2.0 * s)),
       );
     }
 

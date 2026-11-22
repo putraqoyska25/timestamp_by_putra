@@ -35,7 +35,7 @@ jobs:
 
           MAIN_KT="android/app/src/main/kotlin/com/putra/timestamp_by_putra/MainActivity.kt"
           mkdir -p "$(dirname "$MAIN_KT")"
-          cat << 'EOF' > "$MAIN_KT"
+          cat << 'KOTLIN_EOF' > "$MAIN_KT"
 package com.putra.timestamp_by_putra
 
 import android.Manifest
@@ -139,39 +139,27 @@ class MainActivity : FlutterActivity() {
         return paths
     }
 }
-EOF
+KOTLIN_EOF
 
-          python3 - << 'PY'
+          python3 - << 'PY_EOF'
 from pathlib import Path
 import re
 
-gradle_kts = Path("android/app/build.gradle.kts")
-gradle_groovy = Path("android/app/build.gradle")
-
-if gradle_kts.exists():
-    txt = gradle_kts.read_text(encoding="utf-8")
-    if "checkReleaseBuilds" not in txt:
-        lint_block = "    lint {\n        checkReleaseBuilds = false\n        abortOnError = false\n    }\n"
-        m = re.search(r"android\s*\{", txt)
-        if m:
-            idx = m.end()
-            txt = txt[:idx] + "\n" + lint_block + txt[idx:]
-        else:
-            txt += "\nandroid {\n" + lint_block + "}\n"
-        gradle_kts.write_text(txt, encoding="utf-8")
-
-if gradle_groovy.exists():
-    txt = gradle_groovy.read_text(encoding="utf-8")
-    if "checkReleaseBuilds" not in txt:
-        lint_block = "    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }\n"
-        m = re.search(r"android\s*\{", txt)
-        if m:
-            idx = m.end()
-            txt = txt[:idx] + "\n" + lint_block + txt[idx:]
-        else:
-            txt += "\nandroid {\n" + lint_block + "}\n"
-        gradle_groovy.write_text(txt, encoding="utf-8")
-PY
+for path_str in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
+    p = Path(path_str)
+    if p.exists():
+        txt = p.read_text(encoding="utf-8")
+        if "checkReleaseBuilds" not in txt:
+            sep = " = " if path_str.endswith(".kts") else " "
+            lint_block = f"    lint {{\n        checkReleaseBuilds{sep}false\n        abortOnError{sep}false\n    }}\n"
+            m = re.search(r"android\s*\{", txt)
+            if m:
+                idx = m.end()
+                txt = txt[:idx] + "\n" + lint_block + txt[idx:]
+            else:
+                txt += "\nandroid {\n" + lint_block + "}\n"
+            p.write_text(txt, encoding="utf-8")
+PY_EOF
 
       - name: Get dependencies
         run: flutter pub get

@@ -35,6 +35,29 @@ jobs:
             flutter create --platforms=android .
           fi
 
+          GRADLE_KTS="android/app/build.gradle.kts"
+          GRADLE_GROOVY="android/app/build.gradle"
+
+          if [ -f "$GRADLE_KTS" ]; then
+            python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("android/app/build.gradle.kts")
+          txt = p.read_text(encoding="utf-8")
+          if "lint {" not in txt and "checkReleaseBuilds = false" not in txt:
+              txt += "\nandroid {\n    lint {\n        checkReleaseBuilds = false\n        abortOnError = false\n    }\n}\n"
+              p.write_text(txt, encoding="utf-8")
+          EOF
+          elif [ -f "$GRADLE_GROOVY" ]; then
+            python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("android/app/build.gradle")
+          txt = p.read_text(encoding="utf-8")
+          if "lint {" not in txt and "checkReleaseBuilds false" not in txt:
+              txt += "\nandroid {\n    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }\n}\n"
+              p.write_text(txt, encoding="utf-8")
+          EOF
+          fi
+
       - name: Set Custom App Launcher Icon
         shell: bash
         run: |

@@ -17,7 +17,7 @@ android.enableJetifier=true
 kotlin.code.style=official
 EOF
 
-# 2. Tulis settings.gradle.kts dengan AGP 9.1.1 & Kotlin 2.2.20
+# 2. Tulis settings.gradle.kts dengan repository Flutter engine & PREFER_PROJECT agar subproyek plugin tidak gagal resolve
 cat <<'EOF' > "$ANDROID_DIR/settings.gradle.kts"
 pluginManagement {
     val flutterSdkPath = run {
@@ -49,11 +49,28 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
+val flutterRootDir = run {
+    val properties = java.util.Properties()
+    val localPropsFile = file("local.properties")
+    if (localPropsFile.exists()) {
+        localPropsFile.inputStream().use { properties.load(it) }
+    }
+    properties.getProperty("flutter.sdk") ?: System.getenv("FLUTTER_ROOT") ?: ""
+}
+
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
     repositories {
         google()
         mavenCentral()
+        if (flutterRootDir.isNotBlank()) {
+            maven {
+                url = uri("$flutterRootDir/bin/cache/artifacts/engine")
+            }
+        }
+        maven {
+            url = uri("https://storage.googleapis.com/download.flutter.io")
+        }
     }
 }
 
@@ -67,6 +84,9 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url = uri("https://storage.googleapis.com/download.flutter.io")
+        }
     }
 }
 
@@ -86,7 +106,7 @@ tasks.register<Delete>("clean") {
 }
 EOF
 
-# 4. Tulis app/build.gradle.kts menggunakan compilerOptions DSL (menghindari error jvmTarget deprecated)
+# 4. Tulis app/build.gradle.kts menggunakan compilerOptions DSL
 cat <<'EOF' > "$APP_DIR/build.gradle.kts"
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 

@@ -2223,12 +2223,14 @@ class _MediaEntry {
 class _MonthlyPhotoSection {
   final int year;
   final int month;
+  final String monthName;
   final String title;
   final List<_MediaEntry> entries;
 
   const _MonthlyPhotoSection({
     required this.year,
     required this.month,
+    required this.monthName,
     required this.title,
     required this.entries,
   });
@@ -2249,7 +2251,7 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   static const int _maxFilesScan = 5000;
-  static const int _pageSize = 90;
+  static const int _pageSize = 150;
   static const MethodChannel _mediaStoreChannel =
       MethodChannel('timestamp_by_putra/media_store');
 
@@ -2272,6 +2274,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   bool _isLoading = true;
   List<_MediaEntry> _entries = [];
   int _visibleCount = 0;
+
+  // Fast-scroll right-side handle state
+  bool _showScrubber = false;
+  bool _isDraggingScrubber = false;
+  double _scrubberFraction = 0.0;
+  String? _activeMonthPill;
+  Timer? _hideScrubberTimer;
 
   static const Set<String> _imageExts = {
     '.jpg',
@@ -2296,17 +2305,83 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
+  void _scheduleScrubberHide({int milliseconds = 1500}) {
+    _hideScrubberTimer?.cancel();
+    if (_isDraggingScrubber) return;
+    _hideScrubberTimer = Timer(Duration(milliseconds: milliseconds), () {
+      if (!mounted || _isDraggingScrubber) return;
+      setState(() {
+        _showScrubber = false;
+        _activeMonthPill = null;
+      });
+    });
+  }
+
   void _onScroll() {
     if (!_scrollController.hasClients) return;
-    final total = _entries.length;
-    if (_visibleCount >= total) return;
-
     final pos = _scrollController.position;
-    if (pos.pixels >= pos.maxScrollExtent - 360) {
+    final total = _entries.length;
+
+    if (pos.maxScrollExtent > 0) {
+      final frac = (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0);
+      if (!_isDraggingScrubber) {
+        setState(() {
+          _scrubberFraction = frac;
+          _showScrubber = true;
+        });
+        _scheduleScrubberHide();
+      }
+    }
+
+    if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
       setState(() {
         _visibleCount = min(total, _visibleCount + _pageSize);
       });
     }
+  }
+
+  String _resolveMonthLabelAtFraction(
+    double fraction,
+    List<_MonthlyPhotoSection> sections,
+  ) {
+    if (sections.isEmpty) return 'Terbaru';
+    final int idx = (fraction * (sections.length - 1))
+        .round()
+        .clamp(0, sections.length - 1);
+    final sec = sections[idx];
+    return sec.year == DateTime.now().year
+        ? sec.monthName
+        : '${sec.monthName} ${sec.year}';
+  }
+
+  void _scrubToTrackY(
+    double localY,
+    double trackHeight,
+    List<_MonthlyPhotoSection> sections,
+  ) {
+    if (!_scrollController.hasClients || trackHeight <= 0) return;
+    final frac = (localY / trackHeight).clamp(0.0, 1.0);
+
+    // Pastikan item cukup termuat saat pengguna melompat jauh ke bawah
+    final targetVisible = max(
+      _visibleCount,
+      ((frac * _entries.length) + _pageSize).round().clamp(0, _entries.length),
+    );
+    if (targetVisible != _visibleCount) {
+      _visibleCount = targetVisible;
+    }
+
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    if (maxExtent > 0) {
+      _scrollController.jumpTo(frac * maxExtent);
+    }
+
+    setState(() {
+      _scrubberFraction = frac;
+      _showScrubber = true;
+      _isDraggingScrubber = true;
+      _activeMonthPill = _resolveMonthLabelAtFraction(frac, sections);
+    });
   }
 
   bool _isImageFile(String path) {
@@ -2457,14 +2532,146 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       return _MonthlyPhotoSection(
         year: firstDt.year,
         month: firstDt.month,
+        monthName: monthName,
         title: '$monthName ${firstDt.year} (${list.length})',
         entries: list,
       );
     }).toList();
   }
 
+  Widget _buildRightFastScrubber(List<_MonthlyPhotoSection> sections) {
+    if (_entries.length < 18) return const SizedBox.shrink();
+
+    return LayoutBuilder(
+      builder: (context, box) {
+        const double thumbHeight = 56.0;
+        const double thumbWidth = 28.0;
+        final double usableHeight = max(1.0, box.maxHeight - thumbHeight);
+        final double thumbTop = _scrubberFraction * usableHeight;
+
+        return Stack(
+          children: [
+            if (_isDraggingScrubber && _activeMonthPill != null)
+              Positioned(
+                top: 14,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF282C36),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: const Color(0xFFFFD000).withOpacity(0.55),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.5),
+                          blurRadius: 10,
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      _activeMonthPill!,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              right: 2,
+              top: 12,
+              bottom: 12,
+              width: 44,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onVerticalDragStart: (details) =>
+                    _scrubToTrackY(details.localPosition.dy, box.maxHeight - 24, sections),
+                onVerticalDragUpdate: (details) =>
+                    _scrubToTrackY(details.localPosition.dy, box.maxHeight - 24, sections),
+                onVerticalDragEnd: (_) {
+                  setState(() => _isDraggingScrubber = false);
+                  _scheduleScrubberHide();
+                },
+                onVerticalDragCancel: () {
+                  setState(() => _isDraggingScrubber = false);
+                  _scheduleScrubberHide();
+                },
+                onTapDown: (details) {
+                  _scrubToTrackY(details.localPosition.dy, box.maxHeight - 24, sections);
+                  setState(() => _isDraggingScrubber = false);
+                  _scheduleScrubberHide();
+                },
+                child: AnimatedOpacity(
+                  opacity: (_showScrubber || _isDraggingScrubber) ? 1.0 : 0.35,
+                  duration: const Duration(milliseconds: 160),
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        right: 12,
+                        top: thumbTop.clamp(0.0, usableHeight),
+                        child: Container(
+                          width: thumbWidth,
+                          height: thumbHeight,
+                          decoration: BoxDecoration(
+                            color: _isDraggingScrubber
+                                ? const Color(0xFFFFD000)
+                                : const Color(0xFF2B303C),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: Colors.white24,
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.45),
+                                blurRadius: 6,
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.arrow_drop_up,
+                                size: 15,
+                                color: _isDraggingScrubber
+                                    ? Colors.black
+                                    : Colors.white70,
+                              ),
+                              Icon(
+                                Icons.arrow_drop_down,
+                                size: 15,
+                                color: _isDraggingScrubber
+                                    ? Colors.black
+                                    : Colors.white70,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
+    _hideScrubberTimer?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
@@ -2525,109 +2732,123 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                     ),
                   ),
                 )
-              : RefreshIndicator(
-                  onRefresh: () => _loadAllPhotos(forceRefresh: true),
-                  child: CustomScrollView(
-                    controller: _scrollController,
-                    slivers: [
-                      for (final sec in sections) ...[
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
-                            child: Text(
-                              sec.title,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w700,
+              : Stack(
+                  children: [
+                    RefreshIndicator(
+                      onRefresh: () => _loadAllPhotos(forceRefresh: true),
+                      child: CustomScrollView(
+                        controller: _scrollController,
+                        slivers: [
+                          for (final sec in sections) ...[
+                            SliverToBoxAdapter(
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(12, 14, 12, 8),
+                                child: Text(
+                                  sec.title,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
-                        ),
-                        SliverPadding(
-                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                          sliver: SliverGrid(
-                            gridDelegate:
-                                const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 3,
-                              crossAxisSpacing: 3,
-                              mainAxisSpacing: 3,
-                            ),
-                            delegate: SliverChildBuilderDelegate(
-                              (ctx, idx) {
-                                final int viewerIdx = globalIndexCursor + idx;
-                                final File file = sec.entries[idx].file;
-                                return InkWell(
-                                  onTap: () {
-                                    Navigator.of(ctx).push(
-                                      MaterialPageRoute<void>(
-                                        builder: (_) => _FullPhotoViewerScreen(
-                                          files: allViewerFiles,
-                                          initialIndex: viewerIdx.clamp(
-                                            0,
-                                            max(0, allViewerFiles.length - 1),
+                            SliverPadding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 4),
+                              sliver: SliverGrid(
+                                gridDelegate:
+                                    const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 3,
+                                  crossAxisSpacing: 3,
+                                  mainAxisSpacing: 3,
+                                ),
+                                delegate: SliverChildBuilderDelegate(
+                                  (ctx, idx) {
+                                    final int viewerIdx =
+                                        globalIndexCursor + idx;
+                                    final File file = sec.entries[idx].file;
+                                    return InkWell(
+                                      onTap: () {
+                                        Navigator.of(ctx).push(
+                                          MaterialPageRoute<void>(
+                                            builder: (_) =>
+                                                _FullPhotoViewerScreen(
+                                              files: allViewerFiles,
+                                              initialIndex: viewerIdx.clamp(
+                                                0,
+                                                max(
+                                                  0,
+                                                  allViewerFiles.length - 1,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      child: Image.file(
+                                        file,
+                                        cacheWidth: 240,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) =>
+                                            const ColoredBox(
+                                          color: Color(0xFF1C2029),
+                                          child: Icon(
+                                            Icons.broken_image_outlined,
+                                            color: Colors.white54,
                                           ),
                                         ),
                                       ),
                                     );
                                   },
-                                  child: Image.file(
-                                    file,
-                                    cacheWidth: 240,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) =>
-                                        const ColoredBox(
-                                      color: Color(0xFF1C2029),
-                                      child: Icon(
-                                        Icons.broken_image_outlined,
-                                        color: Colors.white54,
-                                      ),
-                                    ),
-                                  ),
+                                  childCount: sec.entries.length,
+                                ),
+                              ),
+                            ),
+                            Builder(
+                              builder: (_) {
+                                globalIndexCursor += sec.entries.length;
+                                return const SliverToBoxAdapter(
+                                  child: SizedBox.shrink(),
                                 );
                               },
-                              childCount: sec.entries.length,
+                            ),
+                          ],
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              child: Center(
+                                child: hasMore
+                                    ? TextButton.icon(
+                                        onPressed: () {
+                                          setState(() {
+                                            _visibleCount = min(
+                                              total,
+                                              _visibleCount + _pageSize,
+                                            );
+                                          });
+                                        },
+                                        icon: const Icon(Icons.expand_more),
+                                        label: Text(
+                                          'Muat lagi ($_visibleCount dari $total foto)',
+                                        ),
+                                      )
+                                    : Text(
+                                        'Semua foto dimuat ($total foto)',
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                              ),
                             ),
                           ),
-                        ),
-                        Builder(
-                          builder: (_) {
-                            globalIndexCursor += sec.entries.length;
-                            return const SliverToBoxAdapter(
-                              child: SizedBox.shrink(),
-                            );
-                          },
-                        ),
-                      ],
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          child: Center(
-                            child: hasMore
-                                ? TextButton.icon(
-                                    onPressed: () {
-                                      setState(() {
-                                        _visibleCount =
-                                            min(total, _visibleCount + _pageSize);
-                                      });
-                                    },
-                                    icon: const Icon(Icons.expand_more),
-                                    label: Text(
-                                      'Muat lagi ($_visibleCount dari $total foto)',
-                                    ),
-                                  )
-                                : Text(
-                                    'Semua foto dimuat ($total foto)',
-                                    style: const TextStyle(
-                                      color: Colors.white54,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                          ),
-                        ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                    _buildRightFastScrubber(sections),
+                  ],
                 ),
     );
   }

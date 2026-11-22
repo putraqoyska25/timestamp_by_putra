@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -347,7 +348,7 @@ class _CameraGridPainter extends CustomPainter {
     if (size.width <= 0 || size.height <= 0) return;
 
     final Paint gridPaint = Paint()
-      ..color = Colors.white.withOpacity(0.55)
+      ..color = Colors.white.withValues(alpha: 0.55)
       ..strokeWidth = 1.0
       ..style = PaintingStyle.stroke;
 
@@ -472,11 +473,11 @@ class _StampRenderer {
     final double padBottom = 12.0 * refScale;
     final double maxTextWidth = w - padLeft - padRight;
 
-    final List<Shadow> textShadows = [
+    const List<Shadow> textShadows = [
       Shadow(
         color: Colors.black87,
-        offset: Offset(0, 1.5 * refScale),
-        blurRadius: 4.0 * refScale,
+        offset: Offset(0, 1.5),
+        blurRadius: 4.0,
       ),
     ];
 
@@ -597,8 +598,8 @@ class _StampRenderer {
           Offset(0, gradTop),
           Offset(0, h),
           [
-            Colors.black.withOpacity(0.0),
-            Colors.black.withOpacity(0.42),
+            Colors.black.withValues(alpha: 0.0),
+            Colors.black.withValues(alpha: 0.42),
           ],
         );
       canvas.drawRect(Rect.fromLTWH(0, gradTop, w, h - gradTop), gradPaint);
@@ -742,8 +743,8 @@ Widget _buildStampOverlayWidget({
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            Colors.black.withOpacity(0.0),
-            Colors.black.withOpacity(0.42),
+            Colors.black.withValues(alpha: 0.0),
+            Colors.black.withValues(alpha: 0.42),
           ],
         ),
       ),
@@ -932,7 +933,7 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
                   ),
                   trailing: Switch(
                     value: _shutterSound,
-                    activeColor: Colors.black,
+                    activeThumbColor: Colors.black,
                     activeTrackColor: const Color(0xFFFFD000),
                     onChanged: (val) {
                       setState(() => _shutterSound = val);
@@ -959,7 +960,7 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
                   ),
                   trailing: Switch(
                     value: _gridOn,
-                    activeColor: Colors.black,
+                    activeThumbColor: Colors.black,
                     activeTrackColor: const Color(0xFFFFD000),
                     onChanged: (val) {
                       setState(() => _gridOn = val);
@@ -1103,7 +1104,6 @@ class _CameraScreenState extends State<CameraScreen>
   final Random _random = Random();
   final ImagePicker _picker = ImagePicker();
 
-  int _cameraIndex = 0;
   CameraLensDirection _currentLens = CameraLensDirection.back;
   bool _flashEnabled = false;
   bool _screenFlashActive = false;
@@ -1115,7 +1115,6 @@ class _CameraScreenState extends State<CameraScreen>
   bool _shutterSoundEnabled = true;
   bool _gridEnabled = false;
 
-  Offset? _focusPointNormalized;
   Offset? _focusUiOffset;
   double _minExposureOffset = -2.0;
   double _maxExposureOffset = 2.0;
@@ -1146,7 +1145,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   bool _showAddress = true;
   String _customAddress =
-      'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku';
+      'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku';[span_1](start_span)[span_1](end_span)
 
   bool _showCoords = false;
   String _gpsCoordsText = 'Mencari GPS...';
@@ -1311,7 +1310,6 @@ class _CameraScreenState extends State<CameraScreen>
     final Offset norm = Offset(nx, ny);
 
     setState(() {
-      _focusPointNormalized = norm;
       _focusUiOffset = localPosition;
       _currentExposureOffset = 0.0;
       _showFocusRing = true;
@@ -1749,7 +1747,6 @@ class _CameraScreenState extends State<CameraScreen>
 
       _controller = newController;
       setState(() {
-        _cameraIndex = foundIndex;
         _currentLens = cameras[foundIndex].lensDirection;
         _screenFlashActive = false;
         _cameraErrorMessage = null;
@@ -1758,7 +1755,6 @@ class _CameraScreenState extends State<CameraScreen>
         _currentExposureOffset = 0.0;
         _showFocusRing = false;
         _isDraggingExposure = false;
-        _focusPointNormalized = null;
         _focusUiOffset = null;
       });
 
@@ -2118,7 +2114,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.35),
+                    color: Colors.black.withValues(alpha: 0.35),
                     blurRadius: 4,
                   ),
                 ],
@@ -2142,7 +2138,7 @@ class _CameraScreenState extends State<CameraScreen>
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 7),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.65),
+                  color: Colors.black.withValues(alpha: 0.65),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Column(
@@ -2294,7 +2290,7 @@ class _CameraScreenState extends State<CameraScreen>
                         vertical: 14,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.65),
+                        color: Colors.black.withValues(alpha: 0.65),
                         borderRadius: BorderRadius.circular(14),
                       ),
                       child: Text(
@@ -2317,7 +2313,7 @@ class _CameraScreenState extends State<CameraScreen>
                         vertical: 6,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.72),
+                        color: Colors.black.withValues(alpha: 0.72),
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: Row(
@@ -2413,7 +2409,7 @@ class _CameraScreenState extends State<CameraScreen>
 
     return Container(
       width: double.infinity,
-      color: Colors.black.withOpacity(0.85),
+      color: Colors.black.withValues(alpha: 0.85),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         child: Row(
@@ -2794,7 +2790,7 @@ class _CameraScreenState extends State<CameraScreen>
               Positioned.fill(
                 child: IgnorePointer(
                   child: Container(
-                    color: Colors.black.withOpacity(0.55),
+                    color: Colors.black.withValues(alpha: 0.55),
                   ),
                 ),
               ),
@@ -3294,11 +3290,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       color: const Color(0xFF282C36),
                       borderRadius: BorderRadius.circular(24),
                       border: Border.all(
-                        color: const Color(0xFFFFD000).withOpacity(0.55),
+                        color: const Color(0xFFFFD000).withValues(alpha: 0.55),
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.5),
+                          color: Colors.black.withValues(alpha: 0.5),
                           blurRadius: 10,
                         ),
                       ],
@@ -3363,7 +3359,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withOpacity(0.45),
+                                color: Colors.black.withValues(alpha: 0.45),
                                 blurRadius: 6,
                               ),
                             ],
@@ -3553,7 +3549,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                             if (isChecked)
                                               Container(
                                                 color: Colors.black
-                                                    .withOpacity(0.32),
+                                                    .withValues(alpha: 0.32),
                                               ),
                                             if (_selectionMode || isChecked)
                                               Positioned(
@@ -3569,7 +3565,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                                             0xFFFFD000,
                                                           )
                                                         : Colors.black
-                                                            .withOpacity(0.45),
+                                                            .withValues(
+                                                              alpha: 0.45,
+                                                            ),
                                                     border: Border.all(
                                                       color: Colors.white,
                                                       width: 1.5,

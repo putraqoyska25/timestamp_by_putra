@@ -460,35 +460,15 @@ class _StampRenderer {
     ];
   }
 
-  // Kecil = 0.85 (tetap), Besar = menjangkau garis merah (~30% tinggi frame), Sedang = titik tengah.
-  static double smallMultiplier() => 0.85;
-
-  static double largeMultiplier(double frameWidth, double frameHeight) {
-    final double w = frameWidth > 0 ? frameWidth : 390.0;
-    final double h = frameHeight > 0 ? frameHeight : 520.0;
-    final double refScale = w / 390.0;
-    final double targetSpanH = h * 0.295;
-    final double baseSpanH = 74.0 * refScale;
-    final double ratioBoost = baseSpanH > 0 ? (targetSpanH / baseSpanH) : 1.85;
-    return ratioBoost.clamp(1.60, 2.35);
-  }
-
-  static double mediumMultiplier(double frameWidth, double frameHeight) {
-    return (smallMultiplier() + largeMultiplier(frameWidth, frameHeight)) / 2.0;
-  }
-
-  static double sizeMultiplier(
-    StampFormSize size, {
-    double frameWidth = 390.0,
-    double frameHeight = 520.0,
-  }) {
+  // Kecil = 0.85, Sedang = 1.00, Besar = 1.24 agar muat rapi tanpa terpotong atau mendorong jam.
+  static double sizeMultiplier(StampFormSize size) {
     switch (size) {
       case StampFormSize.small:
-        return smallMultiplier();
+        return 0.85;
       case StampFormSize.medium:
-        return mediumMultiplier(frameWidth, frameHeight);
+        return 1.00;
       case StampFormSize.large:
-        return largeMultiplier(frameWidth, frameHeight);
+        return 1.24;
     }
   }
 
@@ -496,11 +476,11 @@ class _StampRenderer {
     if (width <= 0 || height <= 0) return 1.0;
     final double ratio = width / height;
     if (ratio >= 0.95) {
-      return 0.92;
+      return 0.94;
     } else if (ratio >= 0.70) {
       return 1.0;
     } else {
-      return 0.86;
+      return 0.90;
     }
   }
 
@@ -552,16 +532,12 @@ class _StampRenderer {
 
     final double refScale = w / 390.0;
     final double ratioFactor = aspectScaleFactor(targetW, targetH);
-    final double mult = sizeMultiplier(
-      cfg.formSize,
-      frameWidth: w,
-      frameHeight: h,
-    );
+    final double mult = sizeMultiplier(cfg.formSize);
     final double s = refScale * mult * ratioFactor;
     final double padLeft = 14.0 * refScale;
     final double padRight = 14.0 * refScale;
     final double padBottom = 12.0 * refScale;
-    final double maxTextWidth = w - padLeft - padRight;
+    final double maxTextWidth = max(60.0, w - padLeft - padRight);
 
     final Color fgColor = resolveTextColor(cfg.textColor);
     final List<Shadow> textShadows = resolveShadows(cfg.textColor);
@@ -579,13 +555,14 @@ class _StampRenderer {
       }
     }
 
-    final double logoSize = logoImg != null ? (44.0 * s) : 0.0;
-    final double logoGap = logoImg != null ? (10.0 * s) : 0.0;
+    // Logo ditempatkan di atas baris jam, bukan di sampingnya.
+    final double logoSize = logoImg != null ? (38.0 * s) : 0.0;
+    final double logoBottomGap = logoImg != null ? (6.0 * s) : 0.0;
 
     TextPainter? jamPainter;
     TextPainter? tanggalPainter;
     TextPainter? hariPainter;
-    double topBlockHeight = 0.0;
+    double timeRowHeight = 0.0;
 
     if (cfg.showTime) {
       jamPainter = TextPainter(
@@ -593,7 +570,7 @@ class _StampRenderer {
           text: formatJamMenit(activeDt),
           style: TextStyle(
             color: fgColor,
-            fontSize: 36.0 * s,
+            fontSize: 34.0 * s,
             fontWeight: FontWeight.w700,
             height: 1.0,
             shadows: textShadows,
@@ -603,9 +580,10 @@ class _StampRenderer {
         maxLines: 1,
       )..layout();
 
+      final double dividerWidth = 2.5 * s;
       final double rightColMaxWidth = max(
-        80.0 * refScale,
-        maxTextWidth - logoSize - logoGap - jamPainter.width - (24.0 * s),
+        90.0 * refScale,
+        maxTextWidth - jamPainter.width - dividerWidth - (20.0 * s),
       );
 
       tanggalPainter = TextPainter(
@@ -613,13 +591,14 @@ class _StampRenderer {
           text: formatTanggalLengkap(activeDt),
           style: TextStyle(
             color: fgColor,
-            fontSize: 15.0 * s,
+            fontSize: 14.5 * s,
             fontWeight: FontWeight.w600,
             shadows: textShadows,
           ),
         ),
         textDirection: ui.TextDirection.ltr,
         maxLines: 1,
+        softWrap: false,
         ellipsis: '...',
       )..layout(maxWidth: rightColMaxWidth);
 
@@ -628,25 +607,24 @@ class _StampRenderer {
           text: formatHari(activeDt),
           style: TextStyle(
             color: fgColor,
-            fontSize: 14.0 * s,
+            fontSize: 13.5 * s,
             fontWeight: FontWeight.w400,
             shadows: textShadows,
           ),
         ),
         textDirection: ui.TextDirection.ltr,
         maxLines: 1,
+        softWrap: false,
       )..layout(maxWidth: rightColMaxWidth);
 
-      topBlockHeight = max(
-        logoSize,
-        max(
-          jamPainter.height,
-          tanggalPainter.height + (2.0 * s) + hariPainter.height,
-        ),
+      timeRowHeight = max(
+        jamPainter.height,
+        tanggalPainter.height + (2.0 * s) + hariPainter.height,
       );
-    } else if (logoImg != null) {
-      topBlockHeight = logoSize;
     }
+
+    final double topBlockHeight =
+        (logoImg != null ? logoSize + logoBottomGap : 0.0) + timeRowHeight;
 
     final List<String> extraLines = buildExtraDetailLines(cfg);
     final String detailsCombined = extraLines.join('\n');
@@ -658,7 +636,7 @@ class _StampRenderer {
           text: detailsCombined,
           style: TextStyle(
             color: fgColor,
-            fontSize: 13.5 * s,
+            fontSize: 13.0 * s,
             fontWeight: FontWeight.w400,
             height: 1.25,
             shadows: textShadows,
@@ -671,7 +649,7 @@ class _StampRenderer {
     }
 
     final double gapBelowHeader =
-        (topBlockHeight > 0 && detailsPainter != null) ? (8.0 * s) : 0.0;
+        (topBlockHeight > 0 && detailsPainter != null) ? (7.0 * s) : 0.0;
     final double totalStampHeight =
         topBlockHeight + gapBelowHeader + (detailsPainter?.height ?? 0.0);
     final double stampTopY = h - padBottom - totalStampHeight;
@@ -690,36 +668,33 @@ class _StampRenderer {
       canvas.drawRect(Rect.fromLTWH(0, gradTop, w, h - gradTop), gradPaint);
     }
 
-    double curX = padLeft;
+    double currentY = stampTopY;
+
     if (logoImg != null) {
       canvas.drawImageRect(
         logoImg,
         Rect.fromLTWH(0, 0, logoImg.width.toDouble(), logoImg.height.toDouble()),
-        Rect.fromLTWH(
-          curX,
-          stampTopY + ((topBlockHeight - logoSize) / 2),
-          logoSize,
-          logoSize,
-        ),
+        Rect.fromLTWH(padLeft, currentY, logoSize, logoSize),
         Paint(),
       );
-      curX += logoSize + logoGap;
       logoImg.dispose();
+      currentY += logoSize + logoBottomGap;
     }
 
     if (cfg.showTime &&
         jamPainter != null &&
         tanggalPainter != null &&
         hariPainter != null) {
+      double curX = padLeft;
       jamPainter.paint(
         canvas,
-        Offset(curX, stampTopY + ((topBlockHeight - jamPainter.height) / 2)),
+        Offset(curX, currentY + ((timeRowHeight - jamPainter.height) / 2)),
       );
 
       final double dividerX = curX + jamPainter.width + (10.0 * s);
-      final double dividerHeight = 36.0 * s;
+      final double dividerHeight = 34.0 * s;
       final double dividerTopY =
-          stampTopY + ((topBlockHeight - dividerHeight) / 2);
+          currentY + ((timeRowHeight - dividerHeight) / 2);
 
       canvas.drawRect(
         Rect.fromLTWH(dividerX, dividerTopY, 2.5 * s, dividerHeight),
@@ -730,7 +705,7 @@ class _StampRenderer {
       final double rightColHeight =
           tanggalPainter.height + (2.0 * s) + hariPainter.height;
       final double rightColTopY =
-          stampTopY + ((topBlockHeight - rightColHeight) / 2);
+          currentY + ((timeRowHeight - rightColHeight) / 2);
 
       tanggalPainter.paint(canvas, Offset(rightColX, rightColTopY));
       hariPainter.paint(
@@ -794,11 +769,7 @@ Widget _buildStampOverlayWidget({
   final double refScale = boxWidth > 0 ? (boxWidth / 390.0) : 1.0;
   final double ratioFactor =
       _StampRenderer.aspectScaleFactor(boxWidth.round(), boxHeight.round());
-  final double mult = _StampRenderer.sizeMultiplier(
-    cfg.formSize,
-    frameWidth: boxWidth,
-    frameHeight: boxHeight,
-  );
+  final double mult = _StampRenderer.sizeMultiplier(cfg.formSize);
   final double s = refScale * mult * ratioFactor;
 
   final Color fgColor = _StampRenderer.resolveTextColor(cfg.textColor);
@@ -836,78 +807,84 @@ Widget _buildStampOverlayWidget({
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (cfg.showTime || hasLogo)
+          if (hasLogo) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6 * s),
+              child: Image.file(
+                File(cfg.logoFilePath!),
+                width: 38 * s,
+                height: 38 * s,
+                fit: BoxFit.cover,
+              ),
+            ),
+            SizedBox(height: 6 * s),
+          ],
+          if (cfg.showTime)
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                if (hasLogo) ...[
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6 * s),
-                    child: Image.file(
-                      File(cfg.logoFilePath!),
-                      width: 44 * s,
-                      height: 44 * s,
-                      fit: BoxFit.cover,
-                    ),
+                Text(
+                  _StampRenderer.formatJamMenit(activeDt),
+                  maxLines: 1,
+                  softWrap: false,
+                  style: TextStyle(
+                    color: fgColor,
+                    fontSize: 34 * s,
+                    fontWeight: FontWeight.w700,
+                    height: 1.0,
+                    shadows: previewShadows,
                   ),
-                  SizedBox(width: 10 * s),
-                ],
-                if (cfg.showTime) ...[
-                  Text(
-                    _StampRenderer.formatJamMenit(activeDt),
-                    style: TextStyle(
-                      color: fgColor,
-                      fontSize: 36 * s,
-                      fontWeight: FontWeight.w700,
-                      height: 1.0,
-                      shadows: previewShadows,
-                    ),
-                  ),
-                  SizedBox(width: 10 * s),
-                  Container(
-                    width: 2.5 * s,
-                    height: 36 * s,
-                    color: const Color(0xFFFFD000),
-                  ),
-                  SizedBox(width: 10 * s),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _StampRenderer.formatTanggalLengkap(activeDt),
-                          style: TextStyle(
-                            color: fgColor,
-                            fontSize: 15 * s,
-                            fontWeight: FontWeight.w600,
-                            shadows: previewShadows,
-                          ),
+                ),
+                SizedBox(width: 10 * s),
+                Container(
+                  width: 2.5 * s,
+                  height: 34 * s,
+                  color: const Color(0xFFFFD000),
+                ),
+                SizedBox(width: 10 * s),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        _StampRenderer.formatTanggalLengkap(activeDt),
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: fgColor,
+                          fontSize: 14.5 * s,
+                          fontWeight: FontWeight.w600,
+                          shadows: previewShadows,
                         ),
-                        SizedBox(height: 2 * s),
-                        Text(
-                          _StampRenderer.formatHari(activeDt),
-                          style: TextStyle(
-                            color: fgColor,
-                            fontSize: 14 * s,
-                            shadows: previewShadows,
-                          ),
+                      ),
+                      SizedBox(height: 2 * s),
+                      Text(
+                        _StampRenderer.formatHari(activeDt),
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: fgColor,
+                          fontSize: 13.5 * s,
+                          shadows: previewShadows,
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ],
             ),
           if (extraLines.isNotEmpty) ...[
-            SizedBox(height: 8 * s),
+            SizedBox(height: 7 * s),
             Text(
               extraLines.join('\n'),
               maxLines: 6,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: fgColor,
-                fontSize: 13.5 * s,
+                fontSize: 13.0 * s,
                 height: 1.25,
                 shadows: previewShadows,
               ),

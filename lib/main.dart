@@ -1145,7 +1145,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   bool _showAddress = true;
   String _customAddress =
-      'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku';[span_0](start_span)[span_0](end_span)
+      'BPPP Ambon, Jl. Dr. J. Leimena, Rumah Tiga, Kec. Tlk. Ambon, Kota Ambon, Maluku';
 
   bool _showCoords = false;
   String _gpsCoordsText = 'Mencari GPS...';

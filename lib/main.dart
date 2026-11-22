@@ -115,6 +115,105 @@ class _WatermarkConfig {
   }
 }
 
+class _ShutterAudioService {
+  static const MethodChannel _mediaStoreChannel =
+      MethodChannel('timestamp_by_putra/media_store');
+  static String? _cachedWavPath;
+
+  static Uint8List _buildMechanicalClickWavBytes() {
+    const int sampleRate = 22050;
+    const int totalSamples = 2400; // ~109 ms crisp shutter click
+    final List<double> samples = List<double>.filled(totalSamples, 0.0);
+    final Random rng = Random(42);
+
+    // Pulsa 1: snap rana buka/tutup cepat (0..450 samples)
+    for (int i = 0; i < 450 && i < totalSamples; i++) {
+      final double env = exp(-i / 75.0);
+      final double tone = sin(2 * pi * 1850 * (i / sampleRate)) * 0.55;
+      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.65;
+      samples[i] += (tone + transient) * env;
+    }
+
+    // Pulsa 2: pantulan mekanis kedua (780..1500 samples)
+    for (int i = 780; i < 1500 && i < totalSamples; i++) {
+      final int local = i - 780;
+      final double env = exp(-local / 95.0);
+      final double tone = sin(2 * pi * 1320 * (local / sampleRate)) * 0.45;
+      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.45;
+      samples[i] += (tone + transient) * env;
+    }
+
+    final int dataSize = totalSamples * 2; // 16-bit PCM mono
+    final ByteData buffer = ByteData(44 + dataSize);
+
+    void writeAscii(int offset, String text) {
+      for (int i = 0; i < text.length; i++) {
+        buffer.setUint8(offset + i, text.codeUnitAt(i));
+      }
+    }
+
+    writeAscii(0, 'RIFF');
+    buffer.setUint32(4, 36 + dataSize, Endian.little);
+    writeAscii(8, 'WAVE');
+    writeAscii(12, 'fmt ');
+    buffer.setUint32(16, 16, Endian.little); // PCM chunk size
+    buffer.setUint16(20, 1, Endian.little); // PCM format = 1
+    buffer.setUint16(22, 1, Endian.little); // Channels = 1 (mono)
+    buffer.setUint32(24, sampleRate, Endian.little);
+    buffer.setUint32(28, sampleRate * 2, Endian.little); // ByteRate
+    buffer.setUint16(32, 2, Endian.little); // BlockAlign
+    buffer.setUint16(34, 16, Endian.little); // BitsPerSample
+    writeAscii(36, 'data');
+    buffer.setUint32(40, dataSize, Endian.little);
+
+    int offset = 44;
+    for (int i = 0; i < totalSamples; i++) {
+      final double clamped = samples[i].clamp(-0.95, 0.95);
+      final int pcm16 = (clamped * 32767.0).round();
+      buffer.setInt16(offset, pcm16, Endian.little);
+      offset += 2;
+    }
+
+    return buffer.buffer.asUint8List();
+  }
+
+  static Future<String> _ensureWavFile() async {
+    if (_cachedWavPath != null) {
+      final File cached = File(_cachedWavPath!);
+      if (await cached.exists() && await cached.length() > 44) {
+        return cached.path;
+      }
+    }
+    final Directory tempDir = await getTemporaryDirectory();
+    final File wavFile =
+        File('${tempDir.path}${Platform.pathSeparator}shutter_click.wav');
+    await wavFile.writeAsBytes(_buildMechanicalClickWavBytes(), flush: true);
+    _cachedWavPath = wavFile.path;
+    return wavFile.path;
+  }
+
+  static Future<void> playShutterSound() async {
+    try {
+      final String wavPath = await _ensureWavFile();
+      if (Platform.isAndroid) {
+        final dynamic handled = await _mediaStoreChannel.invokeMethod(
+          'playShutterSound',
+          {'path': wavPath},
+        );
+        if (handled == true) {
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('Native playShutterSound fallback: $e');
+    }
+
+    try {
+      await SystemSound.play(SystemSoundType.click);
+    } catch (_) {}
+  }
+}
+
 class _TrashService {
   static const MethodChannel _mediaStoreChannel =
       MethodChannel('timestamp_by_putra/media_store');
@@ -251,49 +350,6 @@ class _CameraGridPainter extends CustomPainter {
     canvas.drawLine(Offset(col2, 0), Offset(col2, h), gridPaint);
     canvas.drawLine(Offset(0, row1), Offset(w, row1), gridPaint);
     canvas.drawLine(Offset(0, row2), Offset(w, row2), gridPaint);
-
-    final double midY = h / 2.0;
-    final double midX = w / 2.0;
-    const double centerCircleR = 10.0;
-
-    final Paint levelPaint = Paint()
-      ..color = Colors.white.withOpacity(0.75)
-      ..strokeWidth = 1.3
-      ..style = PaintingStyle.stroke;
-
-    final double leftLineEnd = max(0.0, midX - centerCircleR - 14.0);
-    final double rightLineStart = min(w, midX + centerCircleR + 14.0);
-    canvas.drawLine(
-      Offset(max(0.0, midX - 66.0), midY),
-      Offset(leftLineEnd, midY),
-      levelPaint,
-    );
-    canvas.drawLine(
-      Offset(rightLineStart, midY),
-      Offset(min(w, midX + 66.0), midY),
-      levelPaint,
-    );
-
-    canvas.drawCircle(Offset(midX, midY), centerCircleR, levelPaint);
-
-    final Paint dashPaint = Paint()
-      ..color = Colors.white.withOpacity(0.55)
-      ..strokeWidth = 1.2
-      ..style = PaintingStyle.stroke;
-
-    const double dashCount = 7;
-    for (int i = 1; i <= dashCount; i++) {
-      final double t = i / (dashCount + 1);
-      final double dx = midX + (t * 85.0);
-      final double dy = midY - (t * 72.0);
-      if (dx < w && dy > 0) {
-        canvas.drawLine(
-          Offset(dx, dy),
-          Offset(min(w, dx + 6.0), max(0.0, dy - 5.0)),
-          dashPaint,
-        );
-      }
-    }
   }
 
   @override
@@ -1013,9 +1069,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _playShutterSoundIfEnabled() async {
     if (!_shutterSoundEnabled) return;
-    try {
-      await SystemSound.play(SystemSoundType.click);
-    } catch (_) {}
+    await _ShutterAudioService.playShutterSound();
   }
 
   Future<void> _openSettingsPage() async {
@@ -3554,6 +3608,7 @@ class _GalleryWatermarkEditorScreenState
   bool _editorDrawerOpen = false;
   bool _isSaving = false;
   bool _anyChanged = false;
+  bool _isClosingEmpty = false;
   final Map<String, double> _aspectRatioCache = {};
 
   @override
@@ -3779,7 +3834,7 @@ class _GalleryWatermarkEditorScreenState
 
   Future<void> _deleteCurrentPhotoToTrash() async {
     final File? target = _currentFile;
-    if (target == null || _isSaving) return;
+    if (target == null || _isSaving || _isClosingEmpty) return;
 
     final bool confirmed = await _TrashService.confirmMoveToTrash(
       context,
@@ -3805,20 +3860,36 @@ class _GalleryWatermarkEditorScreenState
     _anyChanged = true;
     _LatestPhotosGridScreen.invalidateCache();
 
-    setState(() {
-      _files.removeAt(_currentIndex);
-      if (_files.isEmpty) {
+    final int removedIdx = _currentIndex;
+    final List<File> nextFiles = List<File>.from(_files)..removeAt(removedIdx);
+
+    if (nextFiles.isEmpty) {
+      _isClosingEmpty = true;
+      setState(() {
+        _files = const [];
+        _currentIndex = 0;
+        _editorDrawerOpen = false;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         Navigator.of(context).pop(true);
-        return;
-      }
-      if (_currentIndex >= _files.length) {
-        _currentIndex = _files.length - 1;
-      }
+      });
+      return;
+    }
+
+    final int nextIdx =
+        removedIdx >= nextFiles.length ? nextFiles.length - 1 : removedIdx;
+
+    setState(() {
+      _files = nextFiles;
+      _currentIndex = nextIdx;
     });
 
-    if (!mounted || _files.isEmpty) return;
-    _pageController.jumpToPage(_currentIndex);
-    _resolvePhotoAspectRatio(_files[_currentIndex]);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pageController.hasClients) return;
+      _pageController.jumpToPage(nextIdx);
+      _resolvePhotoAspectRatio(nextFiles[nextIdx]);
+    });
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -4142,66 +4213,72 @@ class _GalleryWatermarkEditorScreenState
         child: Column(
           children: [
             Expanded(
-              child: PageView.builder(
-                controller: _pageController,
-                itemCount: _files.length,
-                onPageChanged: (idx) {
-                  setState(() => _currentIndex = idx);
-                  _resolvePhotoAspectRatio(_files[idx]);
-                },
-                itemBuilder: (context, idx) {
-                  final File itemFile = _files[idx];
-                  final double ratio =
-                      _aspectRatioCache[itemFile.path] ?? (3.0 / 4.0);
-                  return Center(
-                    child: LayoutBuilder(
-                      builder: (context, outerBox) {
-                        final double safeRatio = ratio > 0 ? ratio : (3.0 / 4.0);
-                        double boxW = outerBox.maxWidth;
-                        double boxH = boxW / safeRatio;
-                        if (outerBox.maxHeight.isFinite &&
-                            boxH > outerBox.maxHeight) {
-                          boxH = outerBox.maxHeight;
-                          boxW = boxH * safeRatio;
-                        }
-                        return SizedBox(
-                          width: boxW,
-                          height: boxH,
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              Image.file(
-                                itemFile,
-                                fit: BoxFit.fill,
+              child: _files.isEmpty
+                  ? const SizedBox.shrink()
+                  : PageView.builder(
+                      controller: _pageController,
+                      itemCount: _files.length,
+                      onPageChanged: (idx) {
+                        setState(() => _currentIndex = idx);
+                        _resolvePhotoAspectRatio(_files[idx]);
+                      },
+                      itemBuilder: (context, idx) {
+                        final File itemFile = _files[idx];
+                        final double ratio =
+                            _aspectRatioCache[itemFile.path] ?? (3.0 / 4.0);
+                        return Center(
+                          child: LayoutBuilder(
+                            builder: (context, outerBox) {
+                              final double safeRatio =
+                                  ratio > 0 ? ratio : (3.0 / 4.0);
+                              double boxW = outerBox.maxWidth;
+                              double boxH = boxW / safeRatio;
+                              if (outerBox.maxHeight.isFinite &&
+                                  boxH > outerBox.maxHeight) {
+                                boxH = outerBox.maxHeight;
+                                boxW = boxH * safeRatio;
+                              }
+                              return SizedBox(
                                 width: boxW,
                                 height: boxH,
-                                errorBuilder: (_, __, ___) => const Center(
-                                  child: Text(
-                                    'Gagal memuat foto',
-                                    style: TextStyle(color: Colors.white70),
-                                  ),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    Image.file(
+                                      itemFile,
+                                      fit: BoxFit.fill,
+                                      width: boxW,
+                                      height: boxH,
+                                      errorBuilder: (_, __, ___) =>
+                                          const Center(
+                                        child: Text(
+                                          'Gagal memuat foto',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    if (_stampVisible)
+                                      Positioned(
+                                        left: 0,
+                                        right: 0,
+                                        bottom: 0,
+                                        child: _buildStampOverlayWidget(
+                                          activeDt: _activeDateTime(),
+                                          cfg: _cfg,
+                                          boxWidth: boxW,
+                                          boxHeight: boxH,
+                                        ),
+                                      ),
+                                  ],
                                 ),
-                              ),
-                              if (_stampVisible)
-                                Positioned(
-                                  left: 0,
-                                  right: 0,
-                                  bottom: 0,
-                                  child: _buildStampOverlayWidget(
-                                    activeDt: _activeDateTime(),
-                                    cfg: _cfg,
-                                    boxWidth: boxW,
-                                    boxHeight: boxH,
-                                  ),
-                                ),
-                            ],
+                              );
+                            },
                           ),
                         );
                       },
                     ),
-                  );
-                },
-              ),
             ),
             _buildEditDrawer(),
             Container(

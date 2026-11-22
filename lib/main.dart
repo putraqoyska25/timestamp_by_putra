@@ -124,11 +124,10 @@ class _ShutterAudioService {
     if (_cachedWavBytes != null) return _cachedWavBytes!;
 
     const int sampleRate = 22050;
-    const int totalSamples = 2800; // ~127 ms suara rana kamera
+    const int totalSamples = 2800;
     final List<double> samples = List<double>.filled(totalSamples, 0.0);
     final Random rng = Random(42);
 
-    // Pulsa 1: hentakan awal rana (0..550 samples)
     for (int i = 0; i < 550 && i < totalSamples; i++) {
       final double env = exp(-i / 85.0);
       final double tone = sin(2 * pi * 2100 * (i / sampleRate)) * 0.65;
@@ -136,7 +135,6 @@ class _ShutterAudioService {
       samples[i] += (tone + transient) * env;
     }
 
-    // Pulsa 2: penutupan bilah rana (820..1750 samples)
     for (int i = 820; i < 1750 && i < totalSamples; i++) {
       final int local = i - 820;
       final double env = exp(-local / 110.0);
@@ -2438,9 +2436,9 @@ class _CameraScreenState extends State<CameraScreen>
                 Text(
                   '${_getAspectRatioLabel()} • ${_getQualityLabel()}${displayedTimer > 0 ? ' • ${displayedTimer}s' : ' • 0s'}',
                   style: const TextStyle(
+                    color: Colors.white70,
                     fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
               ],
@@ -3137,6 +3135,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         '/storage/emulated/0/Download',
         '/storage/emulated/0/Movies',
         '/storage/emulated/0/Android/media',
+        '/storage/emulated/0/Pictures/Screenshots',
+        '/storage/emulated/0/DCIM/Screenshots',
+        '/storage/emulated/0/Pictures/WhatsApp',
       ]) {
         final d = Directory(p);
         if (await d.exists()) candidateDirs.add(d);

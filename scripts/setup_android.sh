@@ -86,7 +86,7 @@ tasks.register<Delete>("clean") {
 }
 EOF
 
-# 4. Tulis app/build.gradle.kts
+# 4. Tulis app/build.gradle.kts dengan jvmTarget bertipe String ("17")
 cat <<'EOF' > "$APP_DIR/build.gradle.kts"
 plugins {
     id("com.android.application")
@@ -105,7 +105,7 @@ android {
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17
+        jvmTarget = "17"
     }
 
     defaultConfig {

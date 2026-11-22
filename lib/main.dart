@@ -115,6 +115,116 @@ class _WatermarkConfig {
   }
 }
 
+class _TrashService {
+  static const MethodChannel _mediaStoreChannel =
+      MethodChannel('timestamp_by_putra/media_store');
+
+  static Future<bool> confirmMoveToTrash(
+    BuildContext context, {
+    required int count,
+  }) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1D24),
+        title: const Text('Pindahkan ke Sampah'),
+        content: Text(
+          count == 1
+              ? 'Foto ini akan dipindahkan ke sampah dan tidak dihapus secara permanen. Lanjutkan?'
+              : '$count foto terpilih akan dipindahkan ke sampah dan tidak dihapus secara permanen. Lanjutkan?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFD9383A),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Pindah ke Sampah'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
+  static Future<int> moveFilesToTrash(List<String> filePaths) async {
+    final List<String> cleanPaths = filePaths
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+    if (cleanPaths.isEmpty) return 0;
+
+    int movedCount = 0;
+    List<String> remainingPaths = List<String>.from(cleanPaths);
+
+    if (Platform.isAndroid) {
+      try {
+        final dynamic nativeRes = await _mediaStoreChannel.invokeMethod(
+          'moveToTrash',
+          {'paths': remainingPaths},
+        );
+        if (nativeRes is Map) {
+          final int nativeMoved =
+              (nativeRes['movedCount'] as num?)?.toInt() ?? 0;
+          movedCount += nativeMoved;
+          final List<dynamic>? unresolvedRaw =
+              nativeRes['unresolvedPaths'] as List<dynamic>?;
+          if (unresolvedRaw != null) {
+            remainingPaths = unresolvedRaw
+                .map((e) => e?.toString().trim() ?? '')
+                .where((e) => e.isNotEmpty)
+                .toList();
+          } else if (nativeMoved >= remainingPaths.length) {
+            remainingPaths = const [];
+          }
+        } else if (nativeRes is bool && nativeRes) {
+          movedCount += remainingPaths.length;
+          remainingPaths = const [];
+        }
+      } catch (e) {
+        debugPrint('MediaStore moveToTrash fallback: $e');
+      }
+    }
+
+    if (remainingPaths.isNotEmpty) {
+      final Directory appSupport = await getApplicationSupportDirectory();
+      final Directory trashDir =
+          Directory('${appSupport.path}${Platform.pathSeparator}trash_bin');
+      if (!await trashDir.exists()) {
+        await trashDir.create(recursive: true);
+      }
+
+      for (final String p in remainingPaths) {
+        try {
+          final File src = File(p);
+          if (!await src.exists()) continue;
+          final String baseName = p.split(Platform.pathSeparator).last;
+          final String destPath =
+              '${trashDir.path}${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_$baseName';
+          try {
+            await src.rename(destPath);
+            movedCount++;
+          } catch (_) {
+            await src.copy(destPath);
+            await src.delete();
+            movedCount++;
+          }
+        } catch (e) {
+          debugPrint('Gagal memindahkan $p ke folder sampah: $e');
+        }
+      }
+    }
+
+    return movedCount;
+  }
+}
+
 class _StampRenderer {
   static const List<String> _hariIndo = [
     'Senin',
@@ -602,7 +712,6 @@ class _CameraScreenState extends State<CameraScreen>
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
 
-  // Tap-to-focus & 1-touch vertical exposure drag state
   Offset? _focusPointNormalized;
   Offset? _focusUiOffset;
   double _minExposureOffset = -2.0;
@@ -615,7 +724,6 @@ class _CameraScreenState extends State<CameraScreen>
   PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
   ImageQualityPreset _qualityPreset = ImageQualityPreset.p720;
 
-  // Siklus timer: 0s (jepret langsung), 3s, 5s
   int _timerSeconds = 0;
   int? _countdownRemaining;
   Timer? _countdownTimer;
@@ -2441,10 +2549,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   late _WatermarkConfig _config;
   late final ScrollController _scrollController;
   bool _isLoading = true;
+  bool _isDeleting = false;
   List<_MediaEntry> _entries = [];
   int _visibleCount = 0;
 
-  // Fast-scroll right-side handle state
+  bool _selectionMode = false;
+  final Set<String> _selectedPaths = {};
+
   bool _showScrubber = false;
   bool _isDraggingScrubber = false;
   double _scrubberFraction = 0.0;
@@ -2474,6 +2585,57 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     } else {
       _loadAllPhotos();
     }
+  }
+
+  void _toggleSelectionMode() {
+    setState(() {
+      _selectionMode = !_selectionMode;
+      if (!_selectionMode) {
+        _selectedPaths.clear();
+      }
+    });
+  }
+
+  void _toggleSelectPath(String path) {
+    setState(() {
+      if (_selectedPaths.contains(path)) {
+        _selectedPaths.remove(path);
+        if (_selectedPaths.isEmpty && _selectionMode) {
+          // Biarkan mode tandai tetap aktif agar user bisa memilih ulang
+        }
+      } else {
+        _selectedPaths.add(path);
+      }
+    });
+  }
+
+  Future<void> _deleteSelectedToTrash() async {
+    if (_selectedPaths.isEmpty || _isDeleting) return;
+    final List<String> targets = _selectedPaths.toList();
+    final bool ok = await _TrashService.confirmMoveToTrash(
+      context,
+      count: targets.length,
+    );
+    if (!ok || !mounted) return;
+
+    setState(() => _isDeleting = true);
+    final int moved = await _TrashService.moveFilesToTrash(targets);
+    _LatestPhotosGridScreen.invalidateCache();
+    await _loadAllPhotos(forceRefresh: true);
+
+    if (!mounted) return;
+    setState(() {
+      _isDeleting = false;
+      _selectionMode = false;
+      _selectedPaths.clear();
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$moved foto dipindahkan ke sampah'),
+        backgroundColor: Colors.green,
+      ),
+    );
   }
 
   void _scheduleScrubberHide({int milliseconds = 1500}) {
@@ -2745,11 +2907,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }).toList();
   }
 
-  Future<void> _openPhotoWatermarkEditor(File file) async {
-    final bool? saved = await Navigator.of(context).push<bool>(
+  Future<void> _openPhotoWatermarkEditorAtIndex(int initialIndex) async {
+    final List<File> allFiles = _entries.map((e) => e.file).toList();
+    if (allFiles.isEmpty) return;
+
+    final bool? changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => _GalleryWatermarkEditorScreen(
-          photoFile: file,
+          photoFiles: allFiles,
+          initialIndex: initialIndex.clamp(0, allFiles.length - 1),
           initialConfig: _config,
           onConfigUpdated: (updatedCfg) {
             if (!mounted) return;
@@ -2760,7 +2926,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       ),
     );
 
-    if (saved == true && mounted) {
+    if (changed == true && mounted) {
+      _LatestPhotosGridScreen.invalidateCache();
       await _loadAllPhotos(forceRefresh: true);
     }
   }
@@ -2913,14 +3080,39 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final sections = _buildMonthlySections(visibleEntries);
     final hasMore = _visibleCount < total;
 
+    int runningIndex = 0;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text(
-          'Terbaru',
-          style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+        title: Text(
+          _selectionMode
+              ? '${_selectedPaths.length} ditandai'
+              : 'Terbaru',
+          style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
         ),
+        actions: [
+          if (_selectionMode && _selectedPaths.isNotEmpty)
+            IconButton(
+              onPressed: _isDeleting ? null : _deleteSelectedToTrash,
+              icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
+              tooltip: 'Pindahkan ke Sampah',
+            ),
+          if (total > 0)
+            TextButton(
+              onPressed: _isDeleting ? null : _toggleSelectionMode,
+              child: Text(
+                _selectionMode ? 'Batal' : 'Tandai',
+                style: TextStyle(
+                  color: _selectionMode
+                      ? const Color(0xFFFFD000)
+                      : Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
       ),
       body: _isLoading
           ? const SizedBox.shrink()
@@ -2973,41 +3165,101 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                 ),
                               ),
                             ),
-                            SliverPadding(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 4),
-                              sliver: SliverGrid(
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: 3,
-                                  crossAxisSpacing: 3,
-                                  mainAxisSpacing: 3,
-                                ),
-                                delegate: SliverChildBuilderDelegate(
-                                  (ctx, idx) {
-                                    final File file = sec.entries[idx].file;
-                                    return InkWell(
-                                      onTap: () =>
-                                          _openPhotoWatermarkEditor(file),
-                                      child: Image.file(
-                                        file,
-                                        cacheWidth: 200,
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (_, __, ___) =>
-                                            const ColoredBox(
-                                          color: Color(0xFF1C2029),
-                                          child: Icon(
-                                            Icons.broken_image_outlined,
-                                            color: Colors.white54,
-                                          ),
+                            () {
+                              final int baseIdx = runningIndex;
+                              runningIndex += sec.entries.length;
+                              return SliverPadding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 4),
+                                sliver: SliverGrid(
+                                  gridDelegate:
+                                      const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 3,
+                                    crossAxisSpacing: 3,
+                                    mainAxisSpacing: 3,
+                                  ),
+                                  delegate: SliverChildBuilderDelegate(
+                                    (ctx, idx) {
+                                      final File file = sec.entries[idx].file;
+                                      final int globalIdx = baseIdx + idx;
+                                      final bool isChecked =
+                                          _selectedPaths.contains(file.path);
+
+                                      return GestureDetector(
+                                        onLongPress: () {
+                                          setState(() {
+                                            _selectionMode = true;
+                                            _selectedPaths.add(file.path);
+                                          });
+                                        },
+                                        onTap: () {
+                                          if (_selectionMode) {
+                                            _toggleSelectPath(file.path);
+                                          } else {
+                                            _openPhotoWatermarkEditorAtIndex(
+                                              globalIdx,
+                                            );
+                                          }
+                                        },
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            Image.file(
+                                              file,
+                                              cacheWidth: 200,
+                                              fit: BoxFit.cover,
+                                              errorBuilder: (_, __, ___) =>
+                                                  const ColoredBox(
+                                                color: Color(0xFF1C2029),
+                                                child: Icon(
+                                                  Icons.broken_image_outlined,
+                                                  color: Colors.white54,
+                                                ),
+                                              ),
+                                            ),
+                                            if (isChecked)
+                                              Container(
+                                                color: Colors.black
+                                                    .withOpacity(0.32),
+                                              ),
+                                            if (_selectionMode || isChecked)
+                                              Positioned(
+                                                top: 6,
+                                                right: 6,
+                                                child: Container(
+                                                  width: 22,
+                                                  height: 22,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color: isChecked
+                                                        ? const Color(
+                                                            0xFFFFD000,
+                                                          )
+                                                        : Colors.black
+                                                            .withOpacity(0.45),
+                                                    border: Border.all(
+                                                      color: Colors.white,
+                                                      width: 1.5,
+                                                    ),
+                                                  ),
+                                                  child: isChecked
+                                                      ? const Icon(
+                                                          Icons.check,
+                                                          size: 14,
+                                                          color: Colors.black,
+                                                        )
+                                                      : null,
+                                                ),
+                                              ),
+                                          ],
                                         ),
-                                      ),
-                                    );
-                                  },
-                                  childCount: sec.entries.length,
+                                      );
+                                    },
+                                    childCount: sec.entries.length,
+                                  ),
                                 ),
-                              ),
-                            ),
+                              );
+                            }(),
                           ],
                           SliverToBoxAdapter(
                             child: Padding(
@@ -3049,12 +3301,14 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 }
 
 class _GalleryWatermarkEditorScreen extends StatefulWidget {
-  final File photoFile;
+  final List<File> photoFiles;
+  final int initialIndex;
   final _WatermarkConfig initialConfig;
   final ValueChanged<_WatermarkConfig> onConfigUpdated;
 
   const _GalleryWatermarkEditorScreen({
-    required this.photoFile,
+    required this.photoFiles,
+    required this.initialIndex,
     required this.initialConfig,
     required this.onConfigUpdated,
   });
@@ -3067,20 +3321,32 @@ class _GalleryWatermarkEditorScreen extends StatefulWidget {
 class _GalleryWatermarkEditorScreenState
     extends State<_GalleryWatermarkEditorScreen> {
   late _WatermarkConfig _cfg;
+  late List<File> _files;
+  late int _currentIndex;
+  late PageController _pageController;
+
   final ImagePicker _picker = ImagePicker();
   DateTime _nowClock = DateTime.now();
   Timer? _clockTimer;
   bool _stampVisible = false;
   bool _editorDrawerOpen = false;
   bool _isSaving = false;
-  double _photoAspectRatio = 3.0 / 4.0;
+  bool _anyChanged = false;
+  final Map<String, double> _aspectRatioCache = {};
 
   @override
   void initState() {
     super.initState();
     _cfg = widget.initialConfig;
+    _files = List<File>.from(widget.photoFiles);
+    _currentIndex = _files.isEmpty
+        ? 0
+        : widget.initialIndex.clamp(0, _files.length - 1);
+    _pageController = PageController(initialPage: _currentIndex);
     _stampVisible = false;
-    _resolvePhotoAspectRatio();
+    if (_files.isNotEmpty) {
+      _resolvePhotoAspectRatio(_files[_currentIndex]);
+    }
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (!_cfg.isManualTime) {
@@ -3089,16 +3355,22 @@ class _GalleryWatermarkEditorScreenState
     });
   }
 
-  Future<void> _resolvePhotoAspectRatio() async {
+  File? get _currentFile {
+    if (_files.isEmpty) return null;
+    return _files[_currentIndex.clamp(0, _files.length - 1)];
+  }
+
+  Future<void> _resolvePhotoAspectRatio(File file) async {
+    if (_aspectRatioCache.containsKey(file.path)) return;
     try {
-      if (!await widget.photoFile.exists()) return;
-      final bytes = await widget.photoFile.readAsBytes();
+      if (!await file.exists()) return;
+      final bytes = await file.readAsBytes();
       final decoded = img.decodeImage(bytes);
       if (decoded == null || decoded.width <= 0 || decoded.height <= 0) return;
       final oriented = img.bakeOrientation(decoded);
       if (!mounted) return;
       setState(() {
-        _photoAspectRatio = oriented.width / oriented.height;
+        _aspectRatioCache[file.path] = oriented.width / oriented.height;
       });
     } catch (_) {}
   }
@@ -3106,6 +3378,7 @@ class _GalleryWatermarkEditorScreenState
   @override
   void dispose() {
     _clockTimer?.cancel();
+    _pageController.dispose();
     super.dispose();
   }
 
@@ -3282,16 +3555,68 @@ class _GalleryWatermarkEditorScreenState
     });
   }
 
+  Future<void> _deleteCurrentPhotoToTrash() async {
+    final File? target = _currentFile;
+    if (target == null || _isSaving) return;
+
+    final bool confirmed = await _TrashService.confirmMoveToTrash(
+      context,
+      count: 1,
+    );
+    if (!confirmed || !mounted) return;
+
+    setState(() => _isSaving = true);
+    final int moved = await _TrashService.moveFilesToTrash([target.path]);
+    if (!mounted) return;
+    setState(() => _isSaving = false);
+
+    if (moved <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Gagal memindahkan foto ke sampah'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    _anyChanged = true;
+    _LatestPhotosGridScreen.invalidateCache();
+
+    setState(() {
+      _files.removeAt(_currentIndex);
+      if (_files.isEmpty) {
+        Navigator.of(context).pop(true);
+        return;
+      }
+      if (_currentIndex >= _files.length) {
+        _currentIndex = _files.length - 1;
+      }
+    });
+
+    if (!mounted || _files.isEmpty) return;
+    _pageController.jumpToPage(_currentIndex);
+    _resolvePhotoAspectRatio(_files[_currentIndex]);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Foto dipindahkan ke sampah'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
   Future<void> _saveStampedPhotoToGallery() async {
-    if (_isSaving) return;
+    final File? activeFile = _currentFile;
+    if (_isSaving || activeFile == null) return;
     setState(() => _isSaving = true);
 
     String? tempOutPath;
     try {
-      if (!await widget.photoFile.exists()) {
+      if (!await activeFile.exists()) {
         throw Exception('File foto tidak ditemukan');
       }
-      final Uint8List rawBytes = await widget.photoFile.readAsBytes();
+      final Uint8List rawBytes = await activeFile.readAsBytes();
       final Uint8List outputBytes = _stampVisible
           ? await _StampRenderer.buildStampedJpgBytes(
               baseJpgBytes: rawBytes,
@@ -3541,7 +3866,8 @@ class _GalleryWatermarkEditorScreenState
         backgroundColor: Colors.black,
         automaticallyImplyLeading: false,
         leading: TextButton(
-          onPressed: _isSaving ? null : () => Navigator.of(context).pop(false),
+          onPressed:
+              _isSaving ? null : () => Navigator.of(context).pop(_anyChanged),
           child: const Text(
             'Batal',
             style: TextStyle(color: Colors.white, fontSize: 15),
@@ -3549,11 +3875,18 @@ class _GalleryWatermarkEditorScreenState
         ),
         leadingWidth: 74,
         centerTitle: true,
-        title: const Text(
-          'Tanda air foto',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+        title: Text(
+          _files.isEmpty
+              ? 'Tanda air foto'
+              : '${_currentIndex + 1} / ${_files.length}',
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
         ),
         actions: [
+          IconButton(
+            onPressed: _isSaving ? null : _deleteCurrentPhotoToTrash,
+            icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
+            tooltip: 'Pindahkan ke Sampah',
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 10),
             child: FilledButton(
@@ -3587,53 +3920,65 @@ class _GalleryWatermarkEditorScreenState
         child: Column(
           children: [
             Expanded(
-              child: Center(
-                child: LayoutBuilder(
-                  builder: (context, outerBox) {
-                    final double safeRatio =
-                        _photoAspectRatio > 0 ? _photoAspectRatio : (3.0 / 4.0);
-                    double boxW = outerBox.maxWidth;
-                    double boxH = boxW / safeRatio;
-                    if (outerBox.maxHeight.isFinite &&
-                        boxH > outerBox.maxHeight) {
-                      boxH = outerBox.maxHeight;
-                      boxW = boxH * safeRatio;
-                    }
-                    return SizedBox(
-                      width: boxW,
-                      height: boxH,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Image.file(
-                            widget.photoFile,
-                            fit: BoxFit.fill,
-                            width: boxW,
-                            height: boxH,
-                            errorBuilder: (_, __, ___) => const Center(
-                              child: Text(
-                                'Gagal memuat foto',
-                                style: TextStyle(color: Colors.white70),
+              child: PageView.builder(
+                controller: _pageController,
+                itemCount: _files.length,
+                onPageChanged: (idx) {
+                  setState(() => _currentIndex = idx);
+                  _resolvePhotoAspectRatio(_files[idx]);
+                },
+                itemBuilder: (context, idx) {
+                  final File itemFile = _files[idx];
+                  final double ratio =
+                      _aspectRatioCache[itemFile.path] ?? (3.0 / 4.0);
+                  return Center(
+                    child: LayoutBuilder(
+                      builder: (context, outerBox) {
+                        final double safeRatio = ratio > 0 ? ratio : (3.0 / 4.0);
+                        double boxW = outerBox.maxWidth;
+                        double boxH = boxW / safeRatio;
+                        if (outerBox.maxHeight.isFinite &&
+                            boxH > outerBox.maxHeight) {
+                          boxH = outerBox.maxHeight;
+                          boxW = boxH * safeRatio;
+                        }
+                        return SizedBox(
+                          width: boxW,
+                          height: boxH,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Image.file(
+                                itemFile,
+                                fit: BoxFit.fill,
+                                width: boxW,
+                                height: boxH,
+                                errorBuilder: (_, __, ___) => const Center(
+                                  child: Text(
+                                    'Gagal memuat foto',
+                                    style: TextStyle(color: Colors.white70),
+                                  ),
+                                ),
                               ),
-                            ),
+                              if (_stampVisible)
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  child: _buildStampOverlayWidget(
+                                    activeDt: _activeDateTime(),
+                                    cfg: _cfg,
+                                    boxWidth: boxW,
+                                    boxHeight: boxH,
+                                  ),
+                                ),
+                            ],
                           ),
-                          if (_stampVisible)
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              child: _buildStampOverlayWidget(
-                                activeDt: _activeDateTime(),
-                                cfg: _cfg,
-                                boxWidth: boxW,
-                                boxHeight: boxH,
-                              ),
-                            ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
+                        );
+                      },
+                    ),
+                  );
+                },
               ),
             ),
             _buildEditDrawer(),

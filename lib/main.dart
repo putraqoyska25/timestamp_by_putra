@@ -332,74 +332,13 @@ class _CameraScreenState extends State<CameraScreen>
     return _hariIndo[dt.weekday - 1];
   }
 
-  Future<void> _openGalleryPreview() async {
-    try {
-      final XFile? picked = await _picker.pickImage(
-        source: ImageSource.gallery,
-      );
-      if (picked == null || !mounted) return;
-
-      final File file = File(picked.path);
-      if (!await file.exists()) return;
-
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => Dialog(
-          backgroundColor: const Color(0xFF14171D),
-          insetPadding: const EdgeInsets.all(14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 10, 6, 6),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Pratinjau Galeri',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      icon: const Icon(Icons.close, color: Colors.white70),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ],
-                ),
-              ),
-              ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(ctx).size.height * 0.68,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  child: InteractiveViewer(
-                    child: Image.file(
-                      file,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-          ),
-        ),
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Gagal membuka galeri: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
+  Future<void> _openGalleryAlbumBrowser() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const _AlbumBrowserScreen(),
+      ),
+    );
   }
 
   Future<void> _pickLogoImage() async {
@@ -1891,9 +1830,9 @@ class _CameraScreenState extends State<CameraScreen>
             children: [
               _BottomActionIcon(
                 icon: Icons.photo_library_outlined,
-                label: 'Pratinjau',
+                label: 'Album',
                 active: false,
-                onTap: _openGalleryPreview,
+                onTap: _openGalleryAlbumBrowser,
               ),
               GestureDetector(
                 onTap: shutterLocked ? null : _onShutterPressed,
@@ -2000,6 +1939,425 @@ class _CameraScreenState extends State<CameraScreen>
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _AlbumGroup {
+  final String name;
+  final List<File> files;
+  final bool isPrimarySection;
+
+  const _AlbumGroup({
+    required this.name,
+    required this.files,
+    this.isPrimarySection = true,
+  });
+}
+
+class _AlbumBrowserScreen extends StatefulWidget {
+  const _AlbumBrowserScreen();
+
+  @override
+  State<_AlbumBrowserScreen> createState() => _AlbumBrowserScreenState();
+}
+
+class _AlbumBrowserScreenState extends State<_AlbumBrowserScreen> {
+  bool _isLoading = true;
+  List<_AlbumGroup> _primaryAlbums = [];
+  List<_AlbumGroup> _otherAlbums = [];
+
+  static const Set<String> _imageExts = {
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.webp',
+    '.heic',
+    '.heif',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAlbums();
+  }
+
+  bool _isImageFile(String path) {
+    final lower = path.toLowerCase();
+    for (final ext in _imageExts) {
+      if (lower.endsWith(ext)) return true;
+    }
+    return false;
+  }
+
+  Future<void> _loadAlbums() async {
+    if (mounted) setState(() => _isLoading = true);
+
+    final List<File> allImages = [];
+    final Map<String, List<File>> folderMap = {};
+
+    final List<Directory> candidateDirs = [];
+    if (Platform.isAndroid) {
+      for (final p in [
+        '/storage/emulated/0/DCIM',
+        '/storage/emulated/0/Pictures',
+        '/storage/emulated/0/Download',
+      ]) {
+        final d = Directory(p);
+        if (await d.exists()) candidateDirs.add(d);
+      }
+    }
+
+    try {
+      final extDir = await getExternalStorageDirectory();
+      if (extDir != null && await extDir.exists()) {
+        candidateDirs.add(extDir);
+      }
+    } catch (_) {}
+
+    final Set<String> visitedPaths = {};
+
+    Future<void> scanDir(Directory dir, {int depth = 0}) async {
+      if (depth > 3) return;
+      try {
+        await for (final entity in dir.list(followLinks: false)) {
+          final path = entity.path;
+          if (visitedPaths.contains(path)) continue;
+          visitedPaths.add(path);
+
+          if (entity is Directory) {
+            final baseName = path.split(Platform.pathSeparator).last;
+            if (baseName.startsWith('.')) continue;
+            await scanDir(entity, depth: depth + 1);
+          } else if (entity is File && _isImageFile(path)) {
+            allImages.add(entity);
+            final parentName = entity.parent.path
+                .split(Platform.pathSeparator)
+                .last
+                .trim();
+            final albumKey = parentName.isEmpty ? 'Galeri' : parentName;
+            folderMap.putIfAbsent(albumKey, () => []).add(entity);
+          }
+        }
+      } catch (_) {}
+    }
+
+    for (final d in candidateDirs) {
+      await scanDir(d);
+    }
+
+    allImages.sort((a, b) {
+      final ta = a.statSync().modified;
+      final tb = b.statSync().modified;
+      return tb.compareTo(ta);
+    });
+
+    for (final list in folderMap.values) {
+      list.sort((a, b) {
+        final ta = a.statSync().modified;
+        final tb = b.statSync().modified;
+        return tb.compareTo(ta);
+      });
+    }
+
+    final List<_AlbumGroup> primary = [];
+    if (allImages.isNotEmpty) {
+      primary.add(_AlbumGroup(name: 'Semua', files: allImages));
+    }
+
+    final List<String> featuredNames = [
+      'Camera',
+      'Kamera',
+      'DCIM',
+      'Pictures',
+      'Download',
+      'Unduhan',
+    ];
+    final Set<String> usedInPrimary = {};
+
+    for (final key in featuredNames) {
+      final matchedKey = folderMap.keys.firstWhere(
+        (k) => k.toLowerCase() == key.toLowerCase(),
+        orElse: () => '',
+      );
+      if (matchedKey.isNotEmpty &&
+          folderMap[matchedKey]!.isNotEmpty &&
+          !usedInPrimary.contains(matchedKey)) {
+        usedInPrimary.add(matchedKey);
+        final displayName =
+            matchedKey.toLowerCase() == 'camera' ? 'Kamera' : matchedKey;
+        primary.add(
+          _AlbumGroup(name: displayName, files: folderMap[matchedKey]!),
+        );
+      }
+    }
+
+    final List<_AlbumGroup> others = [];
+    final sortedKeys = folderMap.keys.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    for (final k in sortedKeys) {
+      if (!usedInPrimary.contains(k) && folderMap[k]!.isNotEmpty) {
+        others.add(
+          _AlbumGroup(name: k, files: folderMap[k]!, isPrimarySection: false),
+        );
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _primaryAlbums = primary;
+      _otherAlbums = others;
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _openAlbumDetail(_AlbumGroup album) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _AlbumPhotosGridScreen(album: album),
+      ),
+    );
+    await _loadAlbums();
+  }
+
+  Widget _buildAlbumCard(_AlbumGroup album) {
+    final File cover = album.files.first;
+    return InkWell(
+      onTap: () => _openAlbumDetail(album),
+      borderRadius: BorderRadius.circular(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                width: double.infinity,
+                color: const Color(0xFF1C2029),
+                child: Image.file(
+                  cover,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const Center(
+                    child: Icon(
+                      Icons.broken_image_outlined,
+                      color: Colors.white54,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            album.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          Text(
+            '${album.files.length}',
+            style: const TextStyle(
+              color: Colors.white60,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text(
+          'Album',
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+        ),
+        actions: [
+          IconButton(
+            onPressed: _loadAlbums,
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Muat Ulang Album',
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : (_primaryAlbums.isEmpty && _otherAlbums.isEmpty)
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.photo_album_outlined,
+                          size: 48,
+                          color: Colors.white54,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Foto album belum terbaca. Pastikan izin akses media/galeri diizinkan pada pengaturan aplikasi.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                        const SizedBox(height: 14),
+                        FilledButton(
+                          onPressed: _loadAlbums,
+                          child: const Text('Coba Lagi'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : RefreshIndicator(
+                  onRefresh: _loadAlbums,
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(14, 6, 14, 24),
+                    children: [
+                      if (_primaryAlbums.isNotEmpty)
+                        GridView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: _primaryAlbums.length,
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 14,
+                            childAspectRatio: 0.78,
+                          ),
+                          itemBuilder: (_, idx) =>
+                              _buildAlbumCard(_primaryAlbums[idx]),
+                        ),
+                      if (_otherAlbums.isNotEmpty) ...[
+                        const SizedBox(height: 20),
+                        const Text(
+                          'Album Lainnya',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        GridView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: _otherAlbums.length,
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 14,
+                            childAspectRatio: 0.78,
+                          ),
+                          itemBuilder: (_, idx) =>
+                              _buildAlbumCard(_otherAlbums[idx]),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+    );
+  }
+}
+
+class _AlbumPhotosGridScreen extends StatelessWidget {
+  final _AlbumGroup album;
+
+  const _AlbumPhotosGridScreen({required this.album});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: Text('${album.name} (${album.files.length})'),
+      ),
+      body: GridView.builder(
+        padding: const EdgeInsets.all(6),
+        itemCount: album.files.length,
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 4,
+          mainAxisSpacing: 4,
+        ),
+        itemBuilder: (ctx, idx) {
+          final file = album.files[idx];
+          return InkWell(
+            onTap: () {
+              Navigator.of(ctx).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => _FullPhotoViewerScreen(
+                    files: album.files,
+                    initialIndex: idx,
+                  ),
+                ),
+              );
+            },
+            child: Image.file(
+              file,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const ColoredBox(
+                color: Color(0xFF1C2029),
+                child: Icon(Icons.broken_image_outlined, color: Colors.white54),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _FullPhotoViewerScreen extends StatelessWidget {
+  final List<File> files;
+  final int initialIndex;
+
+  const _FullPhotoViewerScreen({
+    required this.files,
+    required this.initialIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = PageController(initialPage: initialIndex);
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text('Pratinjau Foto'),
+      ),
+      body: PageView.builder(
+        controller: controller,
+        itemCount: files.length,
+        itemBuilder: (_, idx) {
+          final file = files[idx];
+          return Center(
+            child: InteractiveViewer(
+              minScale: 0.8,
+              maxScale: 4.0,
+              child: Image.file(
+                file,
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => const Text(
+                  'Gagal memuat gambar',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }

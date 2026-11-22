@@ -37,7 +37,7 @@ class TimestampByPutraApp extends StatelessWidget {
   }
 }
 
-enum ActiveDrawer { none, topDrawer, address, editSize, templateTime }
+enum ActiveDrawer { none, topDrawer, watermarkEdit }
 
 enum StampFormSize { small, medium, large }
 
@@ -330,6 +330,76 @@ class _CameraScreenState extends State<CameraScreen>
 
   String _formatHari(DateTime dt) {
     return _hariIndo[dt.weekday - 1];
+  }
+
+  Future<void> _openGalleryPreview() async {
+    try {
+      final XFile? picked = await _picker.pickImage(
+        source: ImageSource.gallery,
+      );
+      if (picked == null || !mounted) return;
+
+      final File file = File(picked.path);
+      if (!await file.exists()) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => Dialog(
+          backgroundColor: const Color(0xFF14171D),
+          insetPadding: const EdgeInsets.all(14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 6, 6),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Pratinjau Galeri',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+              ),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(ctx).size.height * 0.68,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: InteractiveViewer(
+                    child: Image.file(
+                      file,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Gagal membuka galeri: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _pickLogoImage() async {
@@ -760,7 +830,6 @@ class _CameraScreenState extends State<CameraScreen>
     return Uint8List.fromList(img.encodeJpg(cropped, quality: 90));
   }
 
-  // Skala proporsional yang meniru ukuran relatif _buildStampPreviewOverlay di layar preview
   Future<ui.Image> _renderStampOverlayImage({
     required int targetW,
     required int targetH,
@@ -773,7 +842,6 @@ class _CameraScreenState extends State<CameraScreen>
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
 
-    // Acuan lebar preview potret ~390 px agar proporsi teks & pembungkusan alamat sama seperti di aplikasi
     final double refScale = w / 390.0;
     final double s = refScale * sizeMultiplier;
     final double padLeft = 14.0 * refScale;
@@ -1618,8 +1686,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildDrawerPanel() {
-    if (_openDrawer == ActiveDrawer.none ||
-        _openDrawer == ActiveDrawer.topDrawer) {
+    if (_openDrawer != ActiveDrawer.watermarkEdit) {
       return const SizedBox.shrink();
     }
 
@@ -1806,27 +1873,17 @@ class _CameraScreenState extends State<CameraScreen>
 
     return Container(
       color: Colors.black,
-      padding: const EdgeInsets.only(top: 6, bottom: 16, left: 8, right: 8),
+      padding: const EdgeInsets.only(top: 6, bottom: 16, left: 16, right: 16),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                'Album',
-                style: TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-              SizedBox(width: 24),
-              Text(
-                'Foto',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
+          const Text(
+            'Foto',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
           ),
           const SizedBox(height: 8),
           Row(
@@ -1836,21 +1893,7 @@ class _CameraScreenState extends State<CameraScreen>
                 icon: Icons.photo_library_outlined,
                 label: 'Pratinjau',
                 active: false,
-                onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Hasil foto tersimpan di aplikasi Galeri / Foto HP.',
-                      ),
-                    ),
-                  );
-                },
-              ),
-              _BottomActionIcon(
-                icon: Icons.near_me_outlined,
-                label: 'Alamat',
-                active: _openDrawer == ActiveDrawer.address || _showAddress,
-                onTap: () => _toggleDrawer(ActiveDrawer.address),
+                onTap: _openGalleryPreview,
               ),
               GestureDetector(
                 onTap: shutterLocked ? null : _onShutterPressed,
@@ -1895,16 +1938,8 @@ class _CameraScreenState extends State<CameraScreen>
               _BottomActionIcon(
                 icon: Icons.edit_outlined,
                 label: 'Sunting',
-                active: _openDrawer == ActiveDrawer.editSize ||
-                    _openDrawer == ActiveDrawer.address,
-                onTap: () => _toggleDrawer(ActiveDrawer.editSize),
-              ),
-              _BottomActionIcon(
-                icon: Icons.calendar_today_outlined,
-                label: 'Templat',
-                active:
-                    _openDrawer == ActiveDrawer.templateTime || _isManualTime,
-                onTap: () => _toggleDrawer(ActiveDrawer.templateTime),
+                active: _openDrawer == ActiveDrawer.watermarkEdit,
+                onTap: () => _toggleDrawer(ActiveDrawer.watermarkEdit),
               ),
             ],
           ),

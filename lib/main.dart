@@ -440,12 +440,12 @@ class _StampRenderer {
     if (color == StampTextColor.black) {
       return const [
         Shadow(
-          color: Color(0xE6FFFFFF),
+          color: Color(0xF2FFFFFF),
           offset: Offset(0, 0),
-          blurRadius: 5.0,
+          blurRadius: 6.0,
         ),
         Shadow(
-          color: Color(0xCCFFFFFF),
+          color: Color(0xD9FFFFFF),
           offset: Offset(0, 1.5),
           blurRadius: 3.0,
         ),
@@ -467,10 +467,10 @@ class _StampRenderer {
     final double w = frameWidth > 0 ? frameWidth : 390.0;
     final double h = frameHeight > 0 ? frameHeight : 520.0;
     final double refScale = w / 390.0;
-    final double targetSpanH = h * 0.285;
+    final double targetSpanH = h * 0.295;
     final double baseSpanH = 74.0 * refScale;
-    final double ratioBoost = baseSpanH > 0 ? (targetSpanH / baseSpanH) : 1.75;
-    return ratioBoost.clamp(1.55, 2.25);
+    final double ratioBoost = baseSpanH > 0 ? (targetSpanH / baseSpanH) : 1.85;
+    return ratioBoost.clamp(1.60, 2.35);
   }
 
   static double mediumMultiplier(double frameWidth, double frameHeight) {

@@ -2504,7 +2504,7 @@ class _CameraScreenState extends State<CameraScreen>
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
-            const SizedBox.height(12),
+            const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: () => _initCameraByDirection(
                 CameraLensDirection.back,

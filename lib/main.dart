@@ -2281,6 +2281,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   double _scrubberFraction = 0.0;
   String? _activeMonthPill;
   Timer? _hideScrubberTimer;
+  DateTime _lastScrubUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
   static const Set<String> _imageExts = {
     '.jpg',
@@ -2325,10 +2326,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (pos.maxScrollExtent > 0) {
       final frac = (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0);
       if (!_isDraggingScrubber) {
-        setState(() {
-          _scrubberFraction = frac;
-          _showScrubber = true;
-        });
+        final now = DateTime.now();
+        if (!_showScrubber ||
+            now.difference(_lastScrubUiUpdate).inMilliseconds >= 32) {
+          _lastScrubUiUpdate = now;
+          setState(() {
+            _scrubberFraction = frac;
+            _showScrubber = true;
+          });
+        }
         _scheduleScrubberHide();
       }
     }
@@ -2362,12 +2368,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!_scrollController.hasClients || trackHeight <= 0) return;
     final frac = (localY / trackHeight).clamp(0.0, 1.0);
 
-    // Pastikan item cukup termuat saat pengguna melompat jauh ke bawah
-    final targetVisible = max(
-      _visibleCount,
-      ((frac * _entries.length) + _pageSize).round().clamp(0, _entries.length),
+    final targetVisible = min(
+      _entries.length,
+      max(
+        _visibleCount,
+        ((frac * _entries.length) + _pageSize).round(),
+      ),
     );
-    if (targetVisible != _visibleCount) {
+    final bool visibleChanged = targetVisible != _visibleCount;
+    if (visibleChanged) {
       _visibleCount = targetVisible;
     }
 
@@ -2376,12 +2385,20 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _scrollController.jumpTo(frac * maxExtent);
     }
 
-    setState(() {
-      _scrubberFraction = frac;
-      _showScrubber = true;
-      _isDraggingScrubber = true;
-      _activeMonthPill = _resolveMonthLabelAtFraction(frac, sections);
-    });
+    final now = DateTime.now();
+    final nextPill = _resolveMonthLabelAtFraction(frac, sections);
+    if (visibleChanged ||
+        !_isDraggingScrubber ||
+        nextPill != _activeMonthPill ||
+        now.difference(_lastScrubUiUpdate).inMilliseconds >= 24) {
+      _lastScrubUiUpdate = now;
+      setState(() {
+        _scrubberFraction = frac;
+        _showScrubber = true;
+        _isDraggingScrubber = true;
+        _activeMonthPill = nextPill;
+      });
+    }
   }
 
   bool _isImageFile(String path) {
@@ -2493,7 +2510,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       collected = await _scanDirectoriesFallback();
     }
 
-    // Urutkan dari paling terbaru ke paling lama
     collected.sort((a, b) => b.modified.compareTo(a.modified));
     _LatestPhotosGridScreen._cachedEntries = collected;
 
@@ -2593,10 +2609,16 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
               width: 44,
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onVerticalDragStart: (details) =>
-                    _scrubToTrackY(details.localPosition.dy, box.maxHeight - 24, sections),
-                onVerticalDragUpdate: (details) =>
-                    _scrubToTrackY(details.localPosition.dy, box.maxHeight - 24, sections),
+                onVerticalDragStart: (details) => _scrubToTrackY(
+                  details.localPosition.dy,
+                  box.maxHeight - 24,
+                  sections,
+                ),
+                onVerticalDragUpdate: (details) => _scrubToTrackY(
+                  details.localPosition.dy,
+                  box.maxHeight - 24,
+                  sections,
+                ),
                 onVerticalDragEnd: (_) {
                   setState(() => _isDraggingScrubber = false);
                   _scheduleScrubberHide();
@@ -2606,13 +2628,17 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                   _scheduleScrubberHide();
                 },
                 onTapDown: (details) {
-                  _scrubToTrackY(details.localPosition.dy, box.maxHeight - 24, sections);
+                  _scrubToTrackY(
+                    details.localPosition.dy,
+                    box.maxHeight - 24,
+                    sections,
+                  );
                   setState(() => _isDraggingScrubber = false);
                   _scheduleScrubberHide();
                 },
                 child: AnimatedOpacity(
                   opacity: (_showScrubber || _isDraggingScrubber) ? 1.0 : 0.35,
-                  duration: const Duration(milliseconds: 160),
+                  duration: const Duration(milliseconds: 140),
                   child: Stack(
                     children: [
                       Positioned(
@@ -2704,7 +2730,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? const SizedBox.shrink()
           : total == 0
               ? Center(
                   child: Padding(
@@ -2789,7 +2815,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                       },
                                       child: Image.file(
                                         file,
-                                        cacheWidth: 240,
+                                        cacheWidth: 220,
                                         fit: BoxFit.cover,
                                         errorBuilder: (_, __, ___) =>
                                             const ColoredBox(

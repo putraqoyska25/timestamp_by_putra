@@ -2251,7 +2251,7 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   static const int _maxFilesScan = 5000;
-  static const int _pageSize = 150;
+  static const int _pageSize = 90;
   static const MethodChannel _mediaStoreChannel =
       MethodChannel('timestamp_by_putra/media_store');
 
@@ -2323,23 +2323,23 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final pos = _scrollController.position;
     final total = _entries.length;
 
-    if (pos.maxScrollExtent > 0) {
+    if (!_isDraggingScrubber && pos.maxScrollExtent > 0) {
       final frac = (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0);
-      if (!_isDraggingScrubber) {
-        final now = DateTime.now();
-        if (!_showScrubber ||
-            now.difference(_lastScrubUiUpdate).inMilliseconds >= 32) {
-          _lastScrubUiUpdate = now;
-          setState(() {
-            _scrubberFraction = frac;
-            _showScrubber = true;
-          });
-        }
-        _scheduleScrubberHide();
+      final now = DateTime.now();
+      if (!_showScrubber ||
+          now.difference(_lastScrubUiUpdate).inMilliseconds >= 45) {
+        _lastScrubUiUpdate = now;
+        setState(() {
+          _scrubberFraction = frac;
+          _showScrubber = true;
+        });
       }
+      _scheduleScrubberHide();
     }
 
-    if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
+    if (!_isDraggingScrubber &&
+        _visibleCount < total &&
+        pos.pixels >= pos.maxScrollExtent - 450) {
       setState(() {
         _visibleCount = min(total, _visibleCount + _pageSize);
       });
@@ -2360,37 +2360,19 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         : '${sec.monthName} ${sec.year}';
   }
 
-  void _scrubToTrackY(
+  void _updateScrubThumbPosition(
     double localY,
     double trackHeight,
     List<_MonthlyPhotoSection> sections,
   ) {
-    if (!_scrollController.hasClients || trackHeight <= 0) return;
+    if (trackHeight <= 0) return;
     final frac = (localY / trackHeight).clamp(0.0, 1.0);
-
-    final targetVisible = min(
-      _entries.length,
-      max(
-        _visibleCount,
-        ((frac * _entries.length) + _pageSize).round(),
-      ),
-    );
-    final bool visibleChanged = targetVisible != _visibleCount;
-    if (visibleChanged) {
-      _visibleCount = targetVisible;
-    }
-
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    if (maxExtent > 0) {
-      _scrollController.jumpTo(frac * maxExtent);
-    }
-
     final now = DateTime.now();
     final nextPill = _resolveMonthLabelAtFraction(frac, sections);
-    if (visibleChanged ||
-        !_isDraggingScrubber ||
+
+    if (!_isDraggingScrubber ||
         nextPill != _activeMonthPill ||
-        now.difference(_lastScrubUiUpdate).inMilliseconds >= 24) {
+        now.difference(_lastScrubUiUpdate).inMilliseconds >= 32) {
       _lastScrubUiUpdate = now;
       setState(() {
         _scrubberFraction = frac;
@@ -2399,6 +2381,39 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         _activeMonthPill = nextPill;
       });
     }
+  }
+
+  void _commitScrubJump() {
+    if (!_scrollController.hasClients || _entries.isEmpty) {
+      setState(() => _isDraggingScrubber = false);
+      _scheduleScrubberHide();
+      return;
+    }
+
+    final frac = _scrubberFraction.clamp(0.0, 1.0);
+    final targetIndex = (frac * (_entries.length - 1))
+        .round()
+        .clamp(0, _entries.length - 1);
+    final neededVisible =
+        min(_entries.length, max(_visibleCount, targetIndex + 45));
+
+    setState(() {
+      _visibleCount = neededVisible;
+      _isDraggingScrubber = false;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final maxExtent = _scrollController.position.maxScrollExtent;
+      if (maxExtent > 0) {
+        final ratio = (_entries.length > 1)
+            ? (targetIndex / max(1, _visibleCount - 1)).clamp(0.0, 1.0)
+            : frac;
+        final targetOffset = (frac * maxExtent).clamp(0.0, maxExtent);
+        _scrollController.jumpTo(max(0.0, min(maxExtent, targetOffset * 0.5 + ratio * maxExtent * 0.5)));
+      }
+      _scheduleScrubberHide();
+    });
   }
 
   bool _isImageFile(String path) {
@@ -2609,32 +2624,25 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
               width: 44,
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onVerticalDragStart: (details) => _scrubToTrackY(
+                onVerticalDragStart: (details) => _updateScrubThumbPosition(
                   details.localPosition.dy,
                   box.maxHeight - 24,
                   sections,
                 ),
-                onVerticalDragUpdate: (details) => _scrubToTrackY(
+                onVerticalDragUpdate: (details) => _updateScrubThumbPosition(
                   details.localPosition.dy,
                   box.maxHeight - 24,
                   sections,
                 ),
-                onVerticalDragEnd: (_) {
-                  setState(() => _isDraggingScrubber = false);
-                  _scheduleScrubberHide();
-                },
-                onVerticalDragCancel: () {
-                  setState(() => _isDraggingScrubber = false);
-                  _scheduleScrubberHide();
-                },
+                onVerticalDragEnd: (_) => _commitScrubJump(),
+                onVerticalDragCancel: () => _commitScrubJump(),
                 onTapDown: (details) {
-                  _scrubToTrackY(
+                  _updateScrubThumbPosition(
                     details.localPosition.dy,
                     box.maxHeight - 24,
                     sections,
                   );
-                  setState(() => _isDraggingScrubber = false);
-                  _scheduleScrubberHide();
+                  _commitScrubJump();
                 },
                 child: AnimatedOpacity(
                   opacity: (_showScrubber || _isDraggingScrubber) ? 1.0 : 0.35,
@@ -2721,13 +2729,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
           'Terbaru',
           style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
         ),
-        actions: [
-          IconButton(
-            onPressed: () => _loadAllPhotos(forceRefresh: true),
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Muat Ulang Foto',
-          ),
-        ],
       ),
       body: _isLoading
           ? const SizedBox.shrink()
@@ -2815,7 +2816,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                       },
                                       child: Image.file(
                                         file,
-                                        cacheWidth: 220,
+                                        cacheWidth: 200,
                                         fit: BoxFit.cover,
                                         errorBuilder: (_, __, ___) =>
                                             const ColoredBox(

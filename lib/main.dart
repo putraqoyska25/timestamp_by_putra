@@ -206,6 +206,15 @@ class _ShutterAudioService {
     return player;
   }
 
+  static Future<void> warmupAudio() async {
+    try {
+      await _ensurePlayer();
+      _buildMechanicalClickWavBytes();
+    } catch (e) {
+      debugPrint('Audio warmup info: $e');
+    }
+  }
+
   static Future<void> playShutterSound() async {
     try {
       final player = await _ensurePlayer();
@@ -402,6 +411,8 @@ class _StampRenderer {
     'Desember',
   ];
 
+  static const double baseLogoSize = 54.0;
+
   static Color resolveTextColor(StampTextColor color) {
     switch (color) {
       case StampTextColor.white:
@@ -554,8 +565,8 @@ class _StampRenderer {
       }
     }
 
-    final double logoSize = logoImg != null ? (38.0 * s) : 0.0;
-    final double logoBottomGap = logoImg != null ? (6.0 * s) : 0.0;
+    final double logoSize = logoImg != null ? (baseLogoSize * s) : 0.0;
+    final double logoBottomGap = logoImg != null ? (7.0 * s) : 0.0;
 
     TextPainter? jamPainter;
     TextPainter? tanggalPainter;
@@ -812,15 +823,15 @@ Widget _buildStampOverlayWidget({
         children: [
           if (hasLogo) ...[
             ClipRRect(
-              borderRadius: BorderRadius.circular(6 * s),
+              borderRadius: BorderRadius.circular(7 * s),
               child: Image.file(
                 File(cfg.logoFilePath!),
-                width: 38 * s,
-                height: 38 * s,
+                width: _StampRenderer.baseLogoSize * s,
+                height: _StampRenderer.baseLogoSize * s,
                 fit: BoxFit.cover,
               ),
             ),
-            SizedBox(height: 6 * s),
+            SizedBox(height: 7 * s),
           ],
           if (cfg.showTime)
             Row(
@@ -1164,6 +1175,9 @@ class CameraScreen extends StatefulWidget {
 
 class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver {
+  static const MethodChannel _mediaStoreChannel =
+      MethodChannel('timestamp_by_putra/media_store');
+
   CameraController? _controller;
   final Random _random = Random();
   final ImagePicker _picker = ImagePicker();
@@ -1175,6 +1189,7 @@ class _CameraScreenState extends State<CameraScreen>
   Timer? _shutterBlinkTimer;
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
+  bool _startupPermissionsRequested = false;
 
   bool _shutterSoundEnabled = true;
   bool _gridEnabled = false;
@@ -1228,9 +1243,28 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initCameraByDirection(CameraLensDirection.back, refreshList: true);
-    _getLocation();
+    unawaited(_bootstrapStartupSequence());
     _startClockTimer();
+  }
+
+  Future<void> _bootstrapStartupSequence() async {
+    await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
+    if (!mounted || _startupPermissionsRequested) return;
+    _startupPermissionsRequested = true;
+
+    if (Platform.isAndroid) {
+      try {
+        await _mediaStoreChannel.invokeMethod('requestMediaPermissions');
+      } catch (e) {
+        debugPrint('requestMediaPermissions awal: $e');
+      }
+    }
+
+    if (!mounted) return;
+    await _getLocation(requestIfDenied: true);
+
+    if (!mounted) return;
+    await _ShutterAudioService.warmupAudio();
   }
 
   @override
@@ -1266,7 +1300,9 @@ class _CameraScreenState extends State<CameraScreen>
       setState(() {
         _systemNow = DateTime.now();
       });
-      _initCameraByDirection(CameraLensDirection.back, refreshList: true);
+      unawaited(
+        _initCameraByDirection(CameraLensDirection.back, refreshList: true),
+      );
     }
   }
 
@@ -1908,8 +1944,8 @@ class _CameraScreenState extends State<CameraScreen>
     await _applyFlashHardwareState();
   }
 
-  Future<void> _getLocation() async {
-    setState(() => _gpsCoordsText = 'Mencari GPS...');
+  Future<void> _getLocation({bool requestIfDenied = true}) async {
+    if (mounted) setState(() => _gpsCoordsText = 'Mencari GPS...');
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       if (mounted) setState(() => _gpsCoordsText = 'GPS Nonaktif');
@@ -1917,12 +1953,13 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
+    if (permission == LocationPermission.denied && requestIfDenied) {
       permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        if (mounted) setState(() => _gpsCoordsText = 'Izin Lokasi Ditolak');
-        return;
-      }
+    }
+
+    if (permission == LocationPermission.denied) {
+      if (mounted) setState(() => _gpsCoordsText = 'Izin Lokasi Ditolak');
+      return;
     }
 
     if (permission == LocationPermission.deniedForever) {
@@ -2467,7 +2504,7 @@ class _CameraScreenState extends State<CameraScreen>
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
-            const SizedBox(height: 12),
+            const SizedBox.height(12),
             FilledButton.icon(
               onPressed: () => _initCameraByDirection(
                 CameraLensDirection.back,
@@ -2685,11 +2722,11 @@ class _CameraScreenState extends State<CameraScreen>
               value: _showCoords,
               onChanged: (val) {
                 setState(() => _showCoords = val);
-                if (val) _getLocation();
+                if (val) _getLocation(requestIfDenied: true);
               },
               onTapContent: () {
                 setState(() => _showCoords = true);
-                _getLocation();
+                _getLocation(requestIfDenied: true);
               },
             ),
             _WatermarkRowTile(
@@ -3187,6 +3224,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     return false;
   }
 
+  Future<void> _ensureMediaPermissions() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _mediaStoreChannel.invokeMethod('requestMediaPermissions');
+    } catch (e) {
+      debugPrint('requestMediaPermissions belum tersedia/gagal: $e');
+    }
+  }
+
   Future<List<_MediaEntry>> _queryMediaStoreNative() async {
     if (!Platform.isAndroid) return const [];
     try {
@@ -3285,6 +3331,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
 
     if (mounted) setState(() => _isLoading = true);
+
+    await _ensureMediaPermissions();
 
     List<_MediaEntry> collected = await _queryMediaStoreNative();
     if (collected.isEmpty) {

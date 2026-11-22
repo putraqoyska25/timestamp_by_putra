@@ -229,6 +229,77 @@ class _TrashService {
   }
 }
 
+class _CameraGridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+
+    final Paint gridPaint = Paint()
+      ..color = Colors.white.withOpacity(0.55)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final double w = size.width;
+    final double h = size.height;
+
+    final double col1 = w / 3.0;
+    final double col2 = (w * 2.0) / 3.0;
+    final double row1 = h / 3.0;
+    final double row2 = (h * 2.0) / 3.0;
+
+    canvas.drawLine(Offset(col1, 0), Offset(col1, h), gridPaint);
+    canvas.drawLine(Offset(col2, 0), Offset(col2, h), gridPaint);
+    canvas.drawLine(Offset(0, row1), Offset(w, row1), gridPaint);
+    canvas.drawLine(Offset(0, row2), Offset(w, row2), gridPaint);
+
+    final double midY = h / 2.0;
+    final double midX = w / 2.0;
+    const double centerCircleR = 10.0;
+
+    final Paint levelPaint = Paint()
+      ..color = Colors.white.withOpacity(0.75)
+      ..strokeWidth = 1.3
+      ..style = PaintingStyle.stroke;
+
+    final double leftLineEnd = max(0.0, midX - centerCircleR - 14.0);
+    final double rightLineStart = min(w, midX + centerCircleR + 14.0);
+    canvas.drawLine(
+      Offset(max(0.0, midX - 66.0), midY),
+      Offset(leftLineEnd, midY),
+      levelPaint,
+    );
+    canvas.drawLine(
+      Offset(rightLineStart, midY),
+      Offset(min(w, midX + 66.0), midY),
+      levelPaint,
+    );
+
+    canvas.drawCircle(Offset(midX, midY), centerCircleR, levelPaint);
+
+    final Paint dashPaint = Paint()
+      ..color = Colors.white.withOpacity(0.55)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+
+    const double dashCount = 7;
+    for (int i = 1; i <= dashCount; i++) {
+      final double t = i / (dashCount + 1);
+      final double dx = midX + (t * 85.0);
+      final double dy = midY - (t * 72.0);
+      if (dx < w && dy > 0) {
+        canvas.drawLine(
+          Offset(dx, dy),
+          Offset(min(w, dx + 6.0), max(0.0, dy - 5.0)),
+          dashPaint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
 class _StampRenderer {
   static const List<String> _hariIndo = [
     'Senin',
@@ -694,6 +765,136 @@ Widget _buildStampOverlayWidget({
   );
 }
 
+class _CameraSettingsScreen extends StatefulWidget {
+  final bool shutterSoundEnabled;
+  final bool gridEnabled;
+  final ValueChanged<bool> onShutterSoundChanged;
+  final ValueChanged<bool> onGridChanged;
+
+  const _CameraSettingsScreen({
+    required this.shutterSoundEnabled,
+    required this.gridEnabled,
+    required this.onShutterSoundChanged,
+    required this.onGridChanged,
+  });
+
+  @override
+  State<_CameraSettingsScreen> createState() => _CameraSettingsScreenState();
+}
+
+class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
+  late bool _shutterSound;
+  late bool _gridOn;
+
+  @override
+  void initState() {
+    super.initState();
+    _shutterSound = widget.shutterSoundEnabled;
+    _gridOn = widget.gridEnabled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: const Text(
+          'Pengaturan',
+          style: TextStyle(
+            fontSize: 19,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+          ),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 10),
+            child: Text(
+              'Pengaturan Umum',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: Colors.white60,
+              ),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF161920),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Column(
+              children: [
+                ListTile(
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  leading: const Icon(
+                    Icons.volume_up_outlined,
+                    color: Colors.white70,
+                    size: 24,
+                  ),
+                  title: const Text(
+                    'Suara rana',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white,
+                    ),
+                  ),
+                  trailing: Switch(
+                    value: _shutterSound,
+                    activeColor: Colors.black,
+                    activeTrackColor: const Color(0xFFFFD000),
+                    onChanged: (val) {
+                      setState(() => _shutterSound = val);
+                      widget.onShutterSoundChanged(val);
+                    },
+                  ),
+                ),
+                const Divider(height: 1, color: Colors.white12, indent: 56),
+                ListTile(
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  leading: const Icon(
+                    Icons.grid_on_outlined,
+                    color: Colors.white70,
+                    size: 24,
+                  ),
+                  title: const Text(
+                    'Kisi / Grid',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white,
+                    ),
+                  ),
+                  trailing: Switch(
+                    value: _gridOn,
+                    activeColor: Colors.black,
+                    activeTrackColor: const Color(0xFFFFD000),
+                    onChanged: (val) {
+                      setState(() => _gridOn = val);
+                      widget.onGridChanged(val);
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
 
@@ -715,6 +916,9 @@ class _CameraScreenState extends State<CameraScreen>
   Timer? _shutterBlinkTimer;
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
+
+  bool _shutterSoundEnabled = true;
+  bool _gridEnabled = false;
 
   Offset? _focusPointNormalized;
   Offset? _focusUiOffset;
@@ -805,6 +1009,31 @@ class _CameraScreenState extends State<CameraScreen>
       });
       _initCameraByDirection(CameraLensDirection.back, refreshList: true);
     }
+  }
+
+  Future<void> _playShutterSoundIfEnabled() async {
+    if (!_shutterSoundEnabled) return;
+    try {
+      await SystemSound.play(SystemSoundType.click);
+    } catch (_) {}
+  }
+
+  Future<void> _openSettingsPage() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _CameraSettingsScreen(
+          shutterSoundEnabled: _shutterSoundEnabled,
+          gridEnabled: _gridEnabled,
+          onShutterSoundChanged: (val) {
+            if (mounted) setState(() => _shutterSoundEnabled = val);
+          },
+          onGridChanged: (val) {
+            if (mounted) setState(() => _gridEnabled = val);
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _disposeControllerSafely() async {
@@ -1576,6 +1805,7 @@ class _CameraScreenState extends State<CameraScreen>
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
 
       _triggerShutterBlink(milliseconds: 110);
+      unawaited(_playShutterSoundIfEnabled());
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
@@ -1817,6 +2047,13 @@ class _CameraScreenState extends State<CameraScreen>
                   ),
                 ),
               ),
+              if (_gridEnabled)
+                IgnorePointer(
+                  child: CustomPaint(
+                    size: Size(box.maxWidth, box.maxHeight),
+                    painter: _CameraGridPainter(),
+                  ),
+                ),
               _buildFocusIndicatorOverlay(box),
             ],
           ),
@@ -1985,24 +2222,28 @@ class _CameraScreenState extends State<CameraScreen>
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                InkWell(
-                  onTap: () => _toggleDrawer(ActiveDrawer.topDrawer),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          drawerOpen
-                              ? Icons.keyboard_arrow_up
-                              : Icons.keyboard_arrow_down,
-                          size: 18,
-                          color: const Color(0xFFFFD000),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      onPressed: _openSettingsPage,
+                      icon: const Icon(
+                        Icons.settings,
+                        size: 20,
+                        color: Colors.white,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Pengaturan',
+                    ),
+                    InkWell(
+                      onTap: () => _toggleDrawer(ActiveDrawer.topDrawer),
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 4,
                         ),
-                        const SizedBox(width: 4),
-                        Text(
+                        child: Text(
                           '${_getAspectRatioLabel()} • ${_getQualityLabel()}${displayedTimer > 0 ? ' • ${displayedTimer}s' : ' • 0s'}',
                           style: const TextStyle(
                             fontSize: 12,
@@ -2010,9 +2251,9 @@ class _CameraScreenState extends State<CameraScreen>
                             color: Colors.white,
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
                 Row(
                   mainAxisSize: MainAxisSize.min,
@@ -2136,26 +2377,6 @@ class _CameraScreenState extends State<CameraScreen>
                         onTap: () => _setQualityPreset(ImageQualityPreset.p360),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Foto Menggunakan Waktu (Timer)',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [0, 3, 5].map((sec) {
-                      return Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 2),
-                          child: _MiniChipButton(
-                            label: sec == 0 ? '0s (Off)' : '${sec}s',
-                            selected: displayedTimer == sec,
-                            onTap: () => setState(() => _timerSeconds = sec),
-                          ),
-                        ),
-                      );
-                    }).toList(),
                   ),
                 ],
               ),

@@ -92,9 +92,16 @@ jobs:
       - name: Set Custom App Launcher Icon
         run: |
           set -euo pipefail
-          ICON_SRC="assets/icon/app_icon.png"
-          if [ ! -f "$ICON_SRC" ]; then
-            echo "ERROR: $ICON_SRC tidak ditemukan di repository!"
+          ICON_SRC=""
+          for candidate in "assets/icon/app_icon.png" "assets/Icon/app_icon.png"; do
+            if [ -f "$candidate" ]; then
+              ICON_SRC="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$ICON_SRC" ]; then
+            echo "ERROR: app_icon.png tidak ditemukan di assets/icon/ maupun assets/Icon/!"
             exit 1
           fi
 
@@ -105,11 +112,12 @@ jobs:
           fi
 
           if command -v python3 >/dev/null 2>&1 && python3 -c "import PIL" 2>/dev/null; then
-            python3 - << 'PY'
+            python3 - "$ICON_SRC" << 'PY'
           from PIL import Image
           import os
+          import sys
 
-          src = "assets/icon/app_icon.png"
+          src = sys.argv[1]
           img = Image.open(src).convert("RGBA")
           sizes = {
               "mipmap-mdpi": 48,
@@ -120,7 +128,7 @@ jobs:
           }
           for folder, px in sizes.items():
               out_dir = os.path.join("android/app/src/main/res", folder)
-              os.makedirs(out_dir, exist_ok=true)
+              os.makedirs(out_dir, exist_ok=True)
               resized = img.resize((px, px), Image.Resampling.LANCZOS)
               resized.save(os.path.join(out_dir, "ic_launcher.png"), format="PNG")
           print("Berhasil generate ic_launcher.png ke seluruh folder mipmap.")
@@ -131,7 +139,7 @@ jobs:
                 cp -f "$ICON_SRC" "$d/ic_launcher.png"
               fi
             done
-            echo "Menyalin app_icon.png langsung ke folder mipmap-*."
+            echo "Menyalin $ICON_SRC langsung ke folder mipmap-*."
           fi
 
       - name: Get dependencies

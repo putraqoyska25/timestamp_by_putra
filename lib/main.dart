@@ -322,7 +322,6 @@ class _CameraScreenState extends State<CameraScreen>
   ) {
     if (_maxExposureOffset <= _minExposureOffset) return;
     final double range = _maxExposureOffset - _minExposureOffset;
-    // Geser ke atas (delta.dy negatif) -> kecerahan naik; geser ke bawah -> turun
     final double dragSpan = max(140.0, box.maxHeight * 0.45);
     final double deltaOffset = (-details.delta.dy / dragSpan) * range;
     unawaited(_setExposureValue(_currentExposureOffset + deltaOffset));
@@ -445,11 +444,37 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _openGalleryAlbumBrowser() async {
     if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => const _AlbumBrowserScreen(),
-      ),
-    );
+    try {
+      final List<XFile> pickedList = await _picker.pickMultiImage(
+        imageQuality: 90,
+      );
+      if (pickedList.isEmpty || !mounted) return;
+
+      final List<File> files = pickedList
+          .map((x) => File(x.path))
+          .where((f) => f.path.isNotEmpty)
+          .toList();
+      if (files.isEmpty || !mounted) return;
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _FullPhotoViewerScreen(
+            files: files,
+            initialIndex: 0,
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Gagal membuka galeri perangkat: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Gagal membuka galeri perangkat: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _pickLogoImage() async {
@@ -1350,7 +1375,8 @@ class _CameraScreenState extends State<CameraScreen>
                       width: 14,
                       child: LayoutBuilder(
                         builder: (context, trackBox) {
-                          final double trackH = max(12.0, trackBox.maxHeight - 10);
+                          final double trackH =
+                              max(12.0, trackBox.maxHeight - 10);
                           final double thumbTop =
                               (1.0 - normalizedExp) * trackH;
                           return Stack(
@@ -2207,462 +2233,6 @@ class _CameraScreenState extends State<CameraScreen>
   }
 }
 
-class _MediaEntry {
-  final File file;
-  final DateTime modified;
-
-  const _MediaEntry({
-    required this.file,
-    required this.modified,
-  });
-}
-
-class _AlbumGroup {
-  final String name;
-  final List<_MediaEntry> entries;
-
-  const _AlbumGroup({
-    required this.name,
-    required this.entries,
-  });
-}
-
-class _AlbumBrowserScreen extends StatefulWidget {
-  const _AlbumBrowserScreen();
-
-  @override
-  State<_AlbumBrowserScreen> createState() => _AlbumBrowserScreenState();
-}
-
-class _AlbumBrowserScreenState extends State<_AlbumBrowserScreen> {
-  static const int _maxFilesScan = 2500;
-
-  bool _isLoading = true;
-  List<_AlbumGroup> _primaryAlbums = [];
-  List<_AlbumGroup> _otherAlbums = [];
-
-  static const Set<String> _imageExts = {
-    '.jpg',
-    '.jpeg',
-    '.png',
-    '.webp',
-    '.heic',
-    '.heif',
-  };
-
-  @override
-  void initState() {
-    super.initState();
-    _loadAlbums();
-  }
-
-  bool _isImageFile(String path) {
-    final lower = path.toLowerCase();
-    for (final ext in _imageExts) {
-      if (lower.endsWith(ext)) return true;
-    }
-    return false;
-  }
-
-  Future<void> _loadAlbums() async {
-    if (mounted) setState(() => _isLoading = true);
-
-    final List<_MediaEntry> allEntries = [];
-    final Map<String, List<_MediaEntry>> folderMap = {};
-
-    final List<Directory> candidateDirs = [];
-    if (Platform.isAndroid) {
-      for (final p in [
-        '/storage/emulated/0/DCIM',
-        '/storage/emulated/0/Pictures',
-        '/storage/emulated/0/Download',
-      ]) {
-        final d = Directory(p);
-        if (await d.exists()) candidateDirs.add(d);
-      }
-    }
-
-    final Set<String> visitedPaths = {};
-
-    Future<void> scanDir(Directory dir, {int depth = 0}) async {
-      if (depth > 2 || allEntries.length >= _maxFilesScan) return;
-      try {
-        await for (final entity in dir.list(followLinks: false)) {
-          if (allEntries.length >= _maxFilesScan) break;
-          final path = entity.path;
-          if (visitedPaths.contains(path)) continue;
-          visitedPaths.add(path);
-
-          if (entity is Directory) {
-            final baseName = path.split(Platform.pathSeparator).last;
-            if (baseName.startsWith('.')) continue;
-            await scanDir(entity, depth: depth + 1);
-          } else if (entity is File && _isImageFile(path)) {
-            DateTime mod = DateTime.fromMillisecondsSinceEpoch(0);
-            try {
-              mod = entity.statSync().modified;
-            } catch (_) {}
-            final entry = _MediaEntry(file: entity, modified: mod);
-            allEntries.add(entry);
-
-            final parentName = entity.parent.path
-                .split(Platform.pathSeparator)
-                .last
-                .trim();
-            final albumKey = parentName.isEmpty ? 'Galeri' : parentName;
-            folderMap.putIfAbsent(albumKey, () => []).add(entry);
-          }
-        }
-      } catch (_) {}
-    }
-
-    for (final d in candidateDirs) {
-      await scanDir(d);
-    }
-
-    allEntries.sort((a, b) => b.modified.compareTo(a.modified));
-    for (final list in folderMap.values) {
-      list.sort((a, b) => b.modified.compareTo(a.modified));
-    }
-
-    final List<_AlbumGroup> primary = [];
-    if (allEntries.isNotEmpty) {
-      primary.add(_AlbumGroup(name: 'Semua', entries: allEntries));
-    }
-
-    final List<String> featuredNames = [
-      'Camera',
-      'Kamera',
-      'DCIM',
-      'Pictures',
-      'Download',
-      'Unduhan',
-    ];
-    final Set<String> usedInPrimary = {};
-
-    for (final key in featuredNames) {
-      final matchedKey = folderMap.keys.firstWhere(
-        (k) => k.toLowerCase() == key.toLowerCase(),
-        orElse: () => '',
-      );
-      if (matchedKey.isNotEmpty &&
-          folderMap[matchedKey]!.isNotEmpty &&
-          !usedInPrimary.contains(matchedKey)) {
-        usedInPrimary.add(matchedKey);
-        final displayName =
-            matchedKey.toLowerCase() == 'camera' ? 'Kamera' : matchedKey;
-        primary.add(
-          _AlbumGroup(name: displayName, entries: folderMap[matchedKey]!),
-        );
-      }
-    }
-
-    final List<_AlbumGroup> others = [];
-    final sortedKeys = folderMap.keys.toList()
-      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-    for (final k in sortedKeys) {
-      if (!usedInPrimary.contains(k) && folderMap[k]!.isNotEmpty) {
-        others.add(_AlbumGroup(name: k, entries: folderMap[k]!));
-      }
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _primaryAlbums = primary;
-      _otherAlbums = others;
-      _isLoading = false;
-    });
-  }
-
-  Future<void> _openAlbumDetail(_AlbumGroup album) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _AlbumPhotosGridScreen(album: album),
-      ),
-    );
-    await _loadAlbums();
-  }
-
-  Widget _buildAlbumCard(_AlbumGroup album) {
-    final File cover = album.entries.first.file;
-    return InkWell(
-      onTap: () => _openAlbumDetail(album),
-      borderRadius: BorderRadius.circular(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: Container(
-                width: double.infinity,
-                color: const Color(0xFF1C2029),
-                child: Image.file(
-                  cover,
-                  cacheWidth: 240,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const Center(
-                    child: Icon(
-                      Icons.broken_image_outlined,
-                      color: Colors.white54,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            album.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          Text(
-            '${album.entries.length}',
-            style: const TextStyle(
-              color: Colors.white60,
-              fontSize: 11,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        title: const Text(
-          'Album',
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-        ),
-        actions: [
-          IconButton(
-            onPressed: _loadAlbums,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Muat Ulang Album',
-          ),
-        ],
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : (_primaryAlbums.isEmpty && _otherAlbums.isEmpty)
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.photo_album_outlined,
-                          size: 48,
-                          color: Colors.white54,
-                        ),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'Foto album belum terbaca. Pastikan izin akses foto/media sudah diizinkan.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white70, fontSize: 13),
-                        ),
-                        const SizedBox(height: 14),
-                        FilledButton(
-                          onPressed: _loadAlbums,
-                          child: const Text('Muat Ulang'),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              : RefreshIndicator(
-                  onRefresh: _loadAlbums,
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(14, 6, 14, 24),
-                    children: [
-                      if (_primaryAlbums.isNotEmpty)
-                        GridView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: _primaryAlbums.length,
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 10,
-                            mainAxisSpacing: 14,
-                            childAspectRatio: 0.78,
-                          ),
-                          itemBuilder: (_, idx) =>
-                              _buildAlbumCard(_primaryAlbums[idx]),
-                        ),
-                      if (_otherAlbums.isNotEmpty) ...[
-                        const SizedBox(height: 20),
-                        const Text(
-                          'Album Lainnya',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        GridView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: _otherAlbums.length,
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 10,
-                            mainAxisSpacing: 14,
-                            childAspectRatio: 0.78,
-                          ),
-                          itemBuilder: (_, idx) =>
-                              _buildAlbumCard(_otherAlbums[idx]),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-    );
-  }
-}
-
-class _AlbumPhotosGridScreen extends StatefulWidget {
-  final _AlbumGroup album;
-
-  const _AlbumPhotosGridScreen({required this.album});
-
-  @override
-  State<_AlbumPhotosGridScreen> createState() => _AlbumPhotosGridScreenState();
-}
-
-class _AlbumPhotosGridScreenState extends State<_AlbumPhotosGridScreen> {
-  static const int _pageSize = 50;
-  late final ScrollController _scrollController;
-  late int _visibleCount;
-
-  @override
-  void initState() {
-    super.initState();
-    _visibleCount = min(_pageSize, widget.album.entries.length);
-    _scrollController = ScrollController()..addListener(_onScroll);
-  }
-
-  void _onScroll() {
-    if (!_scrollController.hasClients) return;
-    final total = widget.album.entries.length;
-    if (_visibleCount >= total) return;
-
-    final pos = _scrollController.position;
-    if (pos.pixels >= pos.maxScrollExtent - 320) {
-      setState(() {
-        _visibleCount = min(total, _visibleCount + _pageSize);
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _scrollController.removeListener(_onScroll);
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final total = widget.album.entries.length;
-    final visibleFiles =
-        widget.album.entries.take(_visibleCount).map((e) => e.file).toList();
-    final hasMore = _visibleCount < total;
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        title: Text('${widget.album.name} ($_visibleCount/$total)'),
-      ),
-      body: CustomScrollView(
-        controller: _scrollController,
-        slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.all(6),
-            sliver: SliverGrid(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 4,
-                mainAxisSpacing: 4,
-              ),
-              delegate: SliverChildBuilderDelegate(
-                (ctx, idx) {
-                  final file = visibleFiles[idx];
-                  return InkWell(
-                    onTap: () {
-                      Navigator.of(ctx).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => _FullPhotoViewerScreen(
-                            files: visibleFiles,
-                            initialIndex: idx,
-                          ),
-                        ),
-                      );
-                    },
-                    child: Image.file(
-                      file,
-                      cacheWidth: 240,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const ColoredBox(
-                        color: Color(0xFF1C2029),
-                        child: Icon(
-                          Icons.broken_image_outlined,
-                          color: Colors.white54,
-                        ),
-                      ),
-                    ),
-                  );
-                },
-                childCount: visibleFiles.length,
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Center(
-                child: hasMore
-                    ? TextButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            _visibleCount = min(total, _visibleCount + _pageSize);
-                          });
-                        },
-                        icon: const Icon(Icons.expand_more),
-                        label: Text(
-                          'Muat 50 foto lagi ($_visibleCount dari $total)',
-                        ),
-                      )
-                    : Text(
-                        'Semua foto dimuat ($total foto)',
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12,
-                        ),
-                      ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _FullPhotoViewerScreen extends StatelessWidget {
   final List<File> files;
   final int initialIndex;
@@ -2679,7 +2249,7 @@ class _FullPhotoViewerScreen extends StatelessWidget {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Pratinjau Foto'),
+        title: Text('Pratinjau Foto (${files.length})'),
       ),
       body: PageView.builder(
         controller: controller,

@@ -162,6 +162,7 @@ class _TrashService {
 
     int movedCount = 0;
     List<String> remainingPaths = List<String>.from(cleanPaths);
+    bool handledBySystemTrash = false;
 
     if (Platform.isAndroid) {
       try {
@@ -170,32 +171,35 @@ class _TrashService {
           {'paths': remainingPaths},
         );
         if (nativeRes is Map) {
-          final int nativeMoved =
-              (nativeRes['movedCount'] as num?)?.toInt() ?? 0;
-          movedCount += nativeMoved;
+          handledBySystemTrash = true;
+          movedCount += (nativeRes['movedCount'] as num?)?.toInt() ?? 0;
           final List<dynamic>? unresolvedRaw =
               nativeRes['unresolvedPaths'] as List<dynamic>?;
-          if (unresolvedRaw != null) {
-            remainingPaths = unresolvedRaw
-                .map((e) => e?.toString().trim() ?? '')
-                .where((e) => e.isNotEmpty)
-                .toList();
-          } else if (nativeMoved >= remainingPaths.length) {
-            remainingPaths = const [];
-          }
+          remainingPaths = unresolvedRaw != null
+              ? unresolvedRaw
+                  .map((e) => e?.toString().trim() ?? '')
+                  .where((e) => e.isNotEmpty)
+                  .toList()
+              : const [];
         } else if (nativeRes is bool && nativeRes) {
+          handledBySystemTrash = true;
           movedCount += remainingPaths.length;
           remainingPaths = const [];
         }
       } catch (e) {
-        debugPrint('MediaStore moveToTrash fallback: $e');
+        debugPrint('MediaStore moveToTrash belum tersedia/gagal: $e');
       }
     }
 
-    if (remainingPaths.isNotEmpty) {
-      final Directory appSupport = await getApplicationSupportDirectory();
+    if (!handledBySystemTrash && remainingPaths.isNotEmpty) {
+      Directory? baseDir;
+      try {
+        baseDir = await getExternalStorageDirectory();
+      } catch (_) {}
+      baseDir ??= await getApplicationDocumentsDirectory();
+
       final Directory trashDir =
-          Directory('${appSupport.path}${Platform.pathSeparator}trash_bin');
+          Directory('${baseDir.path}${Platform.pathSeparator}Sampah');
       if (!await trashDir.exists()) {
         await trashDir.create(recursive: true);
       }
@@ -2600,9 +2604,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     setState(() {
       if (_selectedPaths.contains(path)) {
         _selectedPaths.remove(path);
-        if (_selectedPaths.isEmpty && _selectionMode) {
-          // Biarkan mode tandai tetap aktif agar user bisa memilih ulang
-        }
       } else {
         _selectedPaths.add(path);
       }

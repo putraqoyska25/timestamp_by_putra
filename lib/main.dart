@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:audioplayers/audioplayers.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,7 +39,7 @@ class TimestampByPutraApp extends StatelessWidget {
   }
 }
 
-enum ActiveDrawer { none, topDrawer, watermarkEdit }
+enum ActiveDrawer { none, watermarkEdit }
 
 enum StampFormSize { small, medium, large }
 
@@ -116,34 +117,35 @@ class _WatermarkConfig {
 }
 
 class _ShutterAudioService {
-  static const MethodChannel _mediaStoreChannel =
-      MethodChannel('timestamp_by_putra/media_store');
-  static String? _cachedWavPath;
+  static AudioPlayer? _player;
+  static Uint8List? _cachedWavBytes;
 
   static Uint8List _buildMechanicalClickWavBytes() {
+    if (_cachedWavBytes != null) return _cachedWavBytes!;
+
     const int sampleRate = 22050;
-    const int totalSamples = 2400; // ~109 ms crisp shutter click
+    const int totalSamples = 2800; // ~127 ms suara rana kamera
     final List<double> samples = List<double>.filled(totalSamples, 0.0);
     final Random rng = Random(42);
 
-    // Pulsa 1: snap rana buka/tutup cepat (0..450 samples)
-    for (int i = 0; i < 450 && i < totalSamples; i++) {
-      final double env = exp(-i / 75.0);
-      final double tone = sin(2 * pi * 1850 * (i / sampleRate)) * 0.55;
-      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.65;
+    // Pulsa 1: hentakan awal rana (0..550 samples)
+    for (int i = 0; i < 550 && i < totalSamples; i++) {
+      final double env = exp(-i / 85.0);
+      final double tone = sin(2 * pi * 2100 * (i / sampleRate)) * 0.65;
+      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.75;
       samples[i] += (tone + transient) * env;
     }
 
-    // Pulsa 2: pantulan mekanis kedua (780..1500 samples)
-    for (int i = 780; i < 1500 && i < totalSamples; i++) {
-      final int local = i - 780;
-      final double env = exp(-local / 95.0);
-      final double tone = sin(2 * pi * 1320 * (local / sampleRate)) * 0.45;
-      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.45;
+    // Pulsa 2: penutupan bilah rana (820..1750 samples)
+    for (int i = 820; i < 1750 && i < totalSamples; i++) {
+      final int local = i - 820;
+      final double env = exp(-local / 110.0);
+      final double tone = sin(2 * pi * 1480 * (local / sampleRate)) * 0.55;
+      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.55;
       samples[i] += (tone + transient) * env;
     }
 
-    final int dataSize = totalSamples * 2; // 16-bit PCM mono
+    final int dataSize = totalSamples * 2;
     final ByteData buffer = ByteData(44 + dataSize);
 
     void writeAscii(int offset, String text) {
@@ -156,61 +158,74 @@ class _ShutterAudioService {
     buffer.setUint32(4, 36 + dataSize, Endian.little);
     writeAscii(8, 'WAVE');
     writeAscii(12, 'fmt ');
-    buffer.setUint32(16, 16, Endian.little); // PCM chunk size
-    buffer.setUint16(20, 1, Endian.little); // PCM format = 1
-    buffer.setUint16(22, 1, Endian.little); // Channels = 1 (mono)
+    buffer.setUint32(16, 16, Endian.little);
+    buffer.setUint16(20, 1, Endian.little);
+    buffer.setUint16(22, 1, Endian.little);
     buffer.setUint32(24, sampleRate, Endian.little);
-    buffer.setUint32(28, sampleRate * 2, Endian.little); // ByteRate
-    buffer.setUint16(32, 2, Endian.little); // BlockAlign
-    buffer.setUint16(34, 16, Endian.little); // BitsPerSample
+    buffer.setUint32(28, sampleRate * 2, Endian.little);
+    buffer.setUint16(32, 2, Endian.little);
+    buffer.setUint16(34, 16, Endian.little);
     writeAscii(36, 'data');
     buffer.setUint32(40, dataSize, Endian.little);
 
     int offset = 44;
     for (int i = 0; i < totalSamples; i++) {
-      final double clamped = samples[i].clamp(-0.95, 0.95);
+      final double clamped = samples[i].clamp(-0.98, 0.98);
       final int pcm16 = (clamped * 32767.0).round();
       buffer.setInt16(offset, pcm16, Endian.little);
       offset += 2;
     }
 
-    return buffer.buffer.asUint8List();
+    _cachedWavBytes = buffer.buffer.asUint8List();
+    return _cachedWavBytes!;
   }
 
-  static Future<String> _ensureWavFile() async {
-    if (_cachedWavPath != null) {
-      final File cached = File(_cachedWavPath!);
-      if (await cached.exists() && await cached.length() > 44) {
-        return cached.path;
-      }
-    }
-    final Directory tempDir = await getTemporaryDirectory();
-    final File wavFile =
-        File('${tempDir.path}${Platform.pathSeparator}shutter_click.wav');
-    await wavFile.writeAsBytes(_buildMechanicalClickWavBytes(), flush: true);
-    _cachedWavPath = wavFile.path;
-    return wavFile.path;
+  static Future<AudioPlayer> _ensurePlayer() async {
+    final existing = _player;
+    if (existing != null) return existing;
+
+    final player = AudioPlayer();
+    await player.setPlayerMode(PlayerMode.lowLatency);
+    await player.setAudioContext(
+      const AudioContext(
+        android: AudioContextAndroid(
+          isSpeakerphoneOn: false,
+          stayAwake: false,
+          contentType: AndroidContentType.sonification,
+          usageType: AndroidUsageType.media,
+          audioFocus: AndroidAudioFocus.none,
+        ),
+      ),
+    );
+    _player = player;
+    return player;
   }
 
   static Future<void> playShutterSound() async {
     try {
-      final String wavPath = await _ensureWavFile();
-      if (Platform.isAndroid) {
-        final dynamic handled = await _mediaStoreChannel.invokeMethod(
-          'playShutterSound',
-          {'path': wavPath},
-        );
-        if (handled == true) {
-          return;
-        }
-      }
+      final player = await _ensurePlayer();
+      final bytes = _buildMechanicalClickWavBytes();
+      await player.stop();
+      await player.setVolume(1.0);
+      await player.play(BytesSource(bytes, mimeType: 'audio/wav'));
+      return;
     } catch (e) {
-      debugPrint('Native playShutterSound fallback: $e');
+      debugPrint('audioplayers shutter fallback: $e');
     }
 
     try {
       await SystemSound.play(SystemSoundType.click);
     } catch (_) {}
+  }
+
+  static Future<void> dispose() async {
+    final p = _player;
+    _player = null;
+    if (p != null) {
+      try {
+        await p.dispose();
+      } catch (_) {}
+    }
   }
 }
 
@@ -824,14 +839,22 @@ Widget _buildStampOverlayWidget({
 class _CameraSettingsScreen extends StatefulWidget {
   final bool shutterSoundEnabled;
   final bool gridEnabled;
+  final PhotoAspectRatio aspectRatio;
+  final ImageQualityPreset qualityPreset;
   final ValueChanged<bool> onShutterSoundChanged;
   final ValueChanged<bool> onGridChanged;
+  final ValueChanged<PhotoAspectRatio> onAspectRatioChanged;
+  final ValueChanged<ImageQualityPreset> onQualityPresetChanged;
 
   const _CameraSettingsScreen({
     required this.shutterSoundEnabled,
     required this.gridEnabled,
+    required this.aspectRatio,
+    required this.qualityPreset,
     required this.onShutterSoundChanged,
     required this.onGridChanged,
+    required this.onAspectRatioChanged,
+    required this.onQualityPresetChanged,
   });
 
   @override
@@ -841,12 +864,16 @@ class _CameraSettingsScreen extends StatefulWidget {
 class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
   late bool _shutterSound;
   late bool _gridOn;
+  late PhotoAspectRatio _aspect;
+  late ImageQualityPreset _quality;
 
   @override
   void initState() {
     super.initState();
     _shutterSound = widget.shutterSoundEnabled;
     _gridOn = widget.gridEnabled;
+    _aspect = widget.aspectRatio;
+    _quality = widget.qualityPreset;
   }
 
   @override
@@ -941,6 +968,120 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
                       widget.onGridChanged(val);
                     },
                   ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 10),
+            child: Text(
+              'Kamera & Hasil Foto',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: Colors.white60,
+              ),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF161920),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Rasio Gambar',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    _MiniChipButton(
+                      label: '1:1',
+                      selected: _aspect == PhotoAspectRatio.ratio1x1,
+                      onTap: () {
+                        setState(() => _aspect = PhotoAspectRatio.ratio1x1);
+                        widget.onAspectRatioChanged(PhotoAspectRatio.ratio1x1);
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    _MiniChipButton(
+                      label: '4:3',
+                      selected: _aspect == PhotoAspectRatio.ratio4x3,
+                      onTap: () {
+                        setState(() => _aspect = PhotoAspectRatio.ratio4x3);
+                        widget.onAspectRatioChanged(PhotoAspectRatio.ratio4x3);
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    _MiniChipButton(
+                      label: '16:9',
+                      selected: _aspect == PhotoAspectRatio.ratio16x9,
+                      onTap: () {
+                        setState(() => _aspect = PhotoAspectRatio.ratio16x9);
+                        widget.onAspectRatioChanged(PhotoAspectRatio.ratio16x9);
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Divider(height: 1, color: Colors.white12),
+                const SizedBox(height: 14),
+                const Text(
+                  'Kualitas Gambar',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    _MiniChipButton(
+                      label: '1080p',
+                      selected: _quality == ImageQualityPreset.p1080,
+                      onTap: () {
+                        setState(() => _quality = ImageQualityPreset.p1080);
+                        widget.onQualityPresetChanged(ImageQualityPreset.p1080);
+                      },
+                    ),
+                    const SizedBox(width: 6),
+                    _MiniChipButton(
+                      label: '720p',
+                      selected: _quality == ImageQualityPreset.p720,
+                      onTap: () {
+                        setState(() => _quality = ImageQualityPreset.p720);
+                        widget.onQualityPresetChanged(ImageQualityPreset.p720);
+                      },
+                    ),
+                    const SizedBox(width: 6),
+                    _MiniChipButton(
+                      label: '480p',
+                      selected: _quality == ImageQualityPreset.p480,
+                      onTap: () {
+                        setState(() => _quality = ImageQualityPreset.p480);
+                        widget.onQualityPresetChanged(ImageQualityPreset.p480);
+                      },
+                    ),
+                    const SizedBox(width: 6),
+                    _MiniChipButton(
+                      label: '360p',
+                      selected: _quality == ImageQualityPreset.p360,
+                      onTap: () {
+                        setState(() => _quality = ImageQualityPreset.p360);
+                        widget.onQualityPresetChanged(ImageQualityPreset.p360);
+                      },
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1079,11 +1220,19 @@ class _CameraScreenState extends State<CameraScreen>
         builder: (_) => _CameraSettingsScreen(
           shutterSoundEnabled: _shutterSoundEnabled,
           gridEnabled: _gridEnabled,
+          aspectRatio: _aspectRatio,
+          qualityPreset: _qualityPreset,
           onShutterSoundChanged: (val) {
             if (mounted) setState(() => _shutterSoundEnabled = val);
           },
           onGridChanged: (val) {
             if (mounted) setState(() => _gridEnabled = val);
+          },
+          onAspectRatioChanged: (ratio) {
+            if (mounted) setState(() => _aspectRatio = ratio);
+          },
+          onQualityPresetChanged: (preset) {
+            unawaited(_setQualityPreset(preset));
           },
         ),
       ),
@@ -2262,180 +2411,88 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildTopBarAndDrawer() {
-    final bool drawerOpen = _openDrawer == ActiveDrawer.topDrawer;
     final int displayedTimer = _normalizeTimer(_timerSeconds);
 
     return Container(
       width: double.infinity,
       color: Colors.black.withOpacity(0.85),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      onPressed: _openSettingsPage,
-                      icon: const Icon(
-                        Icons.settings,
-                        size: 20,
-                        color: Colors.white,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'Pengaturan',
-                    ),
-                    InkWell(
-                      onTap: () => _toggleDrawer(ActiveDrawer.topDrawer),
-                      borderRadius: BorderRadius.circular(8),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 4,
-                        ),
-                        child: Text(
-                          '${_getAspectRatioLabel()} • ${_getQualityLabel()}${displayedTimer > 0 ? ' • ${displayedTimer}s' : ' • 0s'}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                IconButton(
+                  onPressed: _openSettingsPage,
+                  icon: const Icon(
+                    Icons.settings,
+                    size: 20,
+                    color: Colors.white,
+                  ),
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Pengaturan',
                 ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      onPressed: _toggleFlash,
-                      icon: Icon(
-                        _flashEnabled ? Icons.flash_on : Icons.flash_off,
-                        size: 20,
-                        color: _flashEnabled
-                            ? const Color(0xFFFFD000)
-                            : Colors.white,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'Kilat / Pencahayaan',
-                    ),
-                    IconButton(
-                      onPressed: _toggleFrontBackCamera,
-                      icon: Icon(
-                        Icons.sync,
-                        size: 20,
-                        color: _currentLens == CameraLensDirection.front
-                            ? const Color(0xFFFFD000)
-                            : Colors.white,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'Rotasi Kamera',
-                    ),
-                    IconButton(
-                      onPressed: () {
-                        final next = displayedTimer == 0
-                            ? 3
-                            : (displayedTimer == 3 ? 5 : 0);
-                        setState(() => _timerSeconds = next);
-                      },
-                      icon: Icon(
-                        Icons.timer,
-                        size: 20,
-                        color: displayedTimer > 0
-                            ? const Color(0xFFFFD000)
-                            : Colors.white,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'Waktu Foto (Timer: 0s / 3s / 5s)',
-                    ),
-                  ],
+                const SizedBox(width: 4),
+                Text(
+                  '${_getAspectRatioLabel()} • ${_getQualityLabel()}${displayedTimer > 0 ? ' • ${displayedTimer}s' : ' • 0s'}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
                 ),
               ],
             ),
-          ),
-          if (drawerOpen)
-            Container(
-              width: double.infinity,
-              color: const Color(0xFF161920),
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'Rasio Gambar',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  onPressed: _toggleFlash,
+                  icon: Icon(
+                    _flashEnabled ? Icons.flash_on : Icons.flash_off,
+                    size: 20,
+                    color: _flashEnabled
+                        ? const Color(0xFFFFD000)
+                        : Colors.white,
                   ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      _MiniChipButton(
-                        label: '1:1',
-                        selected: _aspectRatio == PhotoAspectRatio.ratio1x1,
-                        onTap: () => setState(
-                          () => _aspectRatio = PhotoAspectRatio.ratio1x1,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      _MiniChipButton(
-                        label: '4:3',
-                        selected: _aspectRatio == PhotoAspectRatio.ratio4x3,
-                        onTap: () => setState(
-                          () => _aspectRatio = PhotoAspectRatio.ratio4x3,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      _MiniChipButton(
-                        label: '16:9',
-                        selected: _aspectRatio == PhotoAspectRatio.ratio16x9,
-                        onTap: () => setState(
-                          () => _aspectRatio = PhotoAspectRatio.ratio16x9,
-                        ),
-                      ),
-                    ],
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Kilat / Pencahayaan',
+                ),
+                IconButton(
+                  onPressed: _toggleFrontBackCamera,
+                  icon: Icon(
+                    Icons.sync,
+                    size: 20,
+                    color: _currentLens == CameraLensDirection.front
+                        ? const Color(0xFFFFD000)
+                        : Colors.white,
                   ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Kualitas Gambar',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Rotasi Kamera',
+                ),
+                IconButton(
+                  onPressed: () {
+                    final next = displayedTimer == 0
+                        ? 3
+                        : (displayedTimer == 3 ? 5 : 0);
+                    setState(() => _timerSeconds = next);
+                  },
+                  icon: Icon(
+                    Icons.timer,
+                    size: 20,
+                    color: displayedTimer > 0
+                        ? const Color(0xFFFFD000)
+                        : Colors.white,
                   ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      _MiniChipButton(
-                        label: '1080p',
-                        selected: _qualityPreset == ImageQualityPreset.p1080,
-                        onTap: () => _setQualityPreset(ImageQualityPreset.p1080),
-                      ),
-                      const SizedBox(width: 6),
-                      _MiniChipButton(
-                        label: '720p',
-                        selected: _qualityPreset == ImageQualityPreset.p720,
-                        onTap: () => _setQualityPreset(ImageQualityPreset.p720),
-                      ),
-                      const SizedBox(width: 6),
-                      _MiniChipButton(
-                        label: '480p',
-                        selected: _qualityPreset == ImageQualityPreset.p480,
-                        onTap: () => _setQualityPreset(ImageQualityPreset.p480),
-                      ),
-                      const SizedBox(width: 6),
-                      _MiniChipButton(
-                        label: '360p',
-                        selected: _qualityPreset == ImageQualityPreset.p360,
-                        onTap: () => _setQualityPreset(ImageQualityPreset.p360),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Waktu Foto (Timer: 0s / 3s / 5s)',
+                ),
+              ],
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -2712,6 +2769,7 @@ class _CameraScreenState extends State<CameraScreen>
     _shutterBlinkTimer?.cancel();
     _focusRingTimer?.cancel();
     _controller?.dispose();
+    unawaited(_ShutterAudioService.dispose());
     super.dispose();
   }
 
@@ -3363,9 +3421,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: Text(
-          _selectionMode
-              ? '${_selectedPaths.length} ditandai'
-              : 'Terbaru',
+          _selectionMode ? '${_selectedPaths.length} ditandai' : 'Terbaru',
           style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
         ),
         actions: [

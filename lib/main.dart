@@ -67,13 +67,14 @@ class _CameraScreenState extends State<CameraScreen>
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
 
-  // Tap-to-focus & exposure state
+  // Tap-to-focus & 1-touch vertical exposure drag state
   Offset? _focusPointNormalized;
   Offset? _focusUiOffset;
   double _minExposureOffset = -2.0;
   double _maxExposureOffset = 2.0;
   double _currentExposureOffset = 0.0;
   bool _showFocusRing = false;
+  bool _isDraggingExposure = false;
   Timer? _focusRingTimer;
 
   PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
@@ -163,6 +164,7 @@ class _CameraScreenState extends State<CameraScreen>
       _screenFlashActive = false;
       _shutterBlinkActive = false;
       _showFocusRing = false;
+      _isDraggingExposure = false;
       if (_isManualTime ||
           _openDrawer != ActiveDrawer.none ||
           _currentLens != CameraLensDirection.back ||
@@ -235,34 +237,38 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  void _scheduleFocusRingHide({int milliseconds = 3000}) {
+  void _scheduleFocusRingHide({int milliseconds = 3500}) {
     _focusRingTimer?.cancel();
+    if (_isDraggingExposure) return;
     _focusRingTimer = Timer(Duration(milliseconds: milliseconds), () {
-      if (!mounted) return;
+      if (!mounted || _isDraggingExposure) return;
       setState(() => _showFocusRing = false);
     });
   }
 
-  Future<void> _handleTapToFocus(
-    TapDownDetails details,
+  Future<void> _lockFocusAtPoint(
+    Offset localPosition,
     BoxConstraints box,
   ) async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
     if (box.maxWidth <= 0 || box.maxHeight <= 0) return;
 
-    final double nx =
-        (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
-    final double ny =
-        (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
+    final double nx = (localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
+    final double ny = (localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
     final Offset norm = Offset(nx, ny);
 
     setState(() {
       _focusPointNormalized = norm;
-      _focusUiOffset = details.localPosition;
+      _focusUiOffset = localPosition;
+      _currentExposureOffset = 0.0;
       _showFocusRing = true;
     });
-    _scheduleFocusRingHide(milliseconds: 3000);
+    _scheduleFocusRingHide(milliseconds: 3500);
+
+    try {
+      await ctrl.setExposureOffset(0.0);
+    } catch (_) {}
 
     try {
       await ctrl.setFocusMode(FocusMode.auto);
@@ -289,12 +295,43 @@ class _CameraScreenState extends State<CameraScreen>
       _currentExposureOffset = clamped;
       _showFocusRing = true;
     });
-    _scheduleFocusRingHide(milliseconds: 3000);
     try {
       await ctrl.setExposureOffset(clamped);
     } catch (e) {
       debugPrint('Gagal mengatur exposure offset: $e');
     }
+  }
+
+  void _handleVerticalExposureDragStart(
+    DragStartDetails details,
+    BoxConstraints box,
+  ) {
+    if (!_showFocusRing || _focusUiOffset == null) {
+      unawaited(_lockFocusAtPoint(details.localPosition, box));
+    }
+    _focusRingTimer?.cancel();
+    setState(() {
+      _isDraggingExposure = true;
+      _showFocusRing = true;
+    });
+  }
+
+  void _handleVerticalExposureDragUpdate(
+    DragUpdateDetails details,
+    BoxConstraints box,
+  ) {
+    if (_maxExposureOffset <= _minExposureOffset) return;
+    final double range = _maxExposureOffset - _minExposureOffset;
+    // Geser ke atas (delta.dy negatif) -> kecerahan naik; geser ke bawah -> turun
+    final double dragSpan = max(140.0, box.maxHeight * 0.45);
+    final double deltaOffset = (-details.delta.dy / dragSpan) * range;
+    unawaited(_setExposureValue(_currentExposureOffset + deltaOffset));
+  }
+
+  void _handleVerticalExposureDragEnd() {
+    if (!mounted) return;
+    setState(() => _isDraggingExposure = false);
+    _scheduleFocusRingHide(milliseconds: 3500);
   }
 
   int _normalizeTimer(int sec) {
@@ -656,6 +693,7 @@ class _CameraScreenState extends State<CameraScreen>
         _maxExposureOffset = maxExp;
         _currentExposureOffset = 0.0;
         _showFocusRing = false;
+        _isDraggingExposure = false;
         _focusPointNormalized = null;
         _focusUiOffset = null;
       });
@@ -1238,21 +1276,28 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     const double ringSize = 68;
-    final double left =
-        (_focusUiOffset!.dx - ringSize / 2).clamp(8.0, max(8.0, box.maxWidth - ringSize - 8.0));
-    final double top =
-        (_focusUiOffset!.dy - ringSize / 2).clamp(8.0, max(8.0, box.maxHeight - ringSize - 8.0));
+    final double left = (_focusUiOffset!.dx - ringSize / 2)
+        .clamp(8.0, max(8.0, box.maxWidth - ringSize - 8.0));
+    final double top = (_focusUiOffset!.dy - ringSize / 2)
+        .clamp(8.0, max(8.0, box.maxHeight - ringSize - 8.0));
 
     final bool canAdjustExposure = _maxExposureOffset > _minExposureOffset;
-    final double sliderLeft =
-        (left + ringSize + 8) <= (box.maxWidth - 36) ? (left + ringSize + 8) : max(8.0, left - 36);
+    final double sliderLeft = (left + ringSize + 8) <= (box.maxWidth - 36)
+        ? (left + ringSize + 8)
+        : max(8.0, left - 36);
 
-    return Stack(
-      children: [
-        Positioned(
-          left: left,
-          top: top,
-          child: IgnorePointer(
+    final double normalizedExp = canAdjustExposure
+        ? ((_currentExposureOffset - _minExposureOffset) /
+                (_maxExposureOffset - _minExposureOffset))
+            .clamp(0.0, 1.0)
+        : 0.5;
+
+    return IgnorePointer(
+      child: Stack(
+        children: [
+          Positioned(
+            left: left,
+            top: top,
             child: Container(
               width: ringSize,
               height: ringSize,
@@ -1281,59 +1326,63 @@ class _CameraScreenState extends State<CameraScreen>
               ),
             ),
           ),
-        ),
-        if (canAdjustExposure)
-          Positioned(
-            left: sliderLeft,
-            top: (top - 22).clamp(8.0, max(8.0, box.maxHeight - 120.0)),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.65),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.wb_sunny_outlined,
-                    size: 14,
-                    color: Color(0xFFFFD000),
-                  ),
-                  SizedBox(
-                    height: 86,
-                    width: 22,
-                    child: RotatedBox(
-                      quarterTurns: -1,
-                      child: SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          trackHeight: 2,
-                          thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 6,
-                          ),
-                          overlayShape: const RoundSliderOverlayShape(
-                            overlayRadius: 12,
-                          ),
-                        ),
-                        child: Slider(
-                          min: _minExposureOffset,
-                          max: _maxExposureOffset,
-                          value: _currentExposureOffset.clamp(
-                            _minExposureOffset,
-                            _maxExposureOffset,
-                          ),
-                          activeColor: const Color(0xFFFFD000),
-                          inactiveColor: Colors.white30,
-                          onChanged: (val) => _setExposureValue(val),
-                        ),
+          if (canAdjustExposure)
+            Positioned(
+              left: sliderLeft,
+              top: (top - 22).clamp(8.0, max(8.0, box.maxHeight - 122.0)),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 7),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.65),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.wb_sunny_outlined,
+                      size: 14,
+                      color: Color(0xFFFFD000),
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      height: 82,
+                      width: 14,
+                      child: LayoutBuilder(
+                        builder: (context, trackBox) {
+                          final double trackH = max(12.0, trackBox.maxHeight - 10);
+                          final double thumbTop =
+                              (1.0 - normalizedExp) * trackH;
+                          return Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              Container(
+                                width: 2.5,
+                                height: double.infinity,
+                                color: Colors.white30,
+                              ),
+                              Positioned(
+                                top: thumbTop,
+                                child: Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Color(0xFFFFD000),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -1368,7 +1417,14 @@ class _CameraScreenState extends State<CameraScreen>
       builder: (context, box) {
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTapDown: (details) => _handleTapToFocus(details, box),
+          onTapDown: (details) =>
+              unawaited(_lockFocusAtPoint(details.localPosition, box)),
+          onVerticalDragStart: (details) =>
+              _handleVerticalExposureDragStart(details, box),
+          onVerticalDragUpdate: (details) =>
+              _handleVerticalExposureDragUpdate(details, box),
+          onVerticalDragEnd: (_) => _handleVerticalExposureDragEnd(),
+          onVerticalDragCancel: () => _handleVerticalExposureDragEnd(),
           child: Stack(
             fit: StackFit.expand,
             children: [

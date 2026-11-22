@@ -86,8 +86,10 @@ tasks.register<Delete>("clean") {
 }
 EOF
 
-# 4. Tulis app/build.gradle.kts dengan jvmTarget bertipe String ("17")
+# 4. Tulis app/build.gradle.kts menggunakan compilerOptions DSL (menghindari error jvmTarget deprecated)
 cat <<'EOF' > "$APP_DIR/build.gradle.kts"
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -104,10 +106,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     defaultConfig {
         applicationId = "com.example.timestamp_by_putra"
         minSdk = flutter.minSdkVersion
@@ -120,6 +118,12 @@ android {
         release {
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 

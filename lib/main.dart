@@ -46,6 +46,515 @@ enum PhotoAspectRatio { ratio1x1, ratio4x3, ratio16x9 }
 
 enum ImageQualityPreset { p1080, p720, p480, p360 }
 
+class _WatermarkConfig {
+  final bool showLogo;
+  final String? logoFilePath;
+  final bool showTime;
+  final bool isManualTime;
+  final DateTime manualDateTime;
+  final bool showAddress;
+  final String customAddress;
+  final bool showCoords;
+  final String gpsCoordsText;
+  final bool showCompany;
+  final String companyText;
+  final bool showPersonName;
+  final String personNameText;
+  final StampFormSize formSize;
+
+  const _WatermarkConfig({
+    required this.showLogo,
+    required this.logoFilePath,
+    required this.showTime,
+    required this.isManualTime,
+    required this.manualDateTime,
+    required this.showAddress,
+    required this.customAddress,
+    required this.showCoords,
+    required this.gpsCoordsText,
+    required this.showCompany,
+    required this.companyText,
+    required this.showPersonName,
+    required this.personNameText,
+    required this.formSize,
+  });
+
+  _WatermarkConfig copyWith({
+    bool? showLogo,
+    String? logoFilePath,
+    bool clearLogo = false,
+    bool? showTime,
+    bool? isManualTime,
+    DateTime? manualDateTime,
+    bool? showAddress,
+    String? customAddress,
+    bool? showCoords,
+    String? gpsCoordsText,
+    bool? showCompany,
+    String? companyText,
+    bool? showPersonName,
+    String? personNameText,
+    StampFormSize? formSize,
+  }) {
+    return _WatermarkConfig(
+      showLogo: showLogo ?? this.showLogo,
+      logoFilePath: clearLogo ? null : (logoFilePath ?? this.logoFilePath),
+      showTime: showTime ?? this.showTime,
+      isManualTime: isManualTime ?? this.isManualTime,
+      manualDateTime: manualDateTime ?? this.manualDateTime,
+      showAddress: showAddress ?? this.showAddress,
+      customAddress: customAddress ?? this.customAddress,
+      showCoords: showCoords ?? this.showCoords,
+      gpsCoordsText: gpsCoordsText ?? this.gpsCoordsText,
+      showCompany: showCompany ?? this.showCompany,
+      companyText: companyText ?? this.companyText,
+      showPersonName: showPersonName ?? this.personNameText.isNotEmpty
+          ? (showPersonName ?? this.showPersonName)
+          : (showPersonName ?? this.showPersonName),
+      formSize: formSize ?? this.formSize,
+    );
+  }
+}
+
+class _StampRenderer {
+  static const List<String> _hariIndo = [
+    'Senin',
+    'Selasa',
+    'Rabu',
+    'Kamis',
+    'Jumat',
+    'Sabtu',
+    'Minggu',
+  ];
+
+  static const List<String> _bulanIndo = [
+    'Januari',
+    'Februari',
+    'Maret',
+    'April',
+    'Mei',
+    'Juni',
+    'Juli',
+    'Agustus',
+    'September',
+    'Oktober',
+    'November',
+    'Desember',
+  ];
+
+  static double sizeMultiplier(StampFormSize size) {
+    switch (size) {
+      case StampFormSize.small:
+        return 0.85;
+      case StampFormSize.medium:
+        return 1.0;
+      case StampFormSize.large:
+        return 1.2;
+    }
+  }
+
+  static String formatJamMenit(DateTime dt) {
+    final String hh = dt.hour.toString().padLeft(2, '0');
+    final String mm = dt.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
+  }
+
+  static String formatTanggalLengkap(DateTime dt) {
+    final String dd = dt.day.toString().padLeft(2, '0');
+    final String bulan = _bulanIndo[dt.month - 1];
+    final int yyyy = dt.year;
+    return '$dd $bulan $yyyy';
+  }
+
+  static String formatHari(DateTime dt) {
+    return _hariIndo[dt.weekday - 1];
+  }
+
+  static List<String> buildExtraDetailLines(_WatermarkConfig cfg) {
+    final List<String> lines = [];
+    if (cfg.showAddress && cfg.customAddress.trim().isNotEmpty) {
+      lines.add(cfg.customAddress.trim());
+    }
+    if (cfg.showCoords && cfg.gpsCoordsText.trim().isNotEmpty) {
+      lines.add(cfg.gpsCoordsText.trim());
+    }
+    if (cfg.showCompany && cfg.companyText.trim().isNotEmpty) {
+      lines.add(cfg.companyText.trim());
+    }
+    if (cfg.showPersonName && cfg.personNameText.trim().isNotEmpty) {
+      lines.add(cfg.personNameText.trim());
+    }
+    return lines;
+  }
+
+  static Future<ui.Image> renderOverlayImage({
+    required int targetW,
+    required int targetH,
+    required DateTime activeDt,
+    required _WatermarkConfig cfg,
+  }) async {
+    final double w = targetW.toDouble();
+    final double h = targetH.toDouble();
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
+
+    final double refScale = w / 390.0;
+    final double s = refScale * sizeMultiplier(cfg.formSize);
+    final double padLeft = 14.0 * refScale;
+    final double padRight = 14.0 * refScale;
+    final double padBottom = 14.0 * refScale;
+    final double maxTextWidth = w - padLeft - padRight;
+
+    final List<Shadow> textShadows = [
+      Shadow(
+        color: Colors.black87,
+        offset: Offset(0, 1.5 * refScale),
+        blurRadius: 4.0 * refScale,
+      ),
+    ];
+
+    ui.Image? logoImg;
+    if (cfg.showLogo &&
+        cfg.logoFilePath != null &&
+        cfg.logoFilePath!.isNotEmpty) {
+      final logoFile = File(cfg.logoFilePath!);
+      if (await logoFile.exists()) {
+        final logoBytes = await logoFile.readAsBytes();
+        final logoCodec = await ui.instantiateImageCodec(logoBytes);
+        final logoFrame = await logoCodec.getNextFrame();
+        logoImg = logoFrame.image;
+      }
+    }
+
+    final double logoSize = logoImg != null ? (44.0 * s) : 0.0;
+    final double logoGap = logoImg != null ? (10.0 * s) : 0.0;
+
+    TextPainter? jamPainter;
+    TextPainter? tanggalPainter;
+    TextPainter? hariPainter;
+    double topBlockHeight = 0.0;
+
+    if (cfg.showTime) {
+      jamPainter = TextPainter(
+        text: TextSpan(
+          text: formatJamMenit(activeDt),
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 36.0 * s,
+            fontWeight: FontWeight.w700,
+            height: 1.0,
+            shadows: textShadows,
+          ),
+        ),
+        textDirection: ui.TextDirection.ltr,
+        maxLines: 1,
+      )..layout();
+
+      final double rightColMaxWidth = max(
+        80.0 * refScale,
+        maxTextWidth - logoSize - logoGap - jamPainter.width - (24.0 * s),
+      );
+
+      tanggalPainter = TextPainter(
+        text: TextSpan(
+          text: formatTanggalLengkap(activeDt),
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 15.0 * s,
+            fontWeight: FontWeight.w600,
+            shadows: textShadows,
+          ),
+        ),
+        textDirection: ui.TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '...',
+      )..layout(maxWidth: rightColMaxWidth);
+
+      hariPainter = TextPainter(
+        text: TextSpan(
+          text: formatHari(activeDt),
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 14.0 * s,
+            fontWeight: FontWeight.w400,
+            shadows: textShadows,
+          ),
+        ),
+        textDirection: ui.TextDirection.ltr,
+        maxLines: 1,
+      )..layout(maxWidth: rightColMaxWidth);
+
+      topBlockHeight = max(
+        logoSize,
+        max(
+          jamPainter.height,
+          tanggalPainter.height + (2.0 * s) + hariPainter.height,
+        ),
+      );
+    } else if (logoImg != null) {
+      topBlockHeight = logoSize;
+    }
+
+    final List<String> extraLines = buildExtraDetailLines(cfg);
+    final String detailsCombined = extraLines.join('\n');
+
+    TextPainter? detailsPainter;
+    if (detailsCombined.isNotEmpty) {
+      detailsPainter = TextPainter(
+        text: TextSpan(
+          text: detailsCombined,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 13.5 * s,
+            fontWeight: FontWeight.w400,
+            height: 1.25,
+            shadows: textShadows,
+          ),
+        ),
+        textDirection: ui.TextDirection.ltr,
+        maxLines: 6,
+        ellipsis: '...',
+      )..layout(maxWidth: maxTextWidth);
+    }
+
+    final double gapBelowHeader =
+        (topBlockHeight > 0 && detailsPainter != null) ? (8.0 * s) : 0.0;
+    final double totalStampHeight =
+        topBlockHeight + gapBelowHeader + (detailsPainter?.height ?? 0.0);
+    final double stampTopY = h - padBottom - totalStampHeight;
+
+    if (totalStampHeight > 0) {
+      final double gradTop = max(0.0, stampTopY - (28.0 * refScale));
+      final gradPaint = Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(0, gradTop),
+          Offset(0, h),
+          [
+            Colors.black.withOpacity(0.0),
+            Colors.black.withOpacity(0.45),
+          ],
+        );
+      canvas.drawRect(Rect.fromLTWH(0, gradTop, w, h - gradTop), gradPaint);
+    }
+
+    double curX = padLeft;
+    if (logoImg != null) {
+      canvas.drawImageRect(
+        logoImg,
+        Rect.fromLTWH(0, 0, logoImg.width.toDouble(), logoImg.height.toDouble()),
+        Rect.fromLTWH(
+          curX,
+          stampTopY + ((topBlockHeight - logoSize) / 2),
+          logoSize,
+          logoSize,
+        ),
+        Paint(),
+      );
+      curX += logoSize + logoGap;
+      logoImg.dispose();
+    }
+
+    if (cfg.showTime &&
+        jamPainter != null &&
+        tanggalPainter != null &&
+        hariPainter != null) {
+      jamPainter.paint(
+        canvas,
+        Offset(curX, stampTopY + ((topBlockHeight - jamPainter.height) / 2)),
+      );
+
+      final double dividerX = curX + jamPainter.width + (10.0 * s);
+      final double dividerHeight = 36.0 * s;
+      final double dividerTopY =
+          stampTopY + ((topBlockHeight - dividerHeight) / 2);
+
+      canvas.drawRect(
+        Rect.fromLTWH(dividerX, dividerTopY, 2.5 * s, dividerHeight),
+        Paint()..color = const Color(0xFFFFD000),
+      );
+
+      final double rightColX = dividerX + (10.0 * s);
+      final double rightColHeight =
+          tanggalPainter.height + (2.0 * s) + hariPainter.height;
+      final double rightColTopY =
+          stampTopY + ((topBlockHeight - rightColHeight) / 2);
+
+      tanggalPainter.paint(canvas, Offset(rightColX, rightColTopY));
+      hariPainter.paint(
+        canvas,
+        Offset(rightColX, rightColTopY + tanggalPainter.height + (2.0 * s)),
+      );
+    }
+
+    if (detailsPainter != null) {
+      final double addressY = stampTopY + topBlockHeight + gapBelowHeader;
+      detailsPainter.paint(canvas, Offset(padLeft, addressY));
+    }
+
+    return recorder.endRecording().toImage(targetW, targetH);
+  }
+
+  static Future<Uint8List> buildStampedJpgBytes({
+    required Uint8List baseJpgBytes,
+    required DateTime activeDt,
+    required _WatermarkConfig cfg,
+  }) async {
+    final img.Image? decoded = img.decodeImage(baseJpgBytes);
+    if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
+      throw Exception('Gagal mendekode gambar');
+    }
+
+    final img.Image baseImg = img.bakeOrientation(decoded);
+
+    final ui.Image overlayUi = await renderOverlayImage(
+      targetW: baseImg.width,
+      targetH: baseImg.height,
+      activeDt: activeDt,
+      cfg: cfg,
+    );
+
+    final byteData =
+        await overlayUi.toByteData(format: ui.ImageByteFormat.rawRgba);
+    overlayUi.dispose();
+
+    if (byteData != null && byteData.lengthInBytes > 0) {
+      final img.Image overlayImg = img.Image.fromBytes(
+        width: baseImg.width,
+        height: baseImg.height,
+        bytes: byteData.buffer,
+        numChannels: 4,
+        order: img.ChannelOrder.rgba,
+      );
+      img.compositeImage(baseImg, overlayImg);
+    }
+
+    return Uint8List.fromList(img.encodeJpg(baseImg, quality: 90));
+  }
+}
+
+Widget _buildStampOverlayWidget({
+  required DateTime activeDt,
+  required _WatermarkConfig cfg,
+}) {
+  final double mult = _StampRenderer.sizeMultiplier(cfg.formSize);
+  const List<Shadow> previewShadows = [
+    Shadow(
+      color: Colors.black87,
+      offset: Offset(0, 1.5),
+      blurRadius: 4,
+    ),
+  ];
+
+  final List<String> extraLines = _StampRenderer.buildExtraDetailLines(cfg);
+  final bool hasLogo = cfg.showLogo &&
+      cfg.logoFilePath != null &&
+      cfg.logoFilePath!.isNotEmpty &&
+      File(cfg.logoFilePath!).existsSync();
+
+  if (!cfg.showTime && !hasLogo && extraLines.isEmpty) {
+    return const SizedBox.shrink();
+  }
+
+  return IgnorePointer(
+    child: Container(
+      padding: const EdgeInsets.fromLTRB(14, 28, 14, 12),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.black.withOpacity(0.0),
+            Colors.black.withOpacity(0.45),
+          ],
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (cfg.showTime || hasLogo)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                if (hasLogo) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: Image.file(
+                      File(cfg.logoFilePath!),
+                      width: 44 * mult,
+                      height: 44 * mult,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  SizedBox(width: 10 * mult),
+                ],
+                if (cfg.showTime) ...[
+                  Text(
+                    _StampRenderer.formatJamMenit(activeDt),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 36 * mult,
+                      fontWeight: FontWeight.w700,
+                      height: 1.0,
+                      shadows: previewShadows,
+                    ),
+                  ),
+                  SizedBox(width: 10 * mult),
+                  Container(
+                    width: 2.5 * mult,
+                    height: 36 * mult,
+                    color: const Color(0xFFFFD000),
+                  ),
+                  SizedBox(width: 10 * mult),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _StampRenderer.formatTanggalLengkap(activeDt),
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 15 * mult,
+                            fontWeight: FontWeight.w600,
+                            shadows: previewShadows,
+                          ),
+                        ),
+                        Text(
+                          _StampRenderer.formatHari(activeDt),
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 14 * mult,
+                            shadows: previewShadows,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          if (extraLines.isNotEmpty) ...[
+            SizedBox(height: 8 * mult),
+            Text(
+              extraLines.join('\n'),
+              maxLines: 6,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 13.5 * mult,
+                height: 1.25,
+                shadows: previewShadows,
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
 
@@ -114,31 +623,6 @@ class _CameraScreenState extends State<CameraScreen>
 
   StampFormSize _formSize = StampFormSize.medium;
   ActiveDrawer _openDrawer = ActiveDrawer.none;
-
-  static const List<String> _hariIndo = [
-    'Senin',
-    'Selasa',
-    'Rabu',
-    'Kamis',
-    'Jumat',
-    'Sabtu',
-    'Minggu',
-  ];
-
-  static const List<String> _bulanIndo = [
-    'Januari',
-    'Februari',
-    'Maret',
-    'April',
-    'Mei',
-    'Juni',
-    'Juli',
-    'Agustus',
-    'September',
-    'Oktober',
-    'November',
-    'Desember',
-  ];
 
   @override
   void initState() {
@@ -343,15 +827,42 @@ class _CameraScreenState extends State<CameraScreen>
     return _isManualTime ? _manualDateTime : _systemNow;
   }
 
-  double _getUiSizeMultiplier() {
-    switch (_formSize) {
-      case StampFormSize.small:
-        return 0.85;
-      case StampFormSize.medium:
-        return 1.0;
-      case StampFormSize.large:
-        return 1.2;
-    }
+  _WatermarkConfig _currentWatermarkConfig() {
+    return _WatermarkConfig(
+      showLogo: _showLogo,
+      logoFilePath: _logoFilePath,
+      showTime: _showTime,
+      isManualTime: _isManualTime,
+      manualDateTime: _manualDateTime,
+      showAddress: _showAddress,
+      customAddress: _customAddress,
+      showCoords: _showCoords,
+      gpsCoordsText: _gpsCoordsText,
+      showCompany: _showCompany,
+      companyText: _companyText,
+      showPersonName: _showPersonName,
+      personNameText: _personNameText,
+      formSize: _formSize,
+    );
+  }
+
+  void _applyWatermarkConfig(_WatermarkConfig cfg) {
+    setState(() {
+      _showLogo = cfg.showLogo;
+      _logoFilePath = cfg.logoFilePath;
+      _showTime = cfg.showTime;
+      _isManualTime = cfg.isManualTime;
+      _manualDateTime = cfg.manualDateTime;
+      _showAddress = cfg.showAddress;
+      _customAddress = cfg.customAddress;
+      _showCoords = cfg.showCoords;
+      _gpsCoordsText = cfg.gpsCoordsText;
+      _showCompany = cfg.showCompany;
+      _companyText = cfg.companyText;
+      _showPersonName = cfg.showPersonName;
+      _personNameText = cfg.personNameText;
+      _formSize = cfg.formSize;
+    });
   }
 
   String _getFormSizeLabel() {
@@ -426,28 +937,14 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  String _formatJamMenit(DateTime dt) {
-    final String hh = dt.hour.toString().padLeft(2, '0');
-    final String mm = dt.minute.toString().padLeft(2, '0');
-    return '$hh:$mm';
-  }
-
-  String _formatTanggalLengkap(DateTime dt) {
-    final String dd = dt.day.toString().padLeft(2, '0');
-    final String bulan = _bulanIndo[dt.month - 1];
-    final int yyyy = dt.year;
-    return '$dd $bulan $yyyy';
-  }
-
-  String _formatHari(DateTime dt) {
-    return _hariIndo[dt.weekday - 1];
-  }
-
   Future<void> _openGalleryAlbumBrowser() async {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => const _LatestPhotosGridScreen(),
+        builder: (_) => _LatestPhotosGridScreen(
+          initialConfig: _currentWatermarkConfig(),
+          onConfigChanged: _applyWatermarkConfig,
+        ),
       ),
     );
   }
@@ -791,23 +1288,6 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  List<String> _buildExtraDetailLines() {
-    final List<String> lines = [];
-    if (_showAddress && _customAddress.trim().isNotEmpty) {
-      lines.add(_customAddress.trim());
-    }
-    if (_showCoords && _gpsCoordsText.trim().isNotEmpty) {
-      lines.add(_gpsCoordsText.trim());
-    }
-    if (_showCompany && _companyText.trim().isNotEmpty) {
-      lines.add(_companyText.trim());
-    }
-    if (_showPersonName && _personNameText.trim().isNotEmpty) {
-      lines.add(_personNameText.trim());
-    }
-    return lines;
-  }
-
   String _buildTempFileName(String prefix, String uniqueId, String ext) {
     return '${prefix}_$uniqueId.$ext';
   }
@@ -894,247 +1374,6 @@ class _CameraScreenState extends State<CameraScreen>
     return Uint8List.fromList(img.encodeJpg(cropped, quality: 90));
   }
 
-  Future<ui.Image> _renderStampOverlayImage({
-    required int targetW,
-    required int targetH,
-    required DateTime activeDt,
-    required double sizeMultiplier,
-  }) async {
-    final double w = targetW.toDouble();
-    final double h = targetH.toDouble();
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
-
-    final double refScale = w / 390.0;
-    final double s = refScale * sizeMultiplier;
-    final double padLeft = 14.0 * refScale;
-    final double padRight = 14.0 * refScale;
-    final double padBottom = 14.0 * refScale;
-    final double maxTextWidth = w - padLeft - padRight;
-
-    final List<Shadow> textShadows = [
-      Shadow(
-        color: Colors.black87,
-        offset: Offset(0, 1.5 * refScale),
-        blurRadius: 4.0 * refScale,
-      ),
-    ];
-
-    ui.Image? logoImg;
-    if (_showLogo && _logoFilePath != null && _logoFilePath!.isNotEmpty) {
-      final logoFile = File(_logoFilePath!);
-      if (await logoFile.exists()) {
-        final logoBytes = await logoFile.readAsBytes();
-        final logoCodec = await ui.instantiateImageCodec(logoBytes);
-        final logoFrame = await logoCodec.getNextFrame();
-        logoImg = logoFrame.image;
-      }
-    }
-
-    final double logoSize = logoImg != null ? (44.0 * s) : 0.0;
-    final double logoGap = logoImg != null ? (10.0 * s) : 0.0;
-
-    TextPainter? jamPainter;
-    TextPainter? tanggalPainter;
-    TextPainter? hariPainter;
-    double topBlockHeight = 0.0;
-
-    if (_showTime) {
-      jamPainter = TextPainter(
-        text: TextSpan(
-          text: _formatJamMenit(activeDt),
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 36.0 * s,
-            fontWeight: FontWeight.w700,
-            height: 1.0,
-            shadows: textShadows,
-          ),
-        ),
-        textDirection: ui.TextDirection.ltr,
-        maxLines: 1,
-      )..layout();
-
-      final double rightColMaxWidth = max(
-        80.0 * refScale,
-        maxTextWidth - logoSize - logoGap - jamPainter.width - (24.0 * s),
-      );
-
-      tanggalPainter = TextPainter(
-        text: TextSpan(
-          text: _formatTanggalLengkap(activeDt),
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 15.0 * s,
-            fontWeight: FontWeight.w600,
-            shadows: textShadows,
-          ),
-        ),
-        textDirection: ui.TextDirection.ltr,
-        maxLines: 1,
-        ellipsis: '...',
-      )..layout(maxWidth: rightColMaxWidth);
-
-      hariPainter = TextPainter(
-        text: TextSpan(
-          text: _formatHari(activeDt),
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 14.0 * s,
-            fontWeight: FontWeight.w400,
-            shadows: textShadows,
-          ),
-        ),
-        textDirection: ui.TextDirection.ltr,
-        maxLines: 1,
-      )..layout(maxWidth: rightColMaxWidth);
-
-      topBlockHeight = max(
-        logoSize,
-        max(
-          jamPainter.height,
-          tanggalPainter.height + (2.0 * s) + hariPainter.height,
-        ),
-      );
-    } else if (logoImg != null) {
-      topBlockHeight = logoSize;
-    }
-
-    final List<String> extraLines = _buildExtraDetailLines();
-    final String detailsCombined = extraLines.join('\n');
-
-    TextPainter? detailsPainter;
-    if (detailsCombined.isNotEmpty) {
-      detailsPainter = TextPainter(
-        text: TextSpan(
-          text: detailsCombined,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 13.5 * s,
-            fontWeight: FontWeight.w400,
-            height: 1.25,
-            shadows: textShadows,
-          ),
-        ),
-        textDirection: ui.TextDirection.ltr,
-        maxLines: 6,
-        ellipsis: '...',
-      )..layout(maxWidth: maxTextWidth);
-    }
-
-    final double gapBelowHeader =
-        (topBlockHeight > 0 && detailsPainter != null) ? (8.0 * s) : 0.0;
-    final double totalStampHeight =
-        topBlockHeight + gapBelowHeader + (detailsPainter?.height ?? 0.0);
-    final double stampTopY = h - padBottom - totalStampHeight;
-
-    if (totalStampHeight > 0) {
-      final double gradTop = max(0.0, stampTopY - (28.0 * refScale));
-      final gradPaint = Paint()
-        ..shader = ui.Gradient.linear(
-          Offset(0, gradTop),
-          Offset(0, h),
-          [
-            Colors.black.withOpacity(0.0),
-            Colors.black.withOpacity(0.45),
-          ],
-        );
-      canvas.drawRect(Rect.fromLTWH(0, gradTop, w, h - gradTop), gradPaint);
-    }
-
-    double curX = padLeft;
-    if (logoImg != null) {
-      canvas.drawImageRect(
-        logoImg,
-        Rect.fromLTWH(0, 0, logoImg.width.toDouble(), logoImg.height.toDouble()),
-        Rect.fromLTWH(
-          curX,
-          stampTopY + ((topBlockHeight - logoSize) / 2),
-          logoSize,
-          logoSize,
-        ),
-        Paint(),
-      );
-      curX += logoSize + logoGap;
-      logoImg.dispose();
-    }
-
-    if (_showTime &&
-        jamPainter != null &&
-        tanggalPainter != null &&
-        hariPainter != null) {
-      jamPainter.paint(
-        canvas,
-        Offset(curX, stampTopY + ((topBlockHeight - jamPainter.height) / 2)),
-      );
-
-      final double dividerX = curX + jamPainter.width + (10.0 * s);
-      final double dividerHeight = 36.0 * s;
-      final double dividerTopY =
-          stampTopY + ((topBlockHeight - dividerHeight) / 2);
-
-      canvas.drawRect(
-        Rect.fromLTWH(dividerX, dividerTopY, 2.5 * s, dividerHeight),
-        Paint()..color = const Color(0xFFFFD000),
-      );
-
-      final double rightColX = dividerX + (10.0 * s);
-      final double rightColHeight =
-          tanggalPainter.height + (2.0 * s) + hariPainter.height;
-      final double rightColTopY =
-          stampTopY + ((topBlockHeight - rightColHeight) / 2);
-
-      tanggalPainter.paint(canvas, Offset(rightColX, rightColTopY));
-      hariPainter.paint(
-        canvas,
-        Offset(rightColX, rightColTopY + tanggalPainter.height + (2.0 * s)),
-      );
-    }
-
-    if (detailsPainter != null) {
-      final double addressY = stampTopY + topBlockHeight + gapBelowHeader;
-      detailsPainter.paint(canvas, Offset(padLeft, addressY));
-    }
-
-    return recorder.endRecording().toImage(targetW, targetH);
-  }
-
-  Future<Uint8List> _buildStampedJpgBytesFromRawBytes({
-    required Uint8List cleanRawJpgBytes,
-    required DateTime activeDt,
-    required double sizeMultiplier,
-  }) async {
-    final img.Image? baseImg = img.decodeJpg(cleanRawJpgBytes);
-    if (baseImg == null) {
-      throw Exception('Gagal mendekode JPEG mentah');
-    }
-
-    final ui.Image overlayUi = await _renderStampOverlayImage(
-      targetW: baseImg.width,
-      targetH: baseImg.height,
-      activeDt: activeDt,
-      sizeMultiplier: sizeMultiplier,
-    );
-
-    final byteData =
-        await overlayUi.toByteData(format: ui.ImageByteFormat.rawRgba);
-    overlayUi.dispose();
-
-    if (byteData != null && byteData.lengthInBytes > 0) {
-      final img.Image overlayImg = img.Image.fromBytes(
-        width: baseImg.width,
-        height: baseImg.height,
-        bytes: byteData.buffer,
-        numChannels: 4,
-        order: img.ChannelOrder.rgba,
-      );
-      img.compositeImage(baseImg, overlayImg);
-    }
-
-    return Uint8List.fromList(img.encodeJpg(baseImg, quality: 90));
-  }
-
   Future<void> _onShutterPressed() async {
     if (_isSaving || _isCoolingDown || _isInitializingCamera) return;
     if (_countdownRemaining != null) {
@@ -1209,10 +1448,10 @@ class _CameraScreenState extends State<CameraScreen>
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      final Uint8List stampedJpgBytes = await _buildStampedJpgBytesFromRawBytes(
-        cleanRawJpgBytes: cleanRawJpgBytes,
+      final Uint8List stampedJpgBytes = await _StampRenderer.buildStampedJpgBytes(
+        baseJpgBytes: cleanRawJpgBytes,
         activeDt: activeDt,
-        sizeMultiplier: _getUiSizeMultiplier(),
+        cfg: _currentWatermarkConfig(),
       );
 
       final Directory tempDir = await getTemporaryDirectory();
@@ -1524,7 +1763,10 @@ class _CameraScreenState extends State<CameraScreen>
               left: 0,
               bottom: 0,
               right: 0,
-              child: _buildStampPreviewOverlay(_getActiveDateTime()),
+              child: _buildStampOverlayWidget(
+                activeDt: _getActiveDateTime(),
+                cfg: _currentWatermarkConfig(),
+              ),
             ),
           ],
         ),
@@ -1772,123 +2014,6 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  Widget _buildStampPreviewOverlay(DateTime activeDt) {
-    final double mult = _getUiSizeMultiplier();
-    const List<Shadow> previewShadows = [
-      Shadow(
-        color: Colors.black87,
-        offset: Offset(0, 1.5),
-        blurRadius: 4,
-      ),
-    ];
-
-    final List<String> extraLines = _buildExtraDetailLines();
-    final bool hasLogo =
-        _showLogo && _logoFilePath != null && File(_logoFilePath!).existsSync();
-
-    if (!_showTime && !hasLogo && extraLines.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return IgnorePointer(
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(14, 28, 14, 12),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Colors.black.withOpacity(0.0),
-              Colors.black.withOpacity(0.45),
-            ],
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_showTime || hasLogo)
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  if (hasLogo) ...[
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.file(
-                        File(_logoFilePath!),
-                        width: 44 * mult,
-                        height: 44 * mult,
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                    SizedBox(width: 10 * mult),
-                  ],
-                  if (_showTime) ...[
-                    Text(
-                      _formatJamMenit(activeDt),
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 36 * mult,
-                        fontWeight: FontWeight.w700,
-                        height: 1.0,
-                        shadows: previewShadows,
-                      ),
-                    ),
-                    SizedBox(width: 10 * mult),
-                    Container(
-                      width: 2.5 * mult,
-                      height: 36 * mult,
-                      color: const Color(0xFFFFD000),
-                    ),
-                    SizedBox(width: 10 * mult),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            _formatTanggalLengkap(activeDt),
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 15 * mult,
-                              fontWeight: FontWeight.w600,
-                              shadows: previewShadows,
-                            ),
-                          ),
-                          Text(
-                            _formatHari(activeDt),
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14 * mult,
-                              shadows: previewShadows,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            if (extraLines.isNotEmpty) ...[
-              SizedBox(height: 8 * mult),
-              Text(
-                extraLines.join('\n'),
-                maxLines: 6,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13.5 * mult,
-                  height: 1.25,
-                  shadows: previewShadows,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildDrawerPanel() {
     if (_openDrawer != ActiveDrawer.watermarkEdit) {
       return const SizedBox.shrink();
@@ -1896,8 +2021,8 @@ class _CameraScreenState extends State<CameraScreen>
 
     final DateTime activeDt = _getActiveDateTime();
     final String timeSubLabel = _isManualTime
-        ? '${_formatHari(activeDt)}, ${_formatTanggalLengkap(activeDt)} ${_formatJamMenit(activeDt)} (Manual)'
-        : '${_formatHari(activeDt)}, ${_formatTanggalLengkap(activeDt)} ${_formatJamMenit(activeDt)}';
+        ? '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)} (Manual)'
+        : '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)}';
 
     return Container(
       constraints: const BoxConstraints(maxHeight: 370),
@@ -2166,8 +2291,6 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   Widget build(BuildContext context) {
-    final DateTime activeDt = _getActiveDateTime();
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
@@ -2237,7 +2360,13 @@ class _MonthlyPhotoSection {
 }
 
 class _LatestPhotosGridScreen extends StatefulWidget {
-  const _LatestPhotosGridScreen();
+  final _WatermarkConfig initialConfig;
+  final ValueChanged<_WatermarkConfig> onConfigChanged;
+
+  const _LatestPhotosGridScreen({
+    required this.initialConfig,
+    required this.onConfigChanged,
+  });
 
   static List<_MediaEntry>? _cachedEntries;
 
@@ -2270,6 +2399,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     'Desember',
   ];
 
+  late _WatermarkConfig _config;
   late final ScrollController _scrollController;
   bool _isLoading = true;
   List<_MediaEntry> _entries = [];
@@ -2295,6 +2425,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   @override
   void initState() {
     super.initState();
+    _config = widget.initialConfig;
     _scrollController = ScrollController()..addListener(_onScroll);
     final cached = _LatestPhotosGridScreen._cachedEntries;
     if (cached != null && cached.isNotEmpty) {
@@ -2410,7 +2541,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             ? (targetIndex / max(1, _visibleCount - 1)).clamp(0.0, 1.0)
             : frac;
         final targetOffset = (frac * maxExtent).clamp(0.0, maxExtent);
-        _scrollController.jumpTo(max(0.0, min(maxExtent, targetOffset * 0.5 + ratio * maxExtent * 0.5)));
+        _scrollController.jumpTo(
+          max(
+            0.0,
+            min(maxExtent, targetOffset * 0.5 + ratio * maxExtent * 0.5),
+          ),
+        );
       }
       _scheduleScrubberHide();
     });
@@ -2570,6 +2706,26 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }).toList();
   }
 
+  Future<void> _openPhotoWatermarkEditor(File file) async {
+    final bool? saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => _GalleryWatermarkEditorScreen(
+          photoFile: file,
+          initialConfig: _config,
+          onConfigUpdated: (updatedCfg) {
+            if (!mounted) return;
+            setState(() => _config = updatedCfg);
+            widget.onConfigChanged(updatedCfg);
+          },
+        ),
+      ),
+    );
+
+    if (saved == true && mounted) {
+      await _loadAllPhotos(forceRefresh: true);
+    }
+  }
+
   Widget _buildRightFastScrubber(List<_MonthlyPhotoSection> sections) {
     if (_entries.length < 18) return const SizedBox.shrink();
 
@@ -2715,11 +2871,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   Widget build(BuildContext context) {
     final total = _entries.length;
     final visibleEntries = _entries.take(_visibleCount).toList();
-    final allViewerFiles = _entries.map((e) => e.file).toList();
     final sections = _buildMonthlySections(visibleEntries);
     final hasMore = _visibleCount < total;
-
-    int globalIndexCursor = 0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -2793,27 +2946,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                 ),
                                 delegate: SliverChildBuilderDelegate(
                                   (ctx, idx) {
-                                    final int viewerIdx =
-                                        globalIndexCursor + idx;
                                     final File file = sec.entries[idx].file;
                                     return InkWell(
-                                      onTap: () {
-                                        Navigator.of(ctx).push(
-                                          MaterialPageRoute<void>(
-                                            builder: (_) =>
-                                                _FullPhotoViewerScreen(
-                                              files: allViewerFiles,
-                                              initialIndex: viewerIdx.clamp(
-                                                0,
-                                                max(
-                                                  0,
-                                                  allViewerFiles.length - 1,
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        );
-                                      },
+                                      onTap: () =>
+                                          _openPhotoWatermarkEditor(file),
                                       child: Image.file(
                                         file,
                                         cacheWidth: 200,
@@ -2832,14 +2968,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                   childCount: sec.entries.length,
                                 ),
                               ),
-                            ),
-                            Builder(
-                              builder: (_) {
-                                globalIndexCursor += sec.entries.length;
-                                return const SliverToBoxAdapter(
-                                  child: SizedBox.shrink(),
-                                );
-                              },
                             ),
                           ],
                           SliverToBoxAdapter(
@@ -2881,44 +3009,643 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 }
 
-class _FullPhotoViewerScreen extends StatelessWidget {
-  final List<File> files;
-  final int initialIndex;
+class _GalleryWatermarkEditorScreen extends StatefulWidget {
+  final File photoFile;
+  final _WatermarkConfig initialConfig;
+  final ValueChanged<_WatermarkConfig> onConfigUpdated;
 
-  const _FullPhotoViewerScreen({
-    required this.files,
-    required this.initialIndex,
+  const _GalleryWatermarkEditorScreen({
+    required this.photoFile,
+    required this.initialConfig,
+    required this.onConfigUpdated,
   });
 
   @override
+  State<_GalleryWatermarkEditorScreen> createState() =>
+      _GalleryWatermarkEditorScreenState();
+}
+
+class _GalleryWatermarkEditorScreenState
+    extends State<_GalleryWatermarkEditorScreen> {
+  late _WatermarkConfig _cfg;
+  final ImagePicker _picker = ImagePicker();
+  DateTime _nowClock = DateTime.now();
+  Timer? _clockTimer;
+  bool _editorDrawerOpen = false;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _cfg = widget.initialConfig;
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (!_cfg.isManualTime) {
+        setState(() => _nowClock = DateTime.now());
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _clockTimer?.cancel();
+    super.dispose();
+  }
+
+  DateTime _activeDateTime() {
+    return _cfg.isManualTime ? _cfg.manualDateTime : _nowClock;
+  }
+
+  void _updateCfg(_WatermarkConfig next) {
+    setState(() => _cfg = next);
+    widget.onConfigUpdated(next);
+  }
+
+  String _sizeLabel() {
+    switch (_cfg.formSize) {
+      case StampFormSize.small:
+        return 'Kecil';
+      case StampFormSize.medium:
+        return 'Sedang';
+      case StampFormSize.large:
+        return 'Besar';
+    }
+  }
+
+  Future<void> _pickLogo() async {
+    try {
+      final XFile? picked = await _picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 85,
+      );
+      if (picked != null && mounted) {
+        _updateCfg(
+          _cfg.copyWith(
+            logoFilePath: picked.path,
+            showLogo: true,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Gagal memilih logo di editor album: $e');
+    }
+  }
+
+  Future<void> _pickManualDateTime() async {
+    final DateTime base =
+        _cfg.isManualTime ? _cfg.manualDateTime : DateTime.now();
+
+    final DateTime? pickedDate = await showDatePicker(
+      context: context,
+      initialDate: base,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (pickedDate == null || !mounted) return;
+
+    final TimeOfDay? pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(base),
+    );
+    if (pickedTime == null || !mounted) return;
+
+    _updateCfg(
+      _cfg.copyWith(
+        manualDateTime: DateTime(
+          pickedDate.year,
+          pickedDate.month,
+          pickedDate.day,
+          pickedTime.hour,
+          pickedTime.minute,
+          0,
+        ),
+        isManualTime: true,
+        showTime: true,
+      ),
+    );
+  }
+
+  Future<void> _editFieldDialog({
+    required String title,
+    required String hint,
+    required String initialValue,
+    required void Function(String trimmed) applyText,
+  }) async {
+    final controller = TextEditingController(text: initialValue);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 3,
+          decoration: InputDecoration(
+            hintText: hint,
+            border: const OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Simpan'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    if (result != null && mounted) {
+      applyText(result.trim());
+    }
+  }
+
+  Future<void> _pickSizeDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Ukuran Form Stempel'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              RadioListTile<StampFormSize>(
+                title: const Text('Kecil'),
+                value: StampFormSize.small,
+                groupValue: _cfg.formSize,
+                onChanged: (val) {
+                  if (val == null) return;
+                  _updateCfg(_cfg.copyWith(formSize: val));
+                  setDialogState(() {});
+                },
+              ),
+              RadioListTile<StampFormSize>(
+                title: const Text('Sedang'),
+                value: StampFormSize.medium,
+                groupValue: _cfg.formSize,
+                onChanged: (val) {
+                  if (val == null) return;
+                  _updateCfg(_cfg.copyWith(formSize: val));
+                  setDialogState(() {});
+                },
+              ),
+              RadioListTile<StampFormSize>(
+                title: const Text('Besar'),
+                value: StampFormSize.large,
+                groupValue: _cfg.formSize,
+                onChanged: (val) {
+                  if (val == null) return;
+                  _updateCfg(_cfg.copyWith(formSize: val));
+                  setDialogState(() {});
+                },
+              ),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Tutup'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showTemplateSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1D24),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Pilih Templat Stempel',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 12),
+              ListTile(
+                leading: const Icon(Icons.schedule, color: Color(0xFFFFD000)),
+                title: const Text('Waktu + Alamat'),
+                subtitle: const Text('Tampilkan jam, tanggal, dan alamat'),
+                onTap: () {
+                  _updateCfg(
+                    _cfg.copyWith(
+                      showTime: true,
+                      showAddress: true,
+                    ),
+                  );
+                  Navigator.pop(ctx);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.public, color: Color(0xFF4EA8FF)),
+                title: const Text('Waktu + Alamat + Koordinat'),
+                subtitle: const Text('Sertakan titik koordinat GPS'),
+                onTap: () {
+                  _updateCfg(
+                    _cfg.copyWith(
+                      showTime: true,
+                      showAddress: true,
+                      showCoords: true,
+                    ),
+                  );
+                  Navigator.pop(ctx);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.access_time, color: Colors.white),
+                title: const Text('Hanya Waktu'),
+                subtitle: const Text('Hanya jam, tanggal, dan hari'),
+                onTap: () {
+                  _updateCfg(
+                    _cfg.copyWith(
+                      showTime: true,
+                      showAddress: false,
+                      showCoords: false,
+                    ),
+                  );
+                  Navigator.pop(ctx);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveStampedPhotoToGallery() async {
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
+
+    String? tempOutPath;
+    try {
+      if (!await widget.photoFile.exists()) {
+        throw Exception('File foto tidak ditemukan');
+      }
+      final Uint8List rawBytes = await widget.photoFile.readAsBytes();
+      final Uint8List stampedBytes = await _StampRenderer.buildStampedJpgBytes(
+        baseJpgBytes: rawBytes,
+        activeDt: _activeDateTime(),
+        cfg: _cfg,
+      );
+
+      final Directory tempDir = await getTemporaryDirectory();
+      tempOutPath =
+          '${tempDir.path}/album_stamp_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await File(tempOutPath).writeAsBytes(stampedBytes, flush: true);
+
+      await Gal.putImage(tempOutPath);
+      _LatestPhotosGridScreen.invalidateCache();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Foto bertanda air berhasil disimpan ke galeri'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Gagal menyimpan tanda air foto: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (tempOutPath != null) {
+        try {
+          final f = File(tempOutPath);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  Widget _buildEditDrawer() {
+    if (!_editorDrawerOpen) return const SizedBox.shrink();
+
+    final DateTime dt = _activeDateTime();
+    final String timeSub =
+        '${_StampRenderer.formatHari(dt)}, ${_StampRenderer.formatTanggalLengkap(dt)} ${_StampRenderer.formatJamMenit(dt)}${_cfg.isManualTime ? ' (Manual)' : ''}';
+
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 360),
+      width: double.infinity,
+      decoration: const BoxDecoration(
+        color: Color(0xFF1A1D24),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Sunting tanda air',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => setState(() => _editorDrawerOpen = false),
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+            _WatermarkRowTile(
+              icon: Icons.image_outlined,
+              title: 'Logo',
+              subtitle: _cfg.showLogo && _cfg.logoFilePath != null
+                  ? 'Logo ditambahkan'
+                  : 'Ketuk untuk memilih logo',
+              value: _cfg.showLogo,
+              onChanged: (val) {
+                if (val && _cfg.logoFilePath == null) {
+                  _pickLogo();
+                } else {
+                  _updateCfg(_cfg.copyWith(showLogo: val));
+                }
+              },
+              onTapContent: _pickLogo,
+            ),
+            _WatermarkRowTile(
+              icon: Icons.schedule_outlined,
+              title: 'Waktu',
+              subtitle: timeSub,
+              value: _cfg.showTime,
+              onChanged: (val) {
+                _updateCfg(
+                  _cfg.copyWith(
+                    showTime: val,
+                    isManualTime: val ? _cfg.isManualTime : false,
+                  ),
+                );
+              },
+              onTapContent: _pickManualDateTime,
+            ),
+            _WatermarkRowTile(
+              icon: Icons.location_on_outlined,
+              title: 'Alamat',
+              subtitle: _cfg.customAddress.isNotEmpty
+                  ? _cfg.customAddress
+                  : 'Ketuk untuk mengedit alamat',
+              value: _cfg.showAddress,
+              onChanged: (val) => _updateCfg(_cfg.copyWith(showAddress: val)),
+              onTapContent: () => _editFieldDialog(
+                title: 'Edit Alamat',
+                hint: 'Masukkan alamat lokasi...',
+                initialValue: _cfg.customAddress,
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(customAddress: v, showAddress: true),
+                ),
+              ),
+            ),
+            _WatermarkRowTile(
+              icon: Icons.public_outlined,
+              title: 'Koordinat',
+              subtitle: _cfg.gpsCoordsText,
+              value: _cfg.showCoords,
+              onChanged: (val) => _updateCfg(_cfg.copyWith(showCoords: val)),
+              onTapContent: () => _editFieldDialog(
+                title: 'Edit Koordinat',
+                hint: 'Contoh: 3.695432°S, 128.181405°T',
+                initialValue: _cfg.gpsCoordsText,
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(gpsCoordsText: v, showCoords: true),
+                ),
+              ),
+            ),
+            _WatermarkRowTile(
+              icon: Icons.notes_outlined,
+              title: 'Perusahaan',
+              subtitle: _cfg.companyText.isNotEmpty
+                  ? _cfg.companyText
+                  : 'Ketuk untuk mengedit',
+              value: _cfg.showCompany,
+              onChanged: (val) => _updateCfg(_cfg.copyWith(showCompany: val)),
+              onTapContent: () => _editFieldDialog(
+                title: 'Edit Perusahaan',
+                hint: 'Nama instansi / perusahaan...',
+                initialValue: _cfg.companyText,
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(companyText: v, showCompany: true),
+                ),
+              ),
+            ),
+            _WatermarkRowTile(
+              icon: Icons.badge_outlined,
+              title: 'Nama',
+              subtitle: _cfg.personNameText.isNotEmpty
+                  ? _cfg.personNameText
+                  : 'Ketuk untuk mengedit',
+              value: _cfg.showPersonName,
+              onChanged: (val) =>
+                  _updateCfg(_cfg.copyWith(showPersonName: val)),
+              onTapContent: () => _editFieldDialog(
+                title: 'Edit Nama',
+                hint: 'Nama petugas / pengguna...',
+                initialValue: _cfg.personNameText,
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(personNameText: v, showPersonName: true),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onPressed: _pickSizeDialog,
+                    child: Text(
+                      'Warna & Ukuran (${_sizeLabel()})',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1E6BFF),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onPressed: () => setState(() => _editorDrawerOpen = false),
+                    child: const Text(
+                      'Selesai',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final controller = PageController(initialPage: initialIndex);
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Pratinjau Foto'),
+        automaticallyImplyLeading: false,
+        leading: TextButton(
+          onPressed: _isSaving ? null : () => Navigator.of(context).pop(false),
+          child: const Text(
+            'Batal',
+            style: TextStyle(color: Colors.white, fontSize: 15),
+          ),
+        ),
+        leadingWidth: 74,
+        centerTitle: true,
+        title: const Text(
+          'Tanda air foto',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF1E6BFF),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              onPressed: _isSaving ? null : _saveStampedPhotoToGallery,
+              child: _isSaving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text(
+                      'Selesai',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+            ),
+          ),
+        ],
       ),
-      body: PageView.builder(
-        controller: controller,
-        itemCount: files.length,
-        itemBuilder: (_, idx) {
-          final file = files[idx];
-          return Center(
-            child: InteractiveViewer(
-              minScale: 0.8,
-              maxScale: 4.0,
-              child: Image.file(
-                file,
-                fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => const Text(
-                  'Gagal memuat gambar',
-                  style: TextStyle(color: Colors.white70),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: Center(
+                child: Stack(
+                  alignment: Alignment.bottomLeft,
+                  children: [
+                    Image.file(
+                      widget.photoFile,
+                      fit: BoxFit.contain,
+                      width: double.infinity,
+                      height: double.infinity,
+                      errorBuilder: (_, __, ___) => const Text(
+                        'Gagal memuat foto',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: _buildStampOverlayWidget(
+                        activeDt: _activeDateTime(),
+                        cfg: _cfg,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
-          );
-        },
+            _buildEditDrawer(),
+            Container(
+              color: Colors.black,
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white24),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      onPressed: _isSaving ? null : _showTemplateSheet,
+                      icon: const Icon(Icons.dashboard_customize_outlined, size: 18),
+                      label: const Text('Templat'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF252932),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      onPressed: _isSaving
+                          ? null
+                          : () => setState(
+                                () => _editorDrawerOpen = !_editorDrawerOpen,
+                              ),
+                      icon: const Icon(Icons.edit_outlined, size: 18),
+                      label: const Text('Sunting tanda air'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

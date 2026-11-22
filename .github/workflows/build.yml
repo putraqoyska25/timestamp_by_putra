@@ -23,7 +23,6 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.30.1'
           channel: stable
           cache: true
 
@@ -55,7 +54,6 @@ jobs:
               txt = p.read_text(encoding="utf-8")
               is_kts = gradle_path.endswith(".kts")
               sep = " = " if is_kts else " "
-              q = '"' if is_kts else '"'
 
               if re.search(r"namespace\s*=", txt):
                   txt = re.sub(r'namespace\s*=\s*"[^"]+"', f'namespace = "{target_pkg}"', txt, count=1)

@@ -1,207 +1,318 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ANDROID_DIR="$ROOT_DIR/android"
-APP_DIR="$ANDROID_DIR/app"
-SRC_MAIN_DIR="$APP_DIR/src/main"
-KOTLIN_PKG_DIR="$SRC_MAIN_DIR/kotlin/com/example/timestamp_by_putra"
+echo "=== Memulai setup proyek Android untuk timestamp_by_putra ==="
 
-mkdir -p "$ANDROID_DIR" "$APP_DIR" "$SRC_MAIN_DIR" "$KOTLIN_PKG_DIR"
+if [ ! -f "android/app/src/main/AndroidManifest.xml" ]; then
+  echo "Folder android belum ada, menjalankan flutter create --platforms=android . ..."
+  flutter create --platforms=android .
+fi
 
-# 1. Tulis gradle.properties
-cat <<'EOF' > "$ANDROID_DIR/gradle.properties"
-org.gradle.jvmargs=-Xmx4096M -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
-android.useAndroidX=true
-android.enableJetifier=true
-kotlin.code.style=official
-EOF
+MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
+if [ -f "$MANIFEST_PATH" ]; then
+  python3 - <<'PY'
+from pathlib import Path
 
-# 2. Tulis settings.gradle.kts dengan repository Flutter engine & PREFER_PROJECT agar subproyek plugin tidak gagal resolve
-cat <<'EOF' > "$ANDROID_DIR/settings.gradle.kts"
-pluginManagement {
-    val flutterSdkPath = run {
-        val properties = java.util.Properties()
-        val localPropsFile = file("local.properties")
-        if (localPropsFile.exists()) {
-            localPropsFile.inputStream().use { properties.load(it) }
-        }
-        val envSdk = System.getenv("FLUTTER_ROOT")
-        val sdkPath = properties.getProperty("flutter.sdk") ?: envSdk
-        require(sdkPath != null && sdkPath.isNotBlank()) {
-            "flutter.sdk not set in local.properties or FLUTTER_ROOT"
-        }
-        sdkPath
-    }
+path = Path("android/app/src/main/AndroidManifest.xml")
+content = path.read_text(encoding="utf-8")
 
-    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+required_perms = [
+    '<uses-permission android:name="android.permission.CAMERA" />',
+    '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
+    '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />',
+    '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+    '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+    '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
+]
 
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
+missing = [p for p in required_perms if p.split('"')[1] not in content]
+if missing and "</manifest>" in content:
+    injection = "".join(f"    {p}\n" for p in missing)
+    content = content.replace("</manifest>", f"{injection}</manifest>", 1)
+    path.write_text(content, encoding="utf-8")
+    print(f"Menyuntikkan {len(missing)} izin ke AndroidManifest.xml")
+else:
+    print("Semua izin di AndroidManifest.xml sudah lengkap")
+PY
+else
+  echo "PERINGATAN: $MANIFEST_PATH tidak ditemukan setelah setup."
+fi
 
-plugins {
-    id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    id("com.android.application") version "9.1.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
-}
+MAIN_ACTIVITY_KT="$(find android/app/src/main -name 'MainActivity.kt' 2>/dev/null | head -n 1 || true)"
+if [ -n "$MAIN_ACTIVITY_KT" ] && [ -f "$MAIN_ACTIVITY_KT" ]; then
+  if ! grep -q "timestamp_by_putra/media_store" "$MAIN_ACTIVITY_KT"; then
+    python3 - "$MAIN_ACTIVITY_KT" <<'PY'
+import sys
+from pathlib import Path
 
-val flutterRootDir = run {
-    val properties = java.util.Properties()
-    val localPropsFile = file("local.properties")
-    if (localPropsFile.exists()) {
-        localPropsFile.inputStream().use { properties.load(it) }
-    }
-    properties.getProperty("flutter.sdk") ?: System.getenv("FLUTTER_ROOT") ?: ""
-}
+kt_path = Path(sys.argv[1])
+original = kt_path.read_text(encoding="utf-8")
 
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
-    repositories {
-        google()
-        mavenCentral()
-        if (flutterRootDir.isNotBlank()) {
-            maven {
-                url = uri("$flutterRootDir/bin/cache/artifacts/engine")
-            }
-        }
-        maven {
-            url = uri("https://storage.googleapis.com/download.flutter.io")
-        }
-    }
-}
+pkg_name = "com.example.timestamp_by_putra"
+for line in original.splitlines():
+    stripped = line.strip()
+    if stripped.startswith("package "):
+        pkg_name = stripped.removeprefix("package ").strip()
+        break
 
-rootProject.name = "timestamp_by_putra"
-include(":app")
-EOF
+updated = f"""package {pkg_name}
 
-# 3. Tulis root build.gradle.kts
-cat <<'EOF' > "$ANDROID_DIR/build.gradle.kts"
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        maven {
-            url = uri("https://storage.googleapis.com/download.flutter.io")
-        }
-    }
-}
-
-val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()
-rootProject.layout.buildDirectory.value(newBuildDir)
-
-subprojects {
-    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
-    project.layout.buildDirectory.value(newSubprojectBuildDir)
-}
-subprojects {
-    project.evaluationDependsOn(":app")
-}
-
-tasks.register<Delete>("clean") {
-    delete(rootProject.layout.buildDirectory)
-}
-EOF
-
-# 4. Tulis app/build.gradle.kts menggunakan compilerOptions DSL
-cat <<'EOF' > "$APP_DIR/build.gradle.kts"
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
-plugins {
-    id("com.android.application")
-    id("kotlin-android")
-    id("dev.flutter.flutter-gradle-plugin")
-}
-
-android {
-    namespace = "com.example.timestamp_by_putra"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    defaultConfig {
-        applicationId = "com.example.timestamp_by_putra"
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
-    }
-
-    buildTypes {
-        release {
-            signingConfig = signingConfigs.getByName("debug")
-        }
-    }
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
-    }
-}
-
-flutter {
-    source = "../.."
-}
-EOF
-
-# 5. Pastikan MainActivity.kt tersedia bila belum ada
-if [ ! -f "$KOTLIN_PKG_DIR/MainActivity.kt" ]; then
-cat <<'EOF' > "$KOTLIN_PKG_DIR/MainActivity.kt"
-package com.example.timestamp_by_putra
-
+import android.Manifest
+import android.app.Activity
+import android.content.ContentUris
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
-class MainActivity : FlutterActivity()
-EOF
+class MainActivity : FlutterActivity() {{
+    private val channelName = "timestamp_by_putra/media_store"
+    private val reqMediaCode = 7001
+    private val reqTrashCode = 7002
+
+    private var pendingPermResult: MethodChannel.Result? = null
+    private var pendingTrashResult: MethodChannel.Result? = null
+    private var pendingTrashPaths: List<String> = emptyList()
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
+        super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler {{ call, result ->
+                when (call.method) {{
+                    "requestMediaPermissions" -> requestMediaPermissions(result)
+                    "getAllImages" -> result.success(queryAllImagePaths())
+                    "moveToTrash" -> {{
+                        val rawPaths = call.argument<List<*>>("paths")
+                        val paths = rawPaths
+                            ?.mapNotNull {{ it?.toString()?.trim() }}
+                            ?.filter {{ it.isNotEmpty() }}
+                            ?: emptyList()
+                        movePathsToTrash(paths, result)
+                    }}
+                    else -> result.notImplemented()
+                }}
+            }}
+    }}
+
+    private fun requiredMediaPermissions(): Array<String> {{
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {{
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+            )
+        }} else {{
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }}
+    }}
+
+    private fun hasAllMediaPermissions(): Boolean {{
+        return requiredMediaPermissions().all {{ perm ->
+            ContextCompat.checkSelfPermission(this, perm) ==
+                PackageManager.PERMISSION_GRANTED
+        }}
+    }}
+
+    private fun requestMediaPermissions(result: MethodChannel.Result) {{
+        if (hasAllMediaPermissions()) {{
+            result.success(true)
+            return
+        }}
+        if (pendingPermResult != null) {{
+            result.error("IN_PROGRESS", "Permintaan izin sedang berjalan", null)
+            return
+        }}
+        pendingPermResult = result
+        ActivityCompat.requestPermissions(
+            this,
+            requiredMediaPermissions(),
+            reqMediaCode,
+        )
+    }}
+
+    private fun queryAllImagePaths(): List<String> {{
+        if (!hasAllMediaPermissions()) return emptyList()
+
+        val list = mutableListOf<String>()
+        val seen = HashSet<String>()
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {{
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        }} else {{
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }}
+
+        val projection = arrayOf(MediaStore.Images.Media.DATA)
+        val sortOrder = "${{MediaStore.Images.Media.DATE_MODIFIED}} DESC"
+
+        try {{
+            contentResolver.query(collection, projection, null, null, sortOrder)
+                ?.use {{ cursor ->
+                    val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                    if (dataCol >= 0) {{
+                        while (cursor.moveToNext()) {{
+                            val path = cursor.getString(dataCol)?.trim() ?: ""
+                            if (path.isNotEmpty() && seen.add(path) && File(path).exists()) {{
+                                list.add(path)
+                            }}
+                        }}
+                    }}
+                }}
+        }} catch (_: Exception) {{
+        }}
+        return list
+    }}
+
+    private fun movePathsToTrash(paths: List<String>, result: MethodChannel.Result) {{
+        if (paths.isEmpty()) {{
+            result.success(
+                mapOf(
+                    "movedCount" to 0,
+                    "unresolvedPaths" to emptyList<String>(),
+                )
+            )
+            return
+        }}
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {{
+            val uris = mutableListOf<Uri>()
+            val unresolved = mutableListOf<String>()
+            val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+
+            for (p in paths) {{
+                val uri = findImageUriByPath(collection, p)
+                if (uri != null) {{
+                    uris.add(uri)
+                }} else {{
+                    unresolved.add(p)
+                }}
+            }}
+
+            if (uris.isNotEmpty()) {{
+                try {{
+                    val pendingIntent = MediaStore.createTrashRequest(
+                        contentResolver,
+                        uris,
+                        true,
+                    )
+                    pendingTrashResult = result
+                    pendingTrashPaths = unresolved
+                    ActivityCompat.startIntentSenderForResult(
+                        this,
+                        pendingIntent.intentSender,
+                        reqTrashCode,
+                        null,
+                        0,
+                        0,
+                        0,
+                        null,
+                    )
+                    return
+                }} catch (_: Exception) {{
+                }}
+            }}
+        }}
+
+        var moved = 0
+        val remaining = mutableListOf<String>()
+        for (p in paths) {{
+            try {{
+                val f = File(p)
+                if (f.exists() && f.delete()) {{
+                    moved++
+                }} else {{
+                    remaining.add(p)
+                }}
+            }} catch (_: Exception) {{
+                remaining.add(p)
+            }}
+        }}
+        result.success(
+            mapOf(
+                "movedCount" to moved,
+                "unresolvedPaths" to remaining,
+            )
+        )
+    }}
+
+    private fun findImageUriByPath(
+        collection: Uri,
+        filePath: String,
+    ): Uri? {{
+        val projection = arrayOf(MediaStore.Images.Media._ID)
+        val selection = "${{MediaStore.Images.Media.DATA}} = ?"
+        val args = arrayOf(filePath)
+        contentResolver.query(collection, projection, selection, args, null)
+            ?.use {{ cursor ->
+                if (cursor.moveToFirst()) {{
+                    val id = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    )
+                    return ContentUris.withAppendedId(collection, id)
+                }}
+            }}
+        return null
+    }}
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {{
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == reqMediaCode) {{
+            val granted = grantResults.isNotEmpty() &&
+                grantResults.all {{ it == PackageManager.PERMISSION_GRANTED }}
+            pendingPermResult?.success(granted)
+            pendingPermResult = null
+        }}
+    }}
+
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+    ) {{
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == reqTrashCode) {{
+            val res = pendingTrashResult
+            val rem = pendingTrashPaths
+            pendingTrashResult = null
+            pendingTrashPaths = emptyList()
+            if (res != null) {{
+                if (resultCode == Activity.RESULT_OK) {{
+                    res.success(
+                        mapOf(
+                            "movedCount" to (rem.size + 1),
+                            "unresolvedPaths" to emptyList<String>(),
+                        )
+                    )
+                }} else {{
+                    res.success(
+                        mapOf(
+                            "movedCount" to 0,
+                            "unresolvedPaths" to rem,
+                        )
+                    )
+                }}
+            }}
+        }}
+    }}
+}}
+"""
+kt_path.write_text(updated, encoding="utf-8")
+print(f"Berhasil memperbarui {{kt_path}}")
+PY
+  else
+    echo "MethodChannel media_store sudah ada di $MAIN_ACTIVITY_KT"
+  fi
 fi
 
-# 6. Pastikan AndroidManifest.xml ada bila belum ada
-if [ ! -f "$SRC_MAIN_DIR/AndroidManifest.xml" ]; then
-cat <<'EOF' > "$SRC_MAIN_DIR/AndroidManifest.xml"
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
-
-    <application
-        android:label="Timestamp by Putra"
-        android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:launchMode="singleTop"
-            android:taskAffinity=""
-            android:theme="@style/LaunchTheme"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-            android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
-            <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-              />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
-            </intent-filter>
-        </activity>
-        <meta-data
-            android:name="flutterEmbedding"
-            android:value="2" />
-    </application>
-</manifest>
-EOF
-fi
-
-echo "setup_android.sh selesai dijalankan."
+echo "=== Selesai setup Android ==="

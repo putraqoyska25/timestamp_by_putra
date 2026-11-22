@@ -44,6 +44,8 @@ enum ActiveDrawer { none, watermarkEdit }
 
 enum StampFormSize { small, medium, large }
 
+enum StampTextColor { white, black, red, yellow, green, blue }
+
 enum PhotoAspectRatio { ratio1x1, ratio4x3, ratio16x9 }
 
 enum ImageQualityPreset { p1080, p720, p480, p360 }
@@ -63,6 +65,7 @@ class _WatermarkConfig {
   final bool showPersonName;
   final String personNameText;
   final StampFormSize formSize;
+  final StampTextColor textColor;
 
   const _WatermarkConfig({
     required this.showLogo,
@@ -79,6 +82,7 @@ class _WatermarkConfig {
     required this.showPersonName,
     required this.personNameText,
     required this.formSize,
+    this.textColor = StampTextColor.white,
   });
 
   _WatermarkConfig copyWith({
@@ -97,6 +101,7 @@ class _WatermarkConfig {
     bool? showPersonName,
     String? personNameText,
     StampFormSize? formSize,
+    StampTextColor? textColor,
   }) {
     return _WatermarkConfig(
       showLogo: showLogo ?? this.showLogo,
@@ -113,6 +118,7 @@ class _WatermarkConfig {
       showPersonName: showPersonName ?? this.showPersonName,
       personNameText: personNameText ?? this.personNameText,
       formSize: formSize ?? this.formSize,
+      textColor: textColor ?? this.textColor,
     );
   }
 }
@@ -396,14 +402,93 @@ class _StampRenderer {
     'Desember',
   ];
 
-  static double sizeMultiplier(StampFormSize size) {
+  static Color resolveTextColor(StampTextColor color) {
+    switch (color) {
+      case StampTextColor.white:
+        return Colors.white;
+      case StampTextColor.black:
+        return Colors.black;
+      case StampTextColor.red:
+        return const Color(0xFFFF2E2E);
+      case StampTextColor.yellow:
+        return const Color(0xFFFFD000);
+      case StampTextColor.green:
+        return const Color(0xFF22C55E);
+      case StampTextColor.blue:
+        return const Color(0xFF2563EB);
+    }
+  }
+
+  static String colorLabel(StampTextColor color) {
+    switch (color) {
+      case StampTextColor.white:
+        return 'Putih';
+      case StampTextColor.black:
+        return 'Hitam';
+      case StampTextColor.red:
+        return 'Merah';
+      case StampTextColor.yellow:
+        return 'Kuning';
+      case StampTextColor.green:
+        return 'Hijau';
+      case StampTextColor.blue:
+        return 'Biru';
+    }
+  }
+
+  static List<Shadow> resolveShadows(StampTextColor color) {
+    if (color == StampTextColor.black) {
+      return const [
+        Shadow(
+          color: Color(0xE6FFFFFF),
+          offset: Offset(0, 0),
+          blurRadius: 5.0,
+        ),
+        Shadow(
+          color: Color(0xCCFFFFFF),
+          offset: Offset(0, 1.5),
+          blurRadius: 3.0,
+        ),
+      ];
+    }
+    return const [
+      Shadow(
+        color: Colors.black87,
+        offset: Offset(0, 1.5),
+        blurRadius: 4.0,
+      ),
+    ];
+  }
+
+  // Kecil = 0.85 (tetap), Besar = menjangkau garis merah (~30% tinggi frame), Sedang = titik tengah.
+  static double smallMultiplier() => 0.85;
+
+  static double largeMultiplier(double frameWidth, double frameHeight) {
+    final double w = frameWidth > 0 ? frameWidth : 390.0;
+    final double h = frameHeight > 0 ? frameHeight : 520.0;
+    final double refScale = w / 390.0;
+    final double targetSpanH = h * 0.285;
+    final double baseSpanH = 74.0 * refScale;
+    final double ratioBoost = baseSpanH > 0 ? (targetSpanH / baseSpanH) : 1.75;
+    return ratioBoost.clamp(1.55, 2.25);
+  }
+
+  static double mediumMultiplier(double frameWidth, double frameHeight) {
+    return (smallMultiplier() + largeMultiplier(frameWidth, frameHeight)) / 2.0;
+  }
+
+  static double sizeMultiplier(
+    StampFormSize size, {
+    double frameWidth = 390.0,
+    double frameHeight = 520.0,
+  }) {
     switch (size) {
       case StampFormSize.small:
-        return 0.85;
+        return smallMultiplier();
       case StampFormSize.medium:
-        return 1.0;
+        return mediumMultiplier(frameWidth, frameHeight);
       case StampFormSize.large:
-        return 1.2;
+        return largeMultiplier(frameWidth, frameHeight);
     }
   }
 
@@ -467,19 +552,19 @@ class _StampRenderer {
 
     final double refScale = w / 390.0;
     final double ratioFactor = aspectScaleFactor(targetW, targetH);
-    final double s = refScale * sizeMultiplier(cfg.formSize) * ratioFactor;
+    final double mult = sizeMultiplier(
+      cfg.formSize,
+      frameWidth: w,
+      frameHeight: h,
+    );
+    final double s = refScale * mult * ratioFactor;
     final double padLeft = 14.0 * refScale;
     final double padRight = 14.0 * refScale;
     final double padBottom = 12.0 * refScale;
     final double maxTextWidth = w - padLeft - padRight;
 
-    const List<Shadow> textShadows = [
-      Shadow(
-        color: Colors.black87,
-        offset: Offset(0, 1.5),
-        blurRadius: 4.0,
-      ),
-    ];
+    final Color fgColor = resolveTextColor(cfg.textColor);
+    final List<Shadow> textShadows = resolveShadows(cfg.textColor);
 
     ui.Image? logoImg;
     if (cfg.showLogo &&
@@ -507,7 +592,7 @@ class _StampRenderer {
         text: TextSpan(
           text: formatJamMenit(activeDt),
           style: TextStyle(
-            color: Colors.white,
+            color: fgColor,
             fontSize: 36.0 * s,
             fontWeight: FontWeight.w700,
             height: 1.0,
@@ -527,7 +612,7 @@ class _StampRenderer {
         text: TextSpan(
           text: formatTanggalLengkap(activeDt),
           style: TextStyle(
-            color: Colors.white,
+            color: fgColor,
             fontSize: 15.0 * s,
             fontWeight: FontWeight.w600,
             shadows: textShadows,
@@ -542,7 +627,7 @@ class _StampRenderer {
         text: TextSpan(
           text: formatHari(activeDt),
           style: TextStyle(
-            color: Colors.white,
+            color: fgColor,
             fontSize: 14.0 * s,
             fontWeight: FontWeight.w400,
             shadows: textShadows,
@@ -572,7 +657,7 @@ class _StampRenderer {
         text: TextSpan(
           text: detailsCombined,
           style: TextStyle(
-            color: Colors.white,
+            color: fgColor,
             fontSize: 13.5 * s,
             fontWeight: FontWeight.w400,
             height: 1.25,
@@ -599,7 +684,7 @@ class _StampRenderer {
           Offset(0, h),
           [
             Colors.black.withValues(alpha: 0.0),
-            Colors.black.withValues(alpha: 0.42),
+            Colors.black.withValues(alpha: 0.36),
           ],
         );
       canvas.drawRect(Rect.fromLTWH(0, gradTop, w, h - gradTop), gradPaint);
@@ -709,16 +794,15 @@ Widget _buildStampOverlayWidget({
   final double refScale = boxWidth > 0 ? (boxWidth / 390.0) : 1.0;
   final double ratioFactor =
       _StampRenderer.aspectScaleFactor(boxWidth.round(), boxHeight.round());
-  final double s =
-      refScale * _StampRenderer.sizeMultiplier(cfg.formSize) * ratioFactor;
+  final double mult = _StampRenderer.sizeMultiplier(
+    cfg.formSize,
+    frameWidth: boxWidth,
+    frameHeight: boxHeight,
+  );
+  final double s = refScale * mult * ratioFactor;
 
-  const List<Shadow> previewShadows = [
-    Shadow(
-      color: Colors.black87,
-      offset: Offset(0, 1.5),
-      blurRadius: 4,
-    ),
-  ];
+  final Color fgColor = _StampRenderer.resolveTextColor(cfg.textColor);
+  final List<Shadow> previewShadows = _StampRenderer.resolveShadows(cfg.textColor);
 
   final List<String> extraLines = _StampRenderer.buildExtraDetailLines(cfg);
   final bool hasLogo = cfg.showLogo &&
@@ -744,7 +828,7 @@ Widget _buildStampOverlayWidget({
           end: Alignment.bottomCenter,
           colors: [
             Colors.black.withValues(alpha: 0.0),
-            Colors.black.withValues(alpha: 0.42),
+            Colors.black.withValues(alpha: 0.36),
           ],
         ),
       ),
@@ -772,7 +856,7 @@ Widget _buildStampOverlayWidget({
                   Text(
                     _StampRenderer.formatJamMenit(activeDt),
                     style: TextStyle(
-                      color: Colors.white,
+                      color: fgColor,
                       fontSize: 36 * s,
                       fontWeight: FontWeight.w700,
                       height: 1.0,
@@ -794,7 +878,7 @@ Widget _buildStampOverlayWidget({
                         Text(
                           _StampRenderer.formatTanggalLengkap(activeDt),
                           style: TextStyle(
-                            color: Colors.white,
+                            color: fgColor,
                             fontSize: 15 * s,
                             fontWeight: FontWeight.w600,
                             shadows: previewShadows,
@@ -804,7 +888,7 @@ Widget _buildStampOverlayWidget({
                         Text(
                           _StampRenderer.formatHari(activeDt),
                           style: TextStyle(
-                            color: Colors.white,
+                            color: fgColor,
                             fontSize: 14 * s,
                             shadows: previewShadows,
                           ),
@@ -822,7 +906,7 @@ Widget _buildStampOverlayWidget({
               maxLines: 6,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: Colors.white,
+                color: fgColor,
                 fontSize: 13.5 * s,
                 height: 1.25,
                 shadows: previewShadows,
@@ -1157,6 +1241,7 @@ class _CameraScreenState extends State<CameraScreen>
   String _personNameText = '';
 
   StampFormSize _formSize = StampFormSize.medium;
+  StampTextColor _textColor = StampTextColor.white;
   ActiveDrawer _openDrawer = ActiveDrawer.none;
 
   @override
@@ -1408,6 +1493,7 @@ class _CameraScreenState extends State<CameraScreen>
       showPersonName: _showPersonName,
       personNameText: _personNameText,
       formSize: _formSize,
+      textColor: _textColor,
     );
   }
 
@@ -1427,6 +1513,7 @@ class _CameraScreenState extends State<CameraScreen>
       _showPersonName = cfg.showPersonName;
       _personNameText = cfg.personNameText;
       _formSize = cfg.formSize;
+      _textColor = cfg.textColor;
     });
   }
 
@@ -1611,49 +1698,80 @@ class _CameraScreenState extends State<CameraScreen>
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('Ukuran Form Stempel'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              RadioListTile<StampFormSize>(
-                title: const Text('Kecil'),
-                value: StampFormSize.small,
-                groupValue: _formSize,
-                onChanged: (val) {
-                  if (val == null) return;
-                  setState(() => _formSize = val);
-                  setDialogState(() {});
-                },
-              ),
-              RadioListTile<StampFormSize>(
-                title: const Text('Sedang'),
-                value: StampFormSize.medium,
-                groupValue: _formSize,
-                onChanged: (val) {
-                  if (val == null) return;
-                  setState(() => _formSize = val);
-                  setDialogState(() {});
-                },
-              ),
-              RadioListTile<StampFormSize>(
-                title: const Text('Besar'),
-                value: StampFormSize.large,
-                groupValue: _formSize,
-                onChanged: (val) {
-                  if (val == null) return;
-                  setState(() => _formSize = val);
-                  setDialogState(() {});
-                },
-              ),
-              const SizedBox(height: 6),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Warna teks: Putih • Pembatas waktu: Kuning',
-                  style: TextStyle(fontSize: 12, color: Colors.white70),
+          title: const Text('Ukuran & Warna Dasar Stempel'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Ukuran Form',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                 ),
-              ),
-            ],
+                RadioListTile<StampFormSize>(
+                  title: const Text('Kecil'),
+                  value: StampFormSize.small,
+                  groupValue: _formSize,
+                  onChanged: (val) {
+                    if (val == null) return;
+                    setState(() => _formSize = val);
+                    setDialogState(() {});
+                  },
+                ),
+                RadioListTile<StampFormSize>(
+                  title: const Text('Sedang'),
+                  value: StampFormSize.medium,
+                  groupValue: _formSize,
+                  onChanged: (val) {
+                    if (val == null) return;
+                    setState(() => _formSize = val);
+                    setDialogState(() {});
+                  },
+                ),
+                RadioListTile<StampFormSize>(
+                  title: const Text('Besar'),
+                  value: StampFormSize.large,
+                  groupValue: _formSize,
+                  onChanged: (val) {
+                    if (val == null) return;
+                    setState(() => _formSize = val);
+                    setDialogState(() {});
+                  },
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Warna Dasar Tulisan',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: StampTextColor.values.map((c) {
+                    final bool isSelected = _textColor == c;
+                    return ChoiceChip(
+                      selected: isSelected,
+                      avatar: CircleAvatar(
+                        radius: 8,
+                        backgroundColor: _StampRenderer.resolveTextColor(c),
+                      ),
+                      label: Text(_StampRenderer.colorLabel(c)),
+                      onSelected: (_) {
+                        setState(() => _textColor = c);
+                        setDialogState(() {});
+                      },
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  _textColor == StampTextColor.black
+                      ? 'Shadow aktif: Putih (karena teks Hitam)'
+                      : 'Shadow aktif: Hitam',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+              ],
+            ),
           ),
           actions: [
             FilledButton(
@@ -2641,7 +2759,7 @@ class _CameraScreenState extends State<CameraScreen>
                     ),
                     onPressed: _showSizePickerDialog,
                     child: Text(
-                      'Warna & Ukuran (${_getFormSizeLabel()})',
+                      'Warna & Ukuran (${_StampRenderer.colorLabel(_textColor)} • ${_getFormSizeLabel()})',
                       style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),
@@ -3834,41 +3952,80 @@ class _GalleryWatermarkEditorScreenState
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('Ukuran Form Stempel'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              RadioListTile<StampFormSize>(
-                title: const Text('Kecil'),
-                value: StampFormSize.small,
-                groupValue: _cfg.formSize,
-                onChanged: (val) {
-                  if (val == null) return;
-                  _updateCfg(_cfg.copyWith(formSize: val));
-                  setDialogState(() {});
-                },
-              ),
-              RadioListTile<StampFormSize>(
-                title: const Text('Sedang'),
-                value: StampFormSize.medium,
-                groupValue: _cfg.formSize,
-                onChanged: (val) {
-                  if (val == null) return;
-                  _updateCfg(_cfg.copyWith(formSize: val));
-                  setDialogState(() {});
-                },
-              ),
-              RadioListTile<StampFormSize>(
-                title: const Text('Besar'),
-                value: StampFormSize.large,
-                groupValue: _cfg.formSize,
-                onChanged: (val) {
-                  if (val == null) return;
-                  _updateCfg(_cfg.copyWith(formSize: val));
-                  setDialogState(() {});
-                },
-              ),
-            ],
+          title: const Text('Ukuran & Warna Dasar Stempel'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Ukuran Form',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                RadioListTile<StampFormSize>(
+                  title: const Text('Kecil'),
+                  value: StampFormSize.small,
+                  groupValue: _cfg.formSize,
+                  onChanged: (val) {
+                    if (val == null) return;
+                    _updateCfg(_cfg.copyWith(formSize: val));
+                    setDialogState(() {});
+                  },
+                ),
+                RadioListTile<StampFormSize>(
+                  title: const Text('Sedang'),
+                  value: StampFormSize.medium,
+                  groupValue: _cfg.formSize,
+                  onChanged: (val) {
+                    if (val == null) return;
+                    _updateCfg(_cfg.copyWith(formSize: val));
+                    setDialogState(() {});
+                  },
+                ),
+                RadioListTile<StampFormSize>(
+                  title: const Text('Besar'),
+                  value: StampFormSize.large,
+                  groupValue: _cfg.formSize,
+                  onChanged: (val) {
+                    if (val == null) return;
+                    _updateCfg(_cfg.copyWith(formSize: val));
+                    setDialogState(() {});
+                  },
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Warna Dasar Tulisan',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: StampTextColor.values.map((c) {
+                    final bool isSelected = _cfg.textColor == c;
+                    return ChoiceChip(
+                      selected: isSelected,
+                      avatar: CircleAvatar(
+                        radius: 8,
+                        backgroundColor: _StampRenderer.resolveTextColor(c),
+                      ),
+                      label: Text(_StampRenderer.colorLabel(c)),
+                      onSelected: (_) {
+                        _updateCfg(_cfg.copyWith(textColor: c));
+                        setDialogState(() {});
+                      },
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  _cfg.textColor == StampTextColor.black
+                      ? 'Shadow aktif: Putih (karena teks Hitam)'
+                      : 'Shadow aktif: Hitam',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+              ],
+            ),
           ),
           actions: [
             FilledButton(
@@ -4175,7 +4332,7 @@ class _GalleryWatermarkEditorScreenState
                     ),
                     onPressed: _pickSizeDialog,
                     child: Text(
-                      'Warna & Ukuran (${_sizeLabel()})',
+                      'Warna & Ukuran (${_StampRenderer.colorLabel(_cfg.textColor)} • ${_sizeLabel()})',
                       style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),

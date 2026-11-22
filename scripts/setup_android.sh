@@ -3,12 +3,12 @@ set -euo pipefail
 
 echo "=== Memulai setup proyek Android untuk timestamp_by_putra ==="
 
-if [ ! -f "android/app/src/main/AndroidManifest.xml" ]; then
-  echo "Folder android belum ada, menjalankan flutter create --platforms=android . ..."
-  flutter create --platforms=android .
+MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
+if [ ! -f "$MANIFEST_PATH" ]; then
+  echo "AndroidManifest.xml belum ada, menjalankan flutter create --platforms=android --org com.putra --project-name timestamp_by_putra . ..."
+  flutter create --platforms=android --org com.putra --project-name timestamp_by_putra .
 fi
 
-MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
 if [ -f "$MANIFEST_PATH" ]; then
   python3 - <<'PY'
 from pathlib import Path
@@ -31,32 +31,32 @@ if missing and "</manifest>" in content:
     injection = "".join(f"    {p}\n" for p in missing)
     content = content.replace("</manifest>", f"{injection}</manifest>", 1)
     path.write_text(content, encoding="utf-8")
-    print(f"Menyuntikkan {len(missing)} izin ke AndroidManifest.xml")
+    print(f"Berhasil menyuntikkan {len(missing)} izin ke AndroidManifest.xml")
 else:
     print("Semua izin di AndroidManifest.xml sudah lengkap")
 PY
 else
-  echo "PERINGATAN: $MANIFEST_PATH tidak ditemukan setelah setup."
+  echo "ERROR: $MANIFEST_PATH tidak ditemukan!"
+  exit 1
 fi
 
 MAIN_ACTIVITY_KT="$(find android/app/src/main -name 'MainActivity.kt' 2>/dev/null | head -n 1 || true)"
 if [ -n "$MAIN_ACTIVITY_KT" ] && [ -f "$MAIN_ACTIVITY_KT" ]; then
-  if ! grep -q "timestamp_by_putra/media_store" "$MAIN_ACTIVITY_KT"; then
-    python3 - "$MAIN_ACTIVITY_KT" <<'PY'
+  python3 - "$MAIN_ACTIVITY_KT" <<'PY'
 import sys
 from pathlib import Path
 
 kt_path = Path(sys.argv[1])
 original = kt_path.read_text(encoding="utf-8")
 
-pkg_name = "com.example.timestamp_by_putra"
+pkg_name = "com.putra.timestamp_by_putra"
 for line in original.splitlines():
     stripped = line.strip()
     if stripped.startswith("package "):
         pkg_name = stripped.removeprefix("package ").strip()
         break
 
-updated = f"""package {pkg_name}
+kotlin_code = """package __PKG__
 
 import android.Manifest
 import android.app.Activity
@@ -73,7 +73,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
-class MainActivity : FlutterActivity() {{
+class MainActivity : FlutterActivity() {
     private val channelName = "timestamp_by_putra/media_store"
     private val reqMediaCode = 7001
     private val reqTrashCode = 7002
@@ -82,96 +82,96 @@ class MainActivity : FlutterActivity() {{
     private var pendingTrashResult: MethodChannel.Result? = null
     private var pendingTrashPaths: List<String> = emptyList()
 
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler {{ call, result ->
-                when (call.method) {{
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
                     "requestMediaPermissions" -> requestMediaPermissions(result)
                     "getAllImages" -> result.success(queryAllImagePaths())
-                    "moveToTrash" -> {{
+                    "moveToTrash" -> {
                         val rawPaths = call.argument<List<*>>("paths")
                         val paths = rawPaths
-                            ?.mapNotNull {{ it?.toString()?.trim() }}
-                            ?.filter {{ it.isNotEmpty() }}
+                            ?.mapNotNull { it?.toString()?.trim() }
+                            ?.filter { it.isNotEmpty() }
                             ?: emptyList()
                         movePathsToTrash(paths, result)
-                    }}
+                    }
                     else -> result.notImplemented()
-                }}
-            }}
-    }}
+                }
+            }
+    }
 
-    private fun requiredMediaPermissions(): Array<String> {{
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {{
+    private fun requiredMediaPermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             arrayOf(
                 Manifest.permission.READ_MEDIA_IMAGES,
                 Manifest.permission.READ_MEDIA_VIDEO,
             )
-        }} else {{
+        } else {
             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }}
-    }}
+        }
+    }
 
-    private fun hasAllMediaPermissions(): Boolean {{
-        return requiredMediaPermissions().all {{ perm ->
+    private fun hasAllMediaPermissions(): Boolean {
+        return requiredMediaPermissions().all { perm ->
             ContextCompat.checkSelfPermission(this, perm) ==
                 PackageManager.PERMISSION_GRANTED
-        }}
-    }}
+        }
+    }
 
-    private fun requestMediaPermissions(result: MethodChannel.Result) {{
-        if (hasAllMediaPermissions()) {{
+    private fun requestMediaPermissions(result: MethodChannel.Result) {
+        if (hasAllMediaPermissions()) {
             result.success(true)
             return
-        }}
-        if (pendingPermResult != null) {{
+        }
+        if (pendingPermResult != null) {
             result.error("IN_PROGRESS", "Permintaan izin sedang berjalan", null)
             return
-        }}
+        }
         pendingPermResult = result
         ActivityCompat.requestPermissions(
             this,
             requiredMediaPermissions(),
             reqMediaCode,
         )
-    }}
+    }
 
-    private fun queryAllImagePaths(): List<String> {{
+    private fun queryAllImagePaths(): List<String> {
         if (!hasAllMediaPermissions()) return emptyList()
 
         val list = mutableListOf<String>()
         val seen = HashSet<String>()
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {{
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        }} else {{
+        } else {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }}
+        }
 
         val projection = arrayOf(MediaStore.Images.Media.DATA)
-        val sortOrder = "${{MediaStore.Images.Media.DATE_MODIFIED}} DESC"
+        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
 
-        try {{
+        try {
             contentResolver.query(collection, projection, null, null, sortOrder)
-                ?.use {{ cursor ->
+                ?.use { cursor ->
                     val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-                    if (dataCol >= 0) {{
-                        while (cursor.moveToNext()) {{
+                    if (dataCol >= 0) {
+                        while (cursor.moveToNext()) {
                             val path = cursor.getString(dataCol)?.trim() ?: ""
-                            if (path.isNotEmpty() && seen.add(path) && File(path).exists()) {{
+                            if (path.isNotEmpty() && seen.add(path) && File(path).exists()) {
                                 list.add(path)
-                            }}
-                        }}
-                    }}
-                }}
-        }} catch (_: Exception) {{
-        }}
+                            }
+                        }
+                    }
+                }
+        } catch (_: Exception) {
+        }
         return list
-    }}
+    }
 
-    private fun movePathsToTrash(paths: List<String>, result: MethodChannel.Result) {{
-        if (paths.isEmpty()) {{
+    private fun movePathsToTrash(paths: List<String>, result: MethodChannel.Result) {
+        if (paths.isEmpty()) {
             result.success(
                 mapOf(
                     "movedCount" to 0,
@@ -179,24 +179,24 @@ class MainActivity : FlutterActivity() {{
                 )
             )
             return
-        }}
+        }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {{
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val uris = mutableListOf<Uri>()
             val unresolved = mutableListOf<String>()
             val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
 
-            for (p in paths) {{
+            for (p in paths) {
                 val uri = findImageUriByPath(collection, p)
-                if (uri != null) {{
+                if (uri != null) {
                     uris.add(uri)
-                }} else {{
+                } else {
                     unresolved.add(p)
-                }}
-            }}
+                }
+            }
 
-            if (uris.isNotEmpty()) {{
-                try {{
+            if (uris.isNotEmpty()) {
+                try {
                     val pendingIntent = MediaStore.createTrashRequest(
                         contentResolver,
                         uris,
@@ -215,104 +215,104 @@ class MainActivity : FlutterActivity() {{
                         null,
                     )
                     return
-                }} catch (_: Exception) {{
-                }}
-            }}
-        }}
+                } catch (_: Exception) {
+                }
+            }
+        }
 
         var moved = 0
         val remaining = mutableListOf<String>()
-        for (p in paths) {{
-            try {{
+        for (p in paths) {
+            try {
                 val f = File(p)
-                if (f.exists() && f.delete()) {{
+                if (f.exists() && f.delete()) {
                     moved++
-                }} else {{
+                } else {
                     remaining.add(p)
-                }}
-            }} catch (_: Exception) {{
+                }
+            } catch (_: Exception) {
                 remaining.add(p)
-            }}
-        }}
+            }
+        }
         result.success(
             mapOf(
                 "movedCount" to moved,
                 "unresolvedPaths" to remaining,
             )
         )
-    }}
+    }
 
     private fun findImageUriByPath(
         collection: Uri,
         filePath: String,
-    ): Uri? {{
+    ): Uri? {
         val projection = arrayOf(MediaStore.Images.Media._ID)
-        val selection = "${{MediaStore.Images.Media.DATA}} = ?"
+        val selection = "${MediaStore.Images.Media.DATA} = ?"
         val args = arrayOf(filePath)
         contentResolver.query(collection, projection, selection, args, null)
-            ?.use {{ cursor ->
-                if (cursor.moveToFirst()) {{
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
                     val id = cursor.getLong(
                         cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
                     )
                     return ContentUris.withAppendedId(collection, id)
-                }}
-            }}
+                }
+            }
         return null
-    }}
+    }
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
         grantResults: IntArray,
-    ) {{
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == reqMediaCode) {{
+        if (requestCode == reqMediaCode) {
             val granted = grantResults.isNotEmpty() &&
-                grantResults.all {{ it == PackageManager.PERMISSION_GRANTED }}
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             pendingPermResult?.success(granted)
             pendingPermResult = null
-        }}
-    }}
+        }
+    }
 
     override fun onActivityResult(
         requestCode: Int,
         resultCode: Int,
         data: Intent?,
-    ) {{
+    ) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == reqTrashCode) {{
+        if (requestCode == reqTrashCode) {
             val res = pendingTrashResult
             val rem = pendingTrashPaths
             pendingTrashResult = null
             pendingTrashPaths = emptyList()
-            if (res != null) {{
-                if (resultCode == Activity.RESULT_OK) {{
+            if (res != null) {
+                if (resultCode == Activity.RESULT_OK) {
                     res.success(
                         mapOf(
                             "movedCount" to (rem.size + 1),
                             "unresolvedPaths" to emptyList<String>(),
                         )
                     )
-                }} else {{
+                } else {
                     res.success(
                         mapOf(
                             "movedCount" to 0,
                             "unresolvedPaths" to rem,
                         )
                     )
-                }}
-            }}
-        }}
-    }}
-}}
-"""
-kt_path.write_text(updated, encoding="utf-8")
-print(f"Berhasil memperbarui {{kt_path}}")
+                }
+            }
+        }
+    }
+}
+""".replace("__PKG__", pkg_name)
+
+kt_path.write_text(kotlin_code, encoding="utf-8")
+print(f"Berhasil menulis MainActivity.kt ({kt_path}) dengan package {pkg_name}")
 PY
-  else
-    echo "MethodChannel media_store sudah ada di $MAIN_ACTIVITY_KT"
-  fi
+else
+  echo "PERINGATAN: MainActivity.kt tidak ditemukan di android/app/src/main"
 fi
 
 echo "=== Selesai setup Android ==="

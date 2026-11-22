@@ -187,7 +187,7 @@ class _ShutterAudioService {
     final player = AudioPlayer();
     await player.setPlayerMode(PlayerMode.lowLatency);
     await player.setAudioContext(
-      const AudioContext(
+      AudioContext(
         android: AudioContextAndroid(
           isSpeakerphoneOn: false,
           stayAwake: false,

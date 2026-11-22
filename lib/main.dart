@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image/image.dart' as img;
@@ -2219,6 +2220,20 @@ class _MediaEntry {
   });
 }
 
+class _MonthlyPhotoSection {
+  final int year;
+  final int month;
+  final String title;
+  final List<_MediaEntry> entries;
+
+  const _MonthlyPhotoSection({
+    required this.year,
+    required this.month,
+    required this.title,
+    required this.entries,
+  });
+}
+
 class _LatestPhotosGridScreen extends StatefulWidget {
   const _LatestPhotosGridScreen();
 
@@ -2233,8 +2248,25 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 }
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
-  static const int _maxFilesScan = 2500;
-  static const int _pageSize = 60;
+  static const int _maxFilesScan = 5000;
+  static const int _pageSize = 90;
+  static const MethodChannel _mediaStoreChannel =
+      MethodChannel('timestamp_by_putra/media_store');
+
+  static const List<String> _bulanIndo = [
+    'Januari',
+    'Februari',
+    'Maret',
+    'April',
+    'Mei',
+    'Juni',
+    'Juli',
+    'Agustus',
+    'September',
+    'Oktober',
+    'November',
+    'Desember',
+  ];
 
   late final ScrollController _scrollController;
   bool _isLoading = true;
@@ -2285,22 +2317,38 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     return false;
   }
 
-  Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
-    if (!forceRefresh &&
-        _LatestPhotosGridScreen._cachedEntries != null &&
-        _LatestPhotosGridScreen._cachedEntries!.isNotEmpty) {
-      if (mounted) {
-        setState(() {
-          _entries = _LatestPhotosGridScreen._cachedEntries!;
-          _visibleCount = min(_pageSize, _entries.length);
-          _isLoading = false;
-        });
+  Future<List<_MediaEntry>> _queryMediaStoreNative() async {
+    if (!Platform.isAndroid) return const [];
+    try {
+      final List<dynamic>? rawList =
+          await _mediaStoreChannel.invokeMethod<List<dynamic>>('getAllImages');
+      if (rawList == null || rawList.isEmpty) return const [];
+
+      final List<_MediaEntry> results = [];
+      final Set<String> seen = {};
+      for (final item in rawList) {
+        if (results.length >= _maxFilesScan) break;
+        final String path = item?.toString().trim() ?? '';
+        if (path.isEmpty || seen.contains(path)) continue;
+        seen.add(path);
+
+        final File f = File(path);
+        DateTime mod = DateTime.fromMillisecondsSinceEpoch(0);
+        try {
+          if (await f.exists()) {
+            mod = f.statSync().modified;
+          }
+        } catch (_) {}
+        results.add(_MediaEntry(file: f, modified: mod));
       }
-      return;
+      return results;
+    } catch (e) {
+      debugPrint('MediaStore native belum tersedia/aktif: $e');
+      return const [];
     }
+  }
 
-    if (mounted) setState(() => _isLoading = true);
-
+  Future<List<_MediaEntry>> _scanDirectoriesFallback() async {
     final List<_MediaEntry> allEntries = [];
     final List<Directory> candidateDirs = [];
 
@@ -2309,6 +2357,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         '/storage/emulated/0/DCIM',
         '/storage/emulated/0/Pictures',
         '/storage/emulated/0/Download',
+        '/storage/emulated/0/Movies',
+        '/storage/emulated/0/Android/media',
       ]) {
         final d = Directory(p);
         if (await d.exists()) candidateDirs.add(d);
@@ -2318,7 +2368,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final Set<String> visitedPaths = {};
 
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
-      if (depth > 3 || allEntries.length >= _maxFilesScan) return;
+      if (depth > 4 || allEntries.length >= _maxFilesScan) return;
       try {
         await for (final entity in dir.list(followLinks: false)) {
           if (allEntries.length >= _maxFilesScan) break;
@@ -2344,30 +2394,73 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     for (final d in candidateDirs) {
       await scanDir(d);
     }
+    return allEntries;
+  }
 
-    allEntries.sort((a, b) => b.modified.compareTo(a.modified));
-    _LatestPhotosGridScreen._cachedEntries = allEntries;
+  Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
+    if (!forceRefresh &&
+        _LatestPhotosGridScreen._cachedEntries != null &&
+        _LatestPhotosGridScreen._cachedEntries!.isNotEmpty) {
+      if (mounted) {
+        setState(() {
+          _entries = _LatestPhotosGridScreen._cachedEntries!;
+          _visibleCount = min(_pageSize, _entries.length);
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    if (mounted) setState(() => _isLoading = true);
+
+    List<_MediaEntry> collected = await _queryMediaStoreNative();
+    if (collected.isEmpty) {
+      collected = await _scanDirectoriesFallback();
+    }
+
+    // Urutkan dari paling terbaru ke paling lama
+    collected.sort((a, b) => b.modified.compareTo(a.modified));
+    _LatestPhotosGridScreen._cachedEntries = collected;
 
     if (!mounted) return;
     setState(() {
-      _entries = allEntries;
+      _entries = collected;
       _visibleCount = min(_pageSize, _entries.length);
       _isLoading = false;
     });
   }
 
-  String _formatSectionLabel(List<_MediaEntry> entries) {
-    if (entries.isEmpty) return 'Terbaru (0)';
-    final now = DateTime.now();
-    final todayCount = entries.where((e) {
-      return e.modified.year == now.year &&
-          e.modified.month == now.month &&
-          e.modified.day == now.day;
-    }).length;
-    if (todayCount > 0) {
-      return 'Hari ini ($todayCount) • Total ${entries.length}';
+  List<_MonthlyPhotoSection> _buildMonthlySections(List<_MediaEntry> source) {
+    if (source.isEmpty) return const [];
+
+    final Map<String, List<_MediaEntry>> grouped = {};
+    final List<String> orderedKeys = [];
+
+    for (final entry in source) {
+      final int y = entry.modified.year;
+      final int m = entry.modified.month;
+      final String key = '$y-${m.toString().padLeft(2, '0')}';
+      if (!grouped.containsKey(key)) {
+        grouped[key] = [];
+        orderedKeys.add(key);
+      }
+      grouped[key]!.add(entry);
     }
-    return 'Semua Foto (${entries.length})';
+
+    return orderedKeys.map((key) {
+      final list = grouped[key]!;
+      final firstDt = list.first.modified;
+      final String monthName =
+          (firstDt.month >= 1 && firstDt.month <= 12)
+              ? _bulanIndo[firstDt.month - 1]
+              : 'Bulan ${firstDt.month}';
+      return _MonthlyPhotoSection(
+        year: firstDt.year,
+        month: firstDt.month,
+        title: '$monthName ${firstDt.year} (${list.length})',
+        entries: list,
+      );
+    }).toList();
   }
 
   @override
@@ -2380,9 +2473,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   @override
   Widget build(BuildContext context) {
     final total = _entries.length;
-    final visibleFiles =
-        _entries.take(_visibleCount).map((e) => e.file).toList();
+    final visibleEntries = _entries.take(_visibleCount).toList();
+    final allViewerFiles = _entries.map((e) => e.file).toList();
+    final sections = _buildMonthlySections(visibleEntries);
     final hasMore = _visibleCount < total;
+
+    int globalIndexCursor = 0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -2434,61 +2530,75 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                   child: CustomScrollView(
                     controller: _scrollController,
                     slivers: [
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                          child: Text(
-                            _formatSectionLabel(_entries),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
+                      for (final sec in sections) ...[
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
+                            child: Text(
+                              sec.title,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      SliverPadding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        sliver: SliverGrid(
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 3,
-                            mainAxisSpacing: 3,
-                          ),
-                          delegate: SliverChildBuilderDelegate(
-                            (ctx, idx) {
-                              final file = visibleFiles[idx];
-                              return InkWell(
-                                onTap: () {
-                                  Navigator.of(ctx).push(
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => _FullPhotoViewerScreen(
-                                        files: visibleFiles,
-                                        initialIndex: idx,
+                        SliverPadding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          sliver: SliverGrid(
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 3,
+                              crossAxisSpacing: 3,
+                              mainAxisSpacing: 3,
+                            ),
+                            delegate: SliverChildBuilderDelegate(
+                              (ctx, idx) {
+                                final int viewerIdx = globalIndexCursor + idx;
+                                final File file = sec.entries[idx].file;
+                                return InkWell(
+                                  onTap: () {
+                                    Navigator.of(ctx).push(
+                                      MaterialPageRoute<void>(
+                                        builder: (_) => _FullPhotoViewerScreen(
+                                          files: allViewerFiles,
+                                          initialIndex: viewerIdx.clamp(
+                                            0,
+                                            max(0, allViewerFiles.length - 1),
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                  child: Image.file(
+                                    file,
+                                    cacheWidth: 240,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) =>
+                                        const ColoredBox(
+                                      color: Color(0xFF1C2029),
+                                      child: Icon(
+                                        Icons.broken_image_outlined,
+                                        color: Colors.white54,
                                       ),
                                     ),
-                                  );
-                                },
-                                child: Image.file(
-                                  file,
-                                  cacheWidth: 240,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) =>
-                                      const ColoredBox(
-                                    color: Color(0xFF1C2029),
-                                    child: Icon(
-                                      Icons.broken_image_outlined,
-                                      color: Colors.white54,
-                                    ),
                                   ),
-                                ),
-                              );
-                            },
-                            childCount: visibleFiles.length,
+                                );
+                              },
+                              childCount: sec.entries.length,
+                            ),
                           ),
                         ),
-                      ),
+                        Builder(
+                          builder: (_) {
+                            globalIndexCursor += sec.entries.length;
+                            return const SliverToBoxAdapter(
+                              child: SizedBox.shrink(),
+                            );
+                          },
+                        ),
+                      ],
                       SliverToBoxAdapter(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 16),

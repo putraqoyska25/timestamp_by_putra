@@ -67,6 +67,15 @@ class _CameraScreenState extends State<CameraScreen>
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
 
+  // Tap-to-focus & exposure state
+  Offset? _focusPointNormalized;
+  Offset? _focusUiOffset;
+  double _minExposureOffset = -2.0;
+  double _maxExposureOffset = 2.0;
+  double _currentExposureOffset = 0.0;
+  bool _showFocusRing = false;
+  Timer? _focusRingTimer;
+
   PhotoAspectRatio _aspectRatio = PhotoAspectRatio.ratio4x3;
   ImageQualityPreset _qualityPreset = ImageQualityPreset.p720;
 
@@ -148,9 +157,12 @@ class _CameraScreenState extends State<CameraScreen>
       _cooldownTimer = null;
       _shutterBlinkTimer?.cancel();
       _shutterBlinkTimer = null;
+      _focusRingTimer?.cancel();
+      _focusRingTimer = null;
       _flashEnabled = false;
       _screenFlashActive = false;
       _shutterBlinkActive = false;
+      _showFocusRing = false;
       if (_isManualTime ||
           _openDrawer != ActiveDrawer.none ||
           _currentLens != CameraLensDirection.back ||
@@ -221,6 +233,68 @@ class _CameraScreenState extends State<CameraScreen>
       if (!mounted) return;
       setState(() => _shutterBlinkActive = false);
     });
+  }
+
+  void _scheduleFocusRingHide({int milliseconds = 3000}) {
+    _focusRingTimer?.cancel();
+    _focusRingTimer = Timer(Duration(milliseconds: milliseconds), () {
+      if (!mounted) return;
+      setState(() => _showFocusRing = false);
+    });
+  }
+
+  Future<void> _handleTapToFocus(
+    TapDownDetails details,
+    BoxConstraints box,
+  ) async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    if (box.maxWidth <= 0 || box.maxHeight <= 0) return;
+
+    final double nx =
+        (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
+    final double ny =
+        (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
+    final Offset norm = Offset(nx, ny);
+
+    setState(() {
+      _focusPointNormalized = norm;
+      _focusUiOffset = details.localPosition;
+      _showFocusRing = true;
+    });
+    _scheduleFocusRingHide(milliseconds: 3000);
+
+    try {
+      await ctrl.setFocusMode(FocusMode.auto);
+    } catch (_) {}
+
+    try {
+      await ctrl.setFocusPoint(norm);
+    } catch (e) {
+      debugPrint('setFocusPoint tidak didukung pada lensa ini: $e');
+    }
+
+    try {
+      await ctrl.setExposurePoint(norm);
+    } catch (e) {
+      debugPrint('setExposurePoint tidak didukung pada lensa ini: $e');
+    }
+  }
+
+  Future<void> _setExposureValue(double value) async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    final double clamped = value.clamp(_minExposureOffset, _maxExposureOffset);
+    setState(() {
+      _currentExposureOffset = clamped;
+      _showFocusRing = true;
+    });
+    _scheduleFocusRingHide(milliseconds: 3000);
+    try {
+      await ctrl.setExposureOffset(clamped);
+    } catch (e) {
+      debugPrint('Gagal mengatur exposure offset: $e');
+    }
   }
 
   int _normalizeTimer(int sec) {
@@ -560,6 +634,13 @@ class _CameraScreenState extends State<CameraScreen>
 
       await newController.initialize().timeout(const Duration(seconds: 10));
 
+      double minExp = -2.0;
+      double maxExp = 2.0;
+      try {
+        minExp = await newController.getMinExposureOffset();
+        maxExp = await newController.getMaxExposureOffset();
+      } catch (_) {}
+
       if (!mounted) {
         await newController.dispose();
         return;
@@ -571,6 +652,12 @@ class _CameraScreenState extends State<CameraScreen>
         _currentLens = cameras[foundIndex].lensDirection;
         _screenFlashActive = false;
         _cameraErrorMessage = null;
+        _minExposureOffset = minExp;
+        _maxExposureOffset = maxExp;
+        _currentExposureOffset = 0.0;
+        _showFocusRing = false;
+        _focusPointNormalized = null;
+        _focusUiOffset = null;
       });
 
       await _applyFlashHardwareState();
@@ -1145,6 +1232,111 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  Widget _buildFocusIndicatorOverlay(BoxConstraints box) {
+    if (!_showFocusRing || _focusUiOffset == null) {
+      return const SizedBox.shrink();
+    }
+
+    const double ringSize = 68;
+    final double left =
+        (_focusUiOffset!.dx - ringSize / 2).clamp(8.0, max(8.0, box.maxWidth - ringSize - 8.0));
+    final double top =
+        (_focusUiOffset!.dy - ringSize / 2).clamp(8.0, max(8.0, box.maxHeight - ringSize - 8.0));
+
+    final bool canAdjustExposure = _maxExposureOffset > _minExposureOffset;
+    final double sliderLeft =
+        (left + ringSize + 8) <= (box.maxWidth - 36) ? (left + ringSize + 8) : max(8.0, left - 36);
+
+    return Stack(
+      children: [
+        Positioned(
+          left: left,
+          top: top,
+          child: IgnorePointer(
+            child: Container(
+              width: ringSize,
+              height: ringSize,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: const Color(0xFFFFD000),
+                  width: 2.0,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.35),
+                    blurRadius: 4,
+                  ),
+                ],
+              ),
+              child: Center(
+                child: Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Color(0xFFFFD000),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (canAdjustExposure)
+          Positioned(
+            left: sliderLeft,
+            top: (top - 22).clamp(8.0, max(8.0, box.maxHeight - 120.0)),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.65),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.wb_sunny_outlined,
+                    size: 14,
+                    color: Color(0xFFFFD000),
+                  ),
+                  SizedBox(
+                    height: 86,
+                    width: 22,
+                    child: RotatedBox(
+                      quarterTurns: -1,
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 2,
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 6,
+                          ),
+                          overlayShape: const RoundSliderOverlayShape(
+                            overlayRadius: 12,
+                          ),
+                        ),
+                        child: Slider(
+                          min: _minExposureOffset,
+                          max: _maxExposureOffset,
+                          value: _currentExposureOffset.clamp(
+                            _minExposureOffset,
+                            _maxExposureOffset,
+                          ),
+                          activeColor: const Color(0xFFFFD000),
+                          inactiveColor: Colors.white30,
+                          onChanged: (val) => _setExposureValue(val),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _buildProportionalPreview(CameraController ctrl) {
     final Size? previewSize = ctrl.value.previewSize;
     final bool isPortrait =
@@ -1172,15 +1364,29 @@ class _CameraScreenState extends State<CameraScreen>
       }
     }
 
-    return ClipRect(
-      child: FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: sourceW,
-          height: sourceH,
-          child: CameraPreview(ctrl),
-        ),
-      ),
+    return LayoutBuilder(
+      builder: (context, box) {
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (details) => _handleTapToFocus(details, box),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ClipRect(
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: sourceW,
+                    height: sourceH,
+                    child: CameraPreview(ctrl),
+                  ),
+                ),
+              ),
+              _buildFocusIndicatorOverlay(box),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1894,6 +2100,7 @@ class _CameraScreenState extends State<CameraScreen>
     _countdownTimer?.cancel();
     _cooldownTimer?.cancel();
     _shutterBlinkTimer?.cancel();
+    _focusRingTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }

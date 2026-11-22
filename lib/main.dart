@@ -155,8 +155,6 @@ class _StampRenderer {
   static double aspectScaleFactor(int width, int height) {
     if (width <= 0 || height <= 0) return 1.0;
     final double ratio = width / height;
-    // 1:1 -> 1.0, 4:3 portrait (0.75) -> 0.75, 16:9 portrait (0.5625) -> 0.5625
-    // Dibuat proporsional terhadap aspek foto agar stamp di 1:1, 4:3, dan 16:9 serasi
     if (ratio >= 0.95) {
       return 0.92;
     } else if (ratio >= 0.70) {
@@ -450,13 +448,14 @@ class _StampRenderer {
 Widget _buildStampOverlayWidget({
   required DateTime activeDt,
   required _WatermarkConfig cfg,
-  double? boxWidth,
-  double? boxHeight,
+  required double boxWidth,
+  required double boxHeight,
 }) {
-  final double ratioFactor = (boxWidth != null && boxHeight != null)
-      ? _StampRenderer.aspectScaleFactor(boxWidth.round(), boxHeight.round())
-      : 1.0;
-  final double mult = _StampRenderer.sizeMultiplier(cfg.formSize) * ratioFactor;
+  final double refScale = boxWidth > 0 ? (boxWidth / 390.0) : 1.0;
+  final double ratioFactor =
+      _StampRenderer.aspectScaleFactor(boxWidth.round(), boxHeight.round());
+  final double s =
+      refScale * _StampRenderer.sizeMultiplier(cfg.formSize) * ratioFactor;
 
   const List<Shadow> previewShadows = [
     Shadow(
@@ -478,7 +477,12 @@ Widget _buildStampOverlayWidget({
 
   return IgnorePointer(
     child: Container(
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 12),
+      padding: EdgeInsets.fromLTRB(
+        14 * refScale,
+        18 * refScale,
+        14 * refScale,
+        12 * refScale,
+      ),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -499,34 +503,34 @@ Widget _buildStampOverlayWidget({
               children: [
                 if (hasLogo) ...[
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(6 * s),
                     child: Image.file(
                       File(cfg.logoFilePath!),
-                      width: 44 * mult,
-                      height: 44 * mult,
+                      width: 44 * s,
+                      height: 44 * s,
                       fit: BoxFit.cover,
                     ),
                   ),
-                  SizedBox(width: 10 * mult),
+                  SizedBox(width: 10 * s),
                 ],
                 if (cfg.showTime) ...[
                   Text(
                     _StampRenderer.formatJamMenit(activeDt),
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 36 * mult,
+                      fontSize: 36 * s,
                       fontWeight: FontWeight.w700,
                       height: 1.0,
                       shadows: previewShadows,
                     ),
                   ),
-                  SizedBox(width: 10 * mult),
+                  SizedBox(width: 10 * s),
                   Container(
-                    width: 2.5 * mult,
-                    height: 36 * mult,
+                    width: 2.5 * s,
+                    height: 36 * s,
                     color: const Color(0xFFFFD000),
                   ),
-                  SizedBox(width: 10 * mult),
+                  SizedBox(width: 10 * s),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -536,16 +540,17 @@ Widget _buildStampOverlayWidget({
                           _StampRenderer.formatTanggalLengkap(activeDt),
                           style: TextStyle(
                             color: Colors.white,
-                            fontSize: 15 * mult,
+                            fontSize: 15 * s,
                             fontWeight: FontWeight.w600,
                             shadows: previewShadows,
                           ),
                         ),
+                        SizedBox(height: 2 * s),
                         Text(
                           _StampRenderer.formatHari(activeDt),
                           style: TextStyle(
                             color: Colors.white,
-                            fontSize: 14 * mult,
+                            fontSize: 14 * s,
                             shadows: previewShadows,
                           ),
                         ),
@@ -556,14 +561,14 @@ Widget _buildStampOverlayWidget({
               ],
             ),
           if (extraLines.isNotEmpty) ...[
-            SizedBox(height: 8 * mult),
+            SizedBox(height: 8 * s),
             Text(
               extraLines.join('\n'),
               maxLines: 6,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: Colors.white,
-                fontSize: 13.5 * mult,
+                fontSize: 13.5 * s,
                 height: 1.25,
                 shadows: previewShadows,
               ),
@@ -3068,18 +3073,34 @@ class _GalleryWatermarkEditorScreenState
   bool _stampVisible = false;
   bool _editorDrawerOpen = false;
   bool _isSaving = false;
+  double _photoAspectRatio = 3.0 / 4.0;
 
   @override
   void initState() {
     super.initState();
     _cfg = widget.initialConfig;
     _stampVisible = false;
+    _resolvePhotoAspectRatio();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (!_cfg.isManualTime) {
         setState(() => _nowClock = DateTime.now());
       }
     });
+  }
+
+  Future<void> _resolvePhotoAspectRatio() async {
+    try {
+      if (!await widget.photoFile.exists()) return;
+      final bytes = await widget.photoFile.readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null || decoded.width <= 0 || decoded.height <= 0) return;
+      final oriented = img.bakeOrientation(decoded);
+      if (!mounted) return;
+      setState(() {
+        _photoAspectRatio = oriented.width / oriented.height;
+      });
+    } catch (_) {}
   }
 
   @override
@@ -3568,33 +3589,48 @@ class _GalleryWatermarkEditorScreenState
             Expanded(
               child: Center(
                 child: LayoutBuilder(
-                  builder: (context, imgBox) {
-                    return Stack(
-                      alignment: Alignment.bottomLeft,
-                      children: [
-                        Image.file(
-                          widget.photoFile,
-                          fit: BoxFit.contain,
-                          width: double.infinity,
-                          height: double.infinity,
-                          errorBuilder: (_, __, ___) => const Text(
-                            'Gagal memuat foto',
-                            style: TextStyle(color: Colors.white70),
-                          ),
-                        ),
-                        if (_stampVisible)
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            child: _buildStampOverlayWidget(
-                              activeDt: _activeDateTime(),
-                              cfg: _cfg,
-                              boxWidth: imgBox.maxWidth,
-                              boxHeight: imgBox.maxHeight,
+                  builder: (context, outerBox) {
+                    final double safeRatio =
+                        _photoAspectRatio > 0 ? _photoAspectRatio : (3.0 / 4.0);
+                    double boxW = outerBox.maxWidth;
+                    double boxH = boxW / safeRatio;
+                    if (outerBox.maxHeight.isFinite &&
+                        boxH > outerBox.maxHeight) {
+                      boxH = outerBox.maxHeight;
+                      boxW = boxH * safeRatio;
+                    }
+                    return SizedBox(
+                      width: boxW,
+                      height: boxH,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.file(
+                            widget.photoFile,
+                            fit: BoxFit.fill,
+                            width: boxW,
+                            height: boxH,
+                            errorBuilder: (_, __, ___) => const Center(
+                              child: Text(
+                                'Gagal memuat foto',
+                                style: TextStyle(color: Colors.white70),
+                              ),
                             ),
                           ),
-                      ],
+                          if (_stampVisible)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: _buildStampOverlayWidget(
+                                activeDt: _activeDateTime(),
+                                cfg: _cfg,
+                                boxWidth: boxW,
+                                boxHeight: boxH,
+                              ),
+                            ),
+                        ],
+                      ),
                     );
                   },
                 ),

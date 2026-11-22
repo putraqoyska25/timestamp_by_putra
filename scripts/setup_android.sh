@@ -9,7 +9,7 @@ KOTLIN_PKG_DIR="$SRC_MAIN_DIR/kotlin/com/example/timestamp_by_putra"
 
 mkdir -p "$ANDROID_DIR" "$APP_DIR" "$SRC_MAIN_DIR" "$KOTLIN_PKG_DIR"
 
-# 1. Tulis gradle.properties agar kompatibel dengan JVM / Gradle / Kotlin stabil
+# 1. Tulis gradle.properties
 cat <<'EOF' > "$ANDROID_DIR/gradle.properties"
 org.gradle.jvmargs=-Xmx4096M -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
 android.useAndroidX=true
@@ -17,7 +17,7 @@ android.enableJetifier=true
 kotlin.code.style=official
 EOF
 
-# 2. Tulis settings.gradle.kts dengan versi plugin & Kotlin stabil (menghindari 2.3.20 yang gagal di-resolve)
+# 2. Tulis settings.gradle.kts dengan AGP 9.1.1 & Kotlin 2.2.20
 cat <<'EOF' > "$ANDROID_DIR/settings.gradle.kts"
 pluginManagement {
     val flutterSdkPath = run {
@@ -45,8 +45,8 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    id("com.android.application") version "8.6.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+    id("com.android.application") version "9.1.1" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
 dependencyResolutionManagement {

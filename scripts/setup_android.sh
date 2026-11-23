@@ -78,8 +78,19 @@ class MainActivity : FlutterActivity() {
     private var pendingTrashUriCount: Int = 0
     private var pendingTrashPaths: List<String> = emptyList()
 
+    private fun setKeepScreenOnFlag(enabled: Boolean) {
+        runOnUiThread {
+            if (enabled) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        setKeepScreenOnFlag(true)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, brightnessChannelName)
             .setMethodCallHandler { call, result ->
@@ -99,6 +110,11 @@ class MainActivity : FlutterActivity() {
                             window.attributes = attrs
                             result.success(true)
                         }
+                    }
+                    "setKeepScreenOn" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: true
+                        setKeepScreenOnFlag(enabled)
+                        result.success(true)
                     }
                     else -> result.notImplemented()
                 }
@@ -120,6 +136,11 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onDestroy() {
+        setKeepScreenOnFlag(false)
+        super.onDestroy()
     }
 
     private fun requiredMediaPermissions(): Array<String> {

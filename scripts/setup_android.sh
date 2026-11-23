@@ -66,6 +66,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -75,6 +76,7 @@ import java.io.File
 
 class MainActivity : FlutterActivity() {
     private val channelName = "timestamp_by_putra/media_store"
+    private val brightnessChannelName = "timestamp_by_putra/screen_brightness"
     private val reqMediaCode = 7001
     private val reqTrashCode = 7002
 
@@ -84,6 +86,29 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, brightnessChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setMaxBrightness" -> {
+                        runOnUiThread {
+                            val attrs = window.attributes
+                            attrs.screenBrightness = 1.0f
+                            window.attributes = attrs
+                            result.success(true)
+                        }
+                    }
+                    "restoreBrightness" -> {
+                        runOnUiThread {
+                            val attrs = window.attributes
+                            attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                            window.attributes = attrs
+                            result.success(true)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->

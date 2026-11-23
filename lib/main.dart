@@ -980,6 +980,7 @@ class _AppPrefsStore {
 class _ShutterAudioService {
   static AudioPlayer? _player;
   static String? _cachedWavFilePath;
+  static Future<void> _playChain = Future<void>.value();
 
   static Uint8List _buildLoudMechanicalShutterWavBytes() {
     const int sampleRate = 44100;
@@ -1047,24 +1048,29 @@ class _ShutterAudioService {
 
   static Future<String> _ensureWavFile() async {
     final existingPath = _cachedWavFilePath;
-    if (existingPath != null && await File(existingPath).exists()) {
+    if (existingPath != null &&
+        await File(existingPath).exists() &&
+        await File(existingPath).length() > 44) {
       return existingPath;
     }
     final dir = await getApplicationDocumentsDirectory();
     final file = File(
-      '${dir.path}${Platform.pathSeparator}shutter_loud_v2.wav',
+      '${dir.path}${Platform.pathSeparator}shutter_loud_v3.wav',
     );
-    if (!await file.exists() || await file.length() == 0) {
-      final wavBytes = _buildLoudMechanicalShutterWavBytes();
-      await file.writeAsBytes(wavBytes, flush: true);
-    }
+    final wavBytes = _buildLoudMechanicalShutterWavBytes();
+    await file.writeAsBytes(wavBytes, flush: true);
     _cachedWavFilePath = file.path;
     return file.path;
   }
 
-  static Future<AudioPlayer> _ensurePlayer() async {
-    final existing = _player;
-    if (existing != null) return existing;
+  static Future<AudioPlayer> _createFreshPlayer() async {
+    final prev = _player;
+    _player = null;
+    if (prev != null) {
+      try {
+        await prev.dispose();
+      } catch (_) {}
+    }
 
     final player = AudioPlayer();
     await player.setPlayerMode(PlayerMode.mediaPlayer);
@@ -1076,13 +1082,26 @@ class _ShutterAudioService {
           isSpeakerphoneOn: false,
           stayAwake: false,
           contentType: AndroidContentType.sonification,
-          usageType: AndroidUsageType.assistanceSonification,
-          audioFocus: AndroidAudioFocus.gainTransientMayDuck,
+          usageType: AndroidUsageType.media,
+          audioFocus: AndroidAudioFocus.none,
         ),
       ),
     );
     _player = player;
     return player;
+  }
+
+  static Future<AudioPlayer> _ensurePlayer() async {
+    final existing = _player;
+    if (existing != null) {
+      try {
+        await existing.setVolume(1.0);
+        return existing;
+      } catch (_) {
+        return _createFreshPlayer();
+      }
+    }
+    return _createFreshPlayer();
   }
 
   static Future<void> warmupAudio() async {
@@ -1095,21 +1114,52 @@ class _ShutterAudioService {
     }
   }
 
-  static Future<void> playShutterSound() async {
-    try {
-      final path = await _ensureWavFile();
-      final player = await _ensurePlayer();
-      await player.setVolume(1.0);
-      await player.seek(Duration.zero);
-      await player.play(DeviceFileSource(path), volume: 1.0);
-      return;
-    } catch (e) {
-      debugPrint('DeviceFileSource shutter fallback: $e');
-    }
-
+  static Future<void> _triggerSystemClickFallback() async {
     try {
       await SystemSound.play(SystemSoundType.click);
     } catch (_) {}
+    try {
+      await HapticFeedback.lightImpact();
+    } catch (_) {}
+  }
+
+  static Future<void> playShutterSound() {
+    _playChain = _playChain.then((_) async {
+      bool wavPlayed = false;
+      try {
+        final path = await _ensureWavFile();
+        AudioPlayer player = await _ensurePlayer();
+        try {
+          await player.stop();
+        } catch (_) {}
+        await player.setVolume(1.0);
+        await player.play(DeviceFileSource(path), volume: 1.0).timeout(
+              const Duration(seconds: 2),
+            );
+        wavPlayed = true;
+      } catch (e) {
+        debugPrint('DeviceFileSource shutter retry: $e');
+        try {
+          final path = await _ensureWavFile();
+          final freshPlayer = await _createFreshPlayer();
+          await freshPlayer.play(DeviceFileSource(path), volume: 1.0).timeout(
+                const Duration(seconds: 2),
+              );
+          wavPlayed = true;
+        } catch (e2) {
+          debugPrint('DeviceFileSource shutter fallback error: $e2');
+        }
+      }
+
+      if (!wavPlayed) {
+        await _triggerSystemClickFallback();
+      } else {
+        try {
+          await SystemSound.play(SystemSoundType.click);
+        } catch (_) {}
+      }
+    });
+    return _playChain;
   }
 
   static Future<void> dispose() async {
@@ -3128,7 +3178,9 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       _triggerShutterBlink(milliseconds: 110);
-      unawaited(_playShutterSoundIfEnabled());
+      if (_shutterSoundEnabled) {
+        await _ShutterAudioService.playShutterSound();
+      }
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
@@ -4845,14 +4897,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             const SizedBox(width: 6),
             FilledButton(
               style: FilledButton.styleFrom(
-                backgroundColor:
-                    (canCollage && !_isDeleting)
-                        ? const Color(0xFFFFD000)
-                        : Colors.white12,
-                foregroundColor:
-                    (canCollage && !_isDeleting)
-                        ? Colors.black
-                        : Colors.white38,
+                backgroundColor: (canCollage && !_isDeleting)
+                    ? const Color(0xFFFFD000)
+                    : Colors.white12,
+                foregroundColor: (canCollage && !_isDeleting)
+                    ? Colors.black
+                    : Colors.white38,
                 disabledBackgroundColor: Colors.white12,
                 disabledForegroundColor: Colors.white38,
                 padding:
@@ -4861,10 +4911,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              onPressed:
-                  (canCollage && !_isDeleting)
-                      ? _openCollageStageFromSelection
-                      : null,
+              onPressed: (canCollage && !_isDeleting)
+                  ? _openCollageStageFromSelection
+                  : null,
               child: Text(
                 overCollageLimit
                     ? 'Kolase (Maks 6)'

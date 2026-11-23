@@ -4699,7 +4699,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
         ),
         actions: [
-          if (_trashSelectionMode && _selectedTrashPaths.isNotEmpty)
+          if (_trashSelectionMode && _selectedTrashPaths.isEmpty)
+            const SizedBox.shrink()
+          else if (_trashSelectionMode && _selectedTrashPaths.isNotEmpty)
             IconButton(
               onPressed: _isDeleting ? null : _deleteSelectedToTrash,
               icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
@@ -5019,6 +5021,9 @@ class _CollageStagePreviewScreenState
   late int _slotCount;
   late CollageLayoutId _layoutId;
   late List<File?> _slots;
+  late List<Offset> _slotPanNorms;
+  final Map<String, Size> _photoDimsCache = {};
+  int? _draggingSlotIndex;
   bool _hasDirtyChanges = false;
   bool _isSaving = false;
 
@@ -5032,6 +5037,102 @@ class _CollageStagePreviewScreenState
       _slotCount,
       (i) => i < initial.length ? initial[i] : null,
     );
+    _slotPanNorms = List<Offset>.generate(_slotCount, (_) => Offset.zero);
+    for (final f in _slots) {
+      if (f != null) unawaited(_cacheImageDimensions(f));
+    }
+  }
+
+  Future<void> _cacheImageDimensions(File file) async {
+    if (_photoDimsCache.containsKey(file.path)) return;
+    try {
+      if (!await file.exists()) return;
+      final Uint8List bytes = await file.readAsBytes();
+      final img.Image? decoded = img.decodeImage(bytes);
+      if (decoded == null || decoded.width <= 0 || decoded.height <= 0) return;
+      final img.Image oriented = img.bakeOrientation(decoded);
+      if (!mounted) return;
+      setState(() {
+        _photoDimsCache[file.path] = Size(
+          oriented.width.toDouble(),
+          oriented.height.toDouble(),
+        );
+      });
+    } catch (_) {}
+  }
+
+  Offset _panForSlot(int index) {
+    if (index < 0 || index >= _slotPanNorms.length) return Offset.zero;
+    return _slotPanNorms[index];
+  }
+
+  void _setPanForSlot(int index, Offset nextPan) {
+    if (index < 0 || index >= _slotPanNorms.length) return;
+    _slotPanNorms[index] = Offset(
+      nextPan.dx.clamp(-1.0, 1.0),
+      nextPan.dy.clamp(-1.0, 1.0),
+    );
+  }
+
+  void _resetPanForSlot(int index) {
+    if (index < 0 || index >= _slotPanNorms.length) return;
+    setState(() {
+      _slotPanNorms[index] = Offset.zero;
+      _hasDirtyChanges = true;
+    });
+  }
+
+  void _handleSlotPanDrag(
+    int index,
+    Offset deltaPx,
+    double slotW,
+    double slotH,
+  ) {
+    if (_isSaving || index < 0 || index >= _slots.length) return;
+    final File? file = _slots[index];
+    if (file == null) return;
+
+    final Size? dims = _photoDimsCache[file.path];
+    if (dims == null || dims.width <= 0 || dims.height <= 0) {
+      unawaited(_cacheImageDimensions(file));
+      return;
+    }
+    if (slotW <= 1 || slotH <= 1) return;
+
+    final double srcRatio = dims.width / dims.height;
+    final double dstRatio = slotW / slotH;
+
+    double maxShiftX = 0.0;
+    double maxShiftY = 0.0;
+
+    if (srcRatio > dstRatio + 0.005) {
+      final double renderedW = slotH * srcRatio;
+      maxShiftX = max(0.0, (renderedW - slotW) / 2.0);
+    } else if (dstRatio > srcRatio + 0.005) {
+      final double renderedH = slotW / srcRatio;
+      maxShiftY = max(0.0, (renderedH - slotH) / 2.0);
+    }
+
+    if (maxShiftX <= 0.5 && maxShiftY <= 0.5) return;
+
+    final Offset currentNorm = _panForSlot(index);
+    final double currentShiftX = currentNorm.dx * maxShiftX;
+    final double currentShiftY = currentNorm.dy * maxShiftY;
+
+    final double nextShiftX =
+        (currentShiftX + deltaPx.dx).clamp(-maxShiftX, maxShiftX);
+    final double nextShiftY =
+        (currentShiftY + deltaPx.dy).clamp(-maxShiftY, maxShiftY);
+
+    final double nextNormX =
+        maxShiftX > 0.5 ? (nextShiftX / maxShiftX).clamp(-1.0, 1.0) : 0.0;
+    final double nextNormY =
+        maxShiftY > 0.5 ? (nextShiftY / maxShiftY).clamp(-1.0, 1.0) : 0.0;
+
+    setState(() {
+      _setPanForSlot(index, Offset(nextNormX, nextNormY));
+      _hasDirtyChanges = true;
+    });
   }
 
   void _changeSlotCount(int delta) {
@@ -5040,11 +5141,14 @@ class _CollageStagePreviewScreenState
     if (nextCount == _slotCount) return;
 
     final List<File?> nextSlots = List<File?>.filled(nextCount, null);
+    final List<Offset> nextPans = List<Offset>.filled(nextCount, Offset.zero);
     for (int i = 0; i < nextCount; i++) {
       if (i < _slots.length) {
         nextSlots[i] = _slots[i];
+        nextPans[i] = _slotPanNorms[i];
       } else if (i < widget.selectedFiles.length) {
         nextSlots[i] = widget.selectedFiles[i];
+        unawaited(_cacheImageDimensions(widget.selectedFiles[i]));
       }
     }
 
@@ -5058,6 +5162,7 @@ class _CollageStagePreviewScreenState
     setState(() {
       _slotCount = nextCount;
       _slots = nextSlots;
+      _slotPanNorms = nextPans;
       _layoutId = nextLayout;
       _hasDirtyChanges = true;
     });
@@ -5079,8 +5184,11 @@ class _CollageStagePreviewScreenState
         imageQuality: 92,
       );
       if (picked != null && mounted) {
+        final File newFile = File(picked.path);
+        unawaited(_cacheImageDimensions(newFile));
         setState(() {
-          _slots[slotIndex] = File(picked.path);
+          _slots[slotIndex] = newFile;
+          _slotPanNorms[slotIndex] = Offset.zero;
           _hasDirtyChanges = true;
         });
       }
@@ -5137,6 +5245,7 @@ class _CollageStagePreviewScreenState
     required File file,
     required int dstW,
     required int dstH,
+    required Offset panNorm,
   }) {
     if (!file.existsSync()) return null;
     final Uint8List bytes = file.readAsBytesSync();
@@ -5164,8 +5273,21 @@ class _CollageStagePreviewScreenState
       }
     }
 
-    final int cropX = max(0, ((sw - cropW) / 2.0).floor());
-    final int cropY = max(0, ((sh - cropH) / 2.0).floor());
+    cropW = min(sw, max(1, cropW));
+    cropH = min(sh, max(1, cropH));
+
+    final double halfRangeX = max(0.0, (sw - cropW) / 2.0);
+    final double halfRangeY = max(0.0, (sh - cropH) / 2.0);
+
+    final double centerX = (sw / 2.0) - (panNorm.dx.clamp(-1.0, 1.0) * halfRangeX);
+    final double centerY = (sh / 2.0) - (panNorm.dy.clamp(-1.0, 1.0) * halfRangeY);
+
+    final int cropX = (centerX - (cropW / 2.0))
+        .round()
+        .clamp(0, max(0, sw - cropW));
+    final int cropY = (centerY - (cropH / 2.0))
+        .round()
+        .clamp(0, max(0, sh - cropH));
 
     final img.Image cropped = img.copyCrop(
       oriented,
@@ -5241,6 +5363,7 @@ class _CollageStagePreviewScreenState
           file: activeFiles[i],
           dstW: dw,
           dstH: dh,
+          panNorm: _panForSlot(i),
         );
         if (tile != null) {
           img.compositeImage(
@@ -5350,21 +5473,56 @@ class _CollageStagePreviewScreenState
 
   Widget _buildSlotTile(int index, double w, double h) {
     final File? file = index < _slots.length ? _slots[index] : null;
+    final Offset panNorm = _panForSlot(index);
+    final bool isDraggingThis = _draggingSlotIndex == index;
 
     return GestureDetector(
       onTap: _isSaving ? null : () => _pickPhotoForSlot(index),
+      onDoubleTap: _isSaving || file == null
+          ? null
+          : () => _resetPanForSlot(index),
+      onPanStart: _isSaving || file == null
+          ? null
+          : (_) {
+              unawaited(_cacheImageDimensions(file));
+              setState(() => _draggingSlotIndex = index);
+            },
+      onPanUpdate: _isSaving || file == null
+          ? null
+          : (details) =>
+              _handleSlotPanDrag(index, details.delta, w, h),
+      onPanEnd: (_) {
+        if (_draggingSlotIndex == index && mounted) {
+          setState(() => _draggingSlotIndex = null);
+        }
+      },
+      onPanCancel: () {
+        if (_draggingSlotIndex == index && mounted) {
+          setState(() => _draggingSlotIndex = null);
+        }
+      },
       child: ClipRRect(
         borderRadius: BorderRadius.circular(4),
         child: Container(
           color: const Color(0xFF1C212B),
+          foregroundDecoration: isDraggingThis
+              ? BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                    color: const Color(0xFFFFD000),
+                    width: 2.0,
+                  ),
+                )
+              : null,
           child: file != null
               ? Stack(
                   fit: StackFit.expand,
                   children: [
                     Image.file(
                       file,
-                      cacheWidth: max(180, (w * 1.5).round()),
+                      cacheWidth: max(220, (w * 2.0).round()),
                       fit: BoxFit.cover,
+                      alignment: Alignment(panNorm.dx, panNorm.dy),
                       gaplessPlayback: true,
                       errorBuilder: (_, __, ___) => const Center(
                         child: Icon(
@@ -5448,20 +5606,18 @@ class _CollageStagePreviewScreenState
                 Row(
                   children: [
                     IconButton.filledTonal(
-                      onPressed:
-                          (_isSaving || _slotCount <= _minSlots)
-                              ? null
-                              : () => _changeSlotCount(-1),
+                      onPressed: (_isSaving || _slotCount <= _minSlots)
+                          ? null
+                          : () => _changeSlotCount(-1),
                       icon: const Icon(Icons.remove, size: 18),
                       visualDensity: VisualDensity.compact,
                       tooltip: 'Kurangi foto',
                     ),
                     const SizedBox(width: 8),
                     IconButton.filledTonal(
-                      onPressed:
-                          (_isSaving || _slotCount >= _maxSlots)
-                              ? null
-                              : () => _changeSlotCount(1),
+                      onPressed: (_isSaving || _slotCount >= _maxSlots)
+                          ? null
+                          : () => _changeSlotCount(1),
                       icon: const Icon(Icons.add, size: 18),
                       visualDensity: VisualDensity.compact,
                       tooltip: 'Tambah foto',
@@ -5469,6 +5625,14 @@ class _CollageStagePreviewScreenState
                   ],
                 ),
               ],
+            ),
+            const SizedBox(height: 2),
+            const Text(
+              'Seret gambar untuk mengatur posisi • Ketuk 2x untuk tengah',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+              ),
             ),
             const SizedBox(height: 8),
             SizedBox(

@@ -51,6 +51,34 @@ enum PhotoAspectRatio { ratio1x1, ratio4x3, ratio16x9 }
 
 enum ImageQualityPreset { p1080, p720, p480, p360 }
 
+class _NativeBrightnessService {
+  static const MethodChannel _channel =
+      MethodChannel('timestamp_by_putra/screen_brightness');
+  static bool _isBoosted = false;
+
+  static Future<void> boostToMax() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('setMaxBrightness');
+      _isBoosted = true;
+    } catch (e) {
+      debugPrint('Gagal menaikkan kecerahan layar native: $e');
+    }
+  }
+
+  static Future<void> restoreNormal() async {
+    if (!Platform.isAndroid) return;
+    if (!_isBoosted) return;
+    try {
+      await _channel.invokeMethod('restoreBrightness');
+    } catch (e) {
+      debugPrint('Gagal memulihkan kecerahan layar native: $e');
+    } finally {
+      _isBoosted = false;
+    }
+  }
+}
+
 class _WatermarkConfig {
   final bool showLogo;
   final String? logoFilePath;
@@ -1564,11 +1592,12 @@ class _CameraScreenState extends State<CameraScreen>
       _shutterBlinkTimer = null;
       _focusRingTimer?.cancel();
       _focusRingTimer = null;
-      _flashEnabled = false;
       _screenFlashActive = false;
       _shutterBlinkActive = false;
       _showFocusRing = false;
       _isDraggingExposure = false;
+      unawaited(_NativeBrightnessService.restoreNormal());
+      unawaited(_forceTorchOff(controllerOverride: _controller));
       if (_isManualTime ||
           _openDrawer != ActiveDrawer.none ||
           _currentLens != CameraLensDirection.back ||
@@ -1582,6 +1611,8 @@ class _CameraScreenState extends State<CameraScreen>
       }
       _disposeControllerSafely();
     } else if (state == AppLifecycleState.resumed) {
+      _screenFlashActive = false;
+      unawaited(_NativeBrightnessService.restoreNormal());
       setState(() {
         _isManualTime = false;
         _systemNow = DateTime.now();
@@ -1636,6 +1667,9 @@ class _CameraScreenState extends State<CameraScreen>
     final prev = _controller;
     _controller = null;
     if (prev != null) {
+      try {
+        await prev.setFlashMode(FlashMode.off);
+      } catch (_) {}
       try {
         await prev.dispose();
       } catch (e) {
@@ -2111,20 +2145,39 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  Future<void> _applyFlashHardwareState() async {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) return;
+  Future<void> _forceTorchOff({CameraController? controllerOverride}) async {
+    final ctrl = controllerOverride ?? _controller;
+    if (ctrl == null) return;
     try {
-      if (_currentLens == CameraLensDirection.back) {
-        await ctrl.setFlashMode(
-          _flashEnabled ? FlashMode.torch : FlashMode.off,
-        );
-      } else {
+      if (ctrl.value.isInitialized) {
         await ctrl.setFlashMode(FlashMode.off);
       }
     } catch (e) {
-      debugPrint('Gagal mengatur flash hardware: $e');
+      debugPrint('Gagal mematikan flash/torch: $e');
     }
+  }
+
+  Future<void> _activateBackTorchForCapture(CameraController ctrl) async {
+    try {
+      await ctrl.setFlashMode(FlashMode.torch);
+      await Future.delayed(const Duration(milliseconds: 170));
+    } catch (e) {
+      debugPrint('Gagal menyalakan torch belakang saat shutter: $e');
+    }
+  }
+
+  Future<void> _activateFrontScreenFlashForCapture() async {
+    await _NativeBrightnessService.boostToMax();
+    if (!mounted) return;
+    setState(() => _screenFlashActive = true);
+    await Future.delayed(const Duration(milliseconds: 220));
+  }
+
+  Future<void> _deactivateFrontScreenFlash() async {
+    if (mounted && _screenFlashActive) {
+      setState(() => _screenFlashActive = false);
+    }
+    await _NativeBrightnessService.restoreNormal();
   }
 
   Future<void> _initCameraByDirection(
@@ -2136,8 +2189,10 @@ class _CameraScreenState extends State<CameraScreen>
       setState(() {
         _isInitializingCamera = true;
         _cameraErrorMessage = null;
+        _screenFlashActive = false;
       });
     }
+    await _NativeBrightnessService.restoreNormal();
 
     CameraController? newController;
     try {
@@ -2171,6 +2226,9 @@ class _CameraScreenState extends State<CameraScreen>
       );
 
       await newController.initialize().timeout(const Duration(seconds: 10));
+      try {
+        await newController.setFlashMode(FlashMode.off);
+      } catch (_) {}
 
       double minExp = -2.0;
       double maxExp = 2.0;
@@ -2196,8 +2254,6 @@ class _CameraScreenState extends State<CameraScreen>
         _isDraggingExposure = false;
         _focusUiOffset = null;
       });
-
-      await _applyFlashHardwareState();
     } catch (e) {
       debugPrint('Gagal inisialisasi kamera: $e');
       if (newController != null) {
@@ -2228,6 +2284,10 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _toggleFrontBackCamera() async {
     if (_isInitializingCamera || _isSaving || _isCoolingDown) return;
+    _screenFlashActive = false;
+    unawaited(_NativeBrightnessService.restoreNormal());
+    unawaited(_forceTorchOff(controllerOverride: _controller));
+
     if (cameras.length < 2) {
       await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
       return;
@@ -2239,15 +2299,15 @@ class _CameraScreenState extends State<CameraScreen>
     await _initCameraByDirection(nextDir, refreshList: false);
   }
 
-  Future<void> _toggleFlash() async {
-    final bool nextFlash = !_flashEnabled;
+  void _toggleFlash() {
     setState(() {
-      _flashEnabled = nextFlash;
-      if (_currentLens == CameraLensDirection.front) {
-        _screenFlashActive = nextFlash;
-      }
+      _flashEnabled = !_flashEnabled;
+      _screenFlashActive = false;
     });
-    await _applyFlashHardwareState();
+    if (!_flashEnabled) {
+      unawaited(_forceTorchOff(controllerOverride: _controller));
+      unawaited(_NativeBrightnessService.restoreNormal());
+    }
   }
 
   Future<void> _getLocation({bool requestIfDenied = true}) async {
@@ -2423,14 +2483,10 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() {
       _isSaving = true;
       _openDrawer = ActiveDrawer.none;
-      if (_currentLens == CameraLensDirection.front && _flashEnabled) {
-        _screenFlashActive = true;
-      }
     });
 
-    if (_currentLens == CameraLensDirection.front && _flashEnabled) {
-      await Future.delayed(const Duration(milliseconds: 220));
-    }
+    final bool useAutoFlashOnShutter = _flashEnabled;
+    final bool isFront = _currentLens == CameraLensDirection.front;
 
     String? cameraRawPath;
     String? tempRawPath;
@@ -2442,10 +2498,25 @@ class _CameraScreenState extends State<CameraScreen>
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
 
+      if (useAutoFlashOnShutter) {
+        if (isFront) {
+          await _activateFrontScreenFlashForCapture();
+        } else {
+          await _activateBackTorchForCapture(ctrl);
+        }
+      }
+
       _triggerShutterBlink(milliseconds: 110);
       unawaited(_playShutterSoundIfEnabled());
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
+
+      // Segera matikan cahaya setelah frame berhasil diambil
+      if (isFront) {
+        await _deactivateFrontScreenFlash();
+      } else {
+        await _forceTorchOff(controllerOverride: ctrl);
+      }
 
       final Uint8List cleanRawJpgBytes = await _buildCroppedRawJpgBytes(
         rawPhotoPath: cameraRawPath,
@@ -2503,6 +2574,8 @@ class _CameraScreenState extends State<CameraScreen>
         );
       }
     } finally {
+      await _deactivateFrontScreenFlash();
+      await _forceTorchOff(controllerOverride: ctrl);
       await _safeDeleteFile(cameraRawPath);
       await _safeDeleteFile(tempRawPath);
       await _safeDeleteFile(tempStampedPath);
@@ -2893,7 +2966,7 @@ class _CameraScreenState extends State<CameraScreen>
                         : Colors.white,
                   ),
                   visualDensity: VisualDensity.compact,
-                  tooltip: 'Kilat / Pencahayaan',
+                  tooltip: 'Blitz Otomatis Saat Shutter',
                 ),
                 IconButton(
                   onPressed: _toggleFrontBackCamera,
@@ -3222,7 +3295,13 @@ class _CameraScreenState extends State<CameraScreen>
     _cooldownTimer?.cancel();
     _shutterBlinkTimer?.cancel();
     _focusRingTimer?.cancel();
-    _controller?.dispose();
+    unawaited(_NativeBrightnessService.restoreNormal());
+    final ctrl = _controller;
+    _controller = null;
+    if (ctrl != null) {
+      unawaited(ctrl.setFlashMode(FlashMode.off));
+      ctrl.dispose();
+    }
     unawaited(_ShutterAudioService.dispose());
     super.dispose();
   }
@@ -3257,10 +3336,8 @@ class _CameraScreenState extends State<CameraScreen>
             if (_screenFlashActive)
               Positioned.fill(
                 child: IgnorePointer(
-                  child: AnimatedOpacity(
-                    opacity: _screenFlashActive ? 0.92 : 0.0,
-                    duration: const Duration(milliseconds: 120),
-                    child: Container(color: Colors.white),
+                  child: Container(
+                    color: const Color(0xFFFFFFFF),
                   ),
                 ),
               ),

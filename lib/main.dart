@@ -788,7 +788,6 @@ class _ShutterAudioService {
 
   static Uint8List _buildLoudMechanicalShutterWavBytes() {
     const int sampleRate = 44100;
-    // 180ms bunyi aktif + 240ms ekor hening agar Android Audio HAL tidak memotong klik
     const int activeSamples = 7938;
     const int tailSilenceSamples = 10584;
     const int totalSamples = activeSamples + tailSilenceSamples;
@@ -796,7 +795,6 @@ class _ShutterAudioService {
     final List<double> samples = List<double>.filled(totalSamples, 0.0);
     final Random rng = Random(42);
 
-    // 1. Klik pertama (cermin/tirai buka) 0..3200 sampel (~72ms) - keras & tajam
     for (int i = 0; i < 3200 && i < activeSamples; i++) {
       final double t = i / sampleRate;
       final double env = exp(-i / 520.0);
@@ -807,7 +805,6 @@ class _ShutterAudioService {
       samples[i] += (f1 + f2 + f3 + snap) * env * 1.45;
     }
 
-    // 2. Klik kedua (tirai tutup) 3600..7800 sampel (~81ms..176ms) - resonansi penuh
     for (int i = 3600; i < 7800 && i < activeSamples; i++) {
       final int local = i - 3600;
       final double t = local / sampleRate;
@@ -1434,7 +1431,10 @@ class _StampRenderer {
       throw Exception('Gagal mendekode gambar');
     }
 
-    final img.Image baseImg = img.bakeOrientation(decoded);
+    final img.Image oriented = img.bakeOrientation(decoded);
+    final img.Image baseImg = oriented.numChannels == 4
+        ? oriented
+        : oriented.convert(numChannels: 4, alpha: 255);
 
     final ui.Image overlayUi = await renderOverlayImage(
       targetW: baseImg.width,
@@ -1455,10 +1455,15 @@ class _StampRenderer {
         numChannels: 4,
         order: img.ChannelOrder.rgba,
       );
-      img.compositeImage(baseImg, overlayImg);
+      img.compositeImage(
+        baseImg,
+        overlayImg,
+        dstX: 0,
+        dstY: 0,
+      );
     }
 
-    return Uint8List.fromList(img.encodeJpg(baseImg, quality: 90));
+    return Uint8List.fromList(img.encodeJpg(baseImg, quality: 92));
   }
 }
 
@@ -2868,7 +2873,7 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
 
-    return Uint8List.fromList(img.encodeJpg(cropped, quality: 90));
+    return Uint8List.fromList(img.encodeJpg(cropped, quality: 92));
   }
 
   Future<void> _onShutterPressed() async {
@@ -5168,7 +5173,9 @@ class _CollageStagePreviewScreenState
   Future<bool> _confirmCancel() async {
     if (_isSaving) return false;
     if (!_hasDirtyChanges) {
-      Navigator.of(context).pop(false);
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(false);
+      }
       return true;
     }
 
@@ -5197,7 +5204,9 @@ class _CollageStagePreviewScreenState
       ),
     );
     if (discard == true && mounted) {
-      Navigator.of(context).pop(false);
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(false);
+      }
       return true;
     }
     return false;
@@ -5365,7 +5374,9 @@ class _CollageStagePreviewScreenState
           backgroundColor: Colors.green,
         ),
       );
-      Navigator.of(context).pop(true);
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(true);
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -5738,6 +5749,7 @@ class _GalleryWatermarkEditorScreenState
   bool _isSaving = false;
   bool _anyChanged = false;
   bool _isClosingEmpty = false;
+  bool _isClosingScreen = false;
   final Map<String, double> _aspectRatioCache = {};
 
   @override
@@ -5759,6 +5771,14 @@ class _GalleryWatermarkEditorScreenState
         setState(() => _nowClock = DateTime.now());
       }
     });
+  }
+
+  void _safeCloseEditor(bool changed) {
+    if (_isClosingScreen || !mounted) return;
+    _isClosingScreen = true;
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop(changed);
+    }
   }
 
   File? get _currentFile {
@@ -6116,8 +6136,7 @@ class _GalleryWatermarkEditorScreenState
         _editorDrawerOpen = false;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        Navigator.of(context).pop(true);
+        _safeCloseEditor(true);
       });
       return;
     }
@@ -6146,7 +6165,7 @@ class _GalleryWatermarkEditorScreenState
 
   Future<void> _saveStampedPhotoToGallery() async {
     final File? activeFile = _currentFile;
-    if (_isSaving || activeFile == null) return;
+    if (_isSaving || activeFile == null || _isClosingScreen) return;
     setState(() => _isSaving = true);
 
     String? tempOutPath;
@@ -6182,7 +6201,7 @@ class _GalleryWatermarkEditorScreenState
           backgroundColor: Colors.green,
         ),
       );
-      Navigator.of(context).pop(true);
+      _safeCloseEditor(true);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6404,192 +6423,205 @@ class _GalleryWatermarkEditorScreenState
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _safeCloseEditor(_anyChanged);
+      },
+      child: Scaffold(
         backgroundColor: Colors.black,
-        automaticallyImplyLeading: false,
-        leading: TextButton(
-          onPressed:
-              _isSaving ? null : () => Navigator.of(context).pop(_anyChanged),
-          child: const Text(
-            'Batal',
-            style: TextStyle(color: Colors.white, fontSize: 15),
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          automaticallyImplyLeading: false,
+          leading: TextButton(
+            onPressed: (_isSaving || _isClosingScreen)
+                ? null
+                : () => _safeCloseEditor(_anyChanged),
+            child: const Text(
+              'Batal',
+              style: TextStyle(color: Colors.white, fontSize: 15),
+            ),
           ),
-        ),
-        leadingWidth: 74,
-        centerTitle: true,
-        title: Text(
-          _files.isEmpty
-              ? 'Tanda air foto'
-              : '${_currentIndex + 1} / ${_files.length}',
-          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-        ),
-        actions: [
-          IconButton(
-            onPressed: _isSaving ? null : _deleteCurrentPhotoToTrash,
-            icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
-            tooltip: 'Pindahkan ke Sampah',
+          leadingWidth: 74,
+          centerTitle: true,
+          title: Text(
+            _files.isEmpty
+                ? 'Tanda air foto'
+                : '${_currentIndex + 1} / ${_files.length}',
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
           ),
-          Padding(
-            padding: const EdgeInsets.only(right: 10),
-            child: FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF1E6BFF),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
+          actions: [
+            IconButton(
+              onPressed: (_isSaving || _isClosingScreen)
+                  ? null
+                  : _deleteCurrentPhotoToTrash,
+              icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
+              tooltip: 'Pindahkan ke Sampah',
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF1E6BFF),
+                  foregroundColor: Colors.white,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                 ),
-              ),
-              onPressed: _isSaving ? null : _saveStampedPhotoToGallery,
-              child: _isSaving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Text(
-                      'Selesai',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-            ),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: _files.isEmpty
-                  ? const SizedBox.shrink()
-                  : PageView.builder(
-                      controller: _pageController,
-                      itemCount: _files.length,
-                      onPageChanged: (idx) {
-                        setState(() => _currentIndex = idx);
-                        _resolvePhotoAspectRatio(_files[idx]);
-                      },
-                      itemBuilder: (context, idx) {
-                        final File itemFile = _files[idx];
-                        final double ratio =
-                            _aspectRatioCache[itemFile.path] ?? (3.0 / 4.0);
-                        return Center(
-                          child: LayoutBuilder(
-                            builder: (context, outerBox) {
-                              final double safeRatio =
-                                  ratio > 0 ? ratio : (3.0 / 4.0);
-                              double boxW = outerBox.maxWidth;
-                              double boxH = boxW / safeRatio;
-                              if (outerBox.maxHeight.isFinite &&
-                                  boxH > outerBox.maxHeight) {
-                                boxH = outerBox.maxHeight;
-                                boxW = boxH * safeRatio;
-                              }
-                              return SizedBox(
-                                width: boxW,
-                                height: boxH,
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    Image.file(
-                                      itemFile,
-                                      fit: BoxFit.fill,
-                                      width: boxW,
-                                      height: boxH,
-                                      errorBuilder: (_, __, ___) =>
-                                          const Center(
-                                        child: Text(
-                                          'Gagal memuat foto',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                    if (_stampVisible)
-                                      Positioned(
-                                        left: 0,
-                                        right: 0,
-                                        bottom: 0,
-                                        child: _buildStampOverlayWidget(
-                                          activeDt: _activeDateTime(),
-                                          cfg: _cfg,
-                                          boxWidth: boxW,
-                                          boxHeight: boxH,
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                        );
-                      },
-                    ),
-            ),
-            _buildEditDrawer(),
-            Container(
-              color: Colors.black,
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor:
-                            _stampVisible ? Colors.black : Colors.white,
-                        backgroundColor: _stampVisible
-                            ? const Color(0xFFFFD000)
-                            : Colors.transparent,
-                        side: BorderSide(
-                          color: _stampVisible
-                              ? const Color(0xFFFFD000)
-                              : Colors.white24,
+                onPressed: (_isSaving || _isClosingScreen)
+                    ? null
+                    : _saveStampedPhotoToGallery,
+                child: _isSaving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
                         ),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
+                      )
+                    : const Text(
+                        'Selesai',
+                        style: TextStyle(fontWeight: FontWeight.w600),
                       ),
-                      onPressed:
-                          _isSaving ? null : _toggleStampFromTemplateButton,
-                      icon: Icon(
-                        _stampVisible
-                            ? Icons.check_circle_outline
-                            : Icons.dashboard_customize_outlined,
-                        size: 18,
-                      ),
-                      label: const Text('Templat'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF252932),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                      onPressed: _isSaving
-                          ? null
-                          : () => setState(
-                                () => _editorDrawerOpen = !_editorDrawerOpen,
-                              ),
-                      icon: const Icon(Icons.edit_outlined, size: 18),
-                      label: const Text('Sunting tanda air'),
-                    ),
-                  ),
-                ],
               ),
             ),
           ],
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(
+                child: _files.isEmpty
+                    ? const SizedBox.shrink()
+                    : PageView.builder(
+                        controller: _pageController,
+                        itemCount: _files.length,
+                        onPageChanged: (idx) {
+                          setState(() => _currentIndex = idx);
+                          _resolvePhotoAspectRatio(_files[idx]);
+                        },
+                        itemBuilder: (context, idx) {
+                          final File itemFile = _files[idx];
+                          final double ratio =
+                              _aspectRatioCache[itemFile.path] ?? (3.0 / 4.0);
+                          return Center(
+                            child: LayoutBuilder(
+                              builder: (context, outerBox) {
+                                final double safeRatio =
+                                    ratio > 0 ? ratio : (3.0 / 4.0);
+                                double boxW = outerBox.maxWidth;
+                                double boxH = boxW / safeRatio;
+                                if (outerBox.maxHeight.isFinite &&
+                                    boxH > outerBox.maxHeight) {
+                                  boxH = outerBox.maxHeight;
+                                  boxW = boxH * safeRatio;
+                                }
+                                return SizedBox(
+                                  width: boxW,
+                                  height: boxH,
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      Image.file(
+                                        itemFile,
+                                        fit: BoxFit.fill,
+                                        width: boxW,
+                                        height: boxH,
+                                        errorBuilder: (_, __, ___) =>
+                                            const Center(
+                                          child: Text(
+                                            'Gagal memuat foto',
+                                            style: TextStyle(
+                                              color: Colors.white70,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      if (_stampVisible)
+                                        Positioned(
+                                          left: 0,
+                                          right: 0,
+                                          bottom: 0,
+                                          child: _buildStampOverlayWidget(
+                                            activeDt: _activeDateTime(),
+                                            cfg: _cfg,
+                                            boxWidth: boxW,
+                                            boxHeight: boxH,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              _buildEditDrawer(),
+              Container(
+                color: Colors.black,
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor:
+                              _stampVisible ? Colors.black : Colors.white,
+                          backgroundColor: _stampVisible
+                              ? const Color(0xFFFFD000)
+                              : Colors.transparent,
+                          side: BorderSide(
+                            color: _stampVisible
+                                ? const Color(0xFFFFD000)
+                                : Colors.white24,
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        onPressed:
+                            _isSaving ? null : _toggleStampFromTemplateButton,
+                        icon: Icon(
+                          _stampVisible
+                              ? Icons.check_circle_outline
+                              : Icons.dashboard_customize_outlined,
+                          size: 18,
+                        ),
+                        label: const Text('Templat'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF252932),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        onPressed: _isSaving
+                            ? null
+                            : () => setState(
+                                  () => _editorDrawerOpen = !_editorDrawerOpen,
+                                ),
+                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        label: const Text('Sunting tanda air'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

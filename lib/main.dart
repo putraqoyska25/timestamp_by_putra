@@ -3396,8 +3396,8 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   static const int _maxFilesScan = 8000;
-  static const int _initialVisibleCount = 120;
-  static const int _pageBatchSize = 120;
+  static const int _initialVisibleCount = 60;
+  static const int _pageBatchSize = 60;
   static const double _headerHeight = 42.0;
   static const double _gridSpacing = 3.0;
   static const double _gridHorizontalPadding = 4.0;
@@ -3665,24 +3665,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     _scrubVisibleNotifier.value = true;
     _scrubDraggingNotifier.value = true;
     _scrubDatePillNotifier.value = _resolveDateLabelAtFraction(clampedFrac);
-
-    if (!_scrollController.hasClients) return;
-    final int targetIdx = (clampedFrac * (_entries.length - 1))
-        .round()
-        .clamp(0, _entries.length - 1);
-    if (targetIdx < _visibleCount) {
-      final double desiredOffset =
-          _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
-      final pos = _scrollController.position;
-      final double safeOffset =
-          desiredOffset.clamp(0.0, max(0.0, pos.maxScrollExtent));
-      _isProgrammaticJumping = true;
-      try {
-        _scrollController.jumpTo(safeOffset);
-      } finally {
-        _isProgrammaticJumping = false;
-      }
-    }
   }
 
   void _commitScrubJump() {
@@ -3699,7 +3681,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final int targetIdx =
         (frac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
     final int neededVisible =
-        min(_entries.length, max(_visibleCount, targetIdx + 90));
+        min(_entries.length, max(_visibleCount, targetIdx + 36));
     final double desiredOffset =
         _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
 
@@ -4266,7 +4248,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                           children: [
                                             Image.file(
                                               file,
-                                              cacheWidth: 140,
+                                              cacheWidth: 96,
                                               filterQuality: FilterQuality.low,
                                               fit: BoxFit.cover,
                                               gaplessPlayback: true,
@@ -4321,6 +4303,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                     );
                                   },
                                   childCount: sec.entries.length,
+                                  addAutomaticKeepAlives: false,
+                                  addRepaintBoundaries: true,
                                 ),
                               ),
                             ),

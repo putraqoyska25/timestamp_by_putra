@@ -3363,6 +3363,7 @@ class _MonthlyPhotoSection {
   final String monthName;
   final String title;
   final List<_MediaEntry> entries;
+  final int startGlobalIndex;
 
   const _MonthlyPhotoSection({
     required this.year,
@@ -3370,6 +3371,7 @@ class _MonthlyPhotoSection {
     required this.monthName,
     required this.title,
     required this.entries,
+    required this.startGlobalIndex,
   });
 }
 
@@ -3393,8 +3395,12 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 }
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
-  static const int _maxFilesScan = 5000;
-  static const int _pageSize = 90;
+  static const int _maxFilesScan = 8000;
+  static const int _initialVisibleCount = 180;
+  static const int _pageBatchSize = 150;
+  static const double _headerHeight = 42.0;
+  static const double _gridSpacing = 3.0;
+  static const double _gridHorizontalPadding = 4.0;
   static const MethodChannel _mediaStoreChannel =
       MethodChannel('timestamp_by_putra/media_store');
 
@@ -3413,11 +3419,27 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     'Desember',
   ];
 
+  static const List<String> _bulanSingkatIndo = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'Mei',
+    'Jun',
+    'Jul',
+    'Agu',
+    'Sep',
+    'Okt',
+    'Nov',
+    'Des',
+  ];
+
   late _WatermarkConfig _config;
   late final ScrollController _scrollController;
   bool _isLoading = true;
   bool _isDeleting = false;
   List<_MediaEntry> _entries = [];
+  List<_MonthlyPhotoSection> _fullSections = [];
   int _visibleCount = 0;
 
   bool _selectionMode = false;
@@ -3427,13 +3449,14 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       ValueNotifier<double>(0.0);
   final ValueNotifier<bool> _scrubVisibleNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> _scrubDraggingNotifier = ValueNotifier<bool>(false);
-  final ValueNotifier<String?> _scrubMonthPillNotifier =
+  final ValueNotifier<String?> _scrubDatePillNotifier =
       ValueNotifier<String?>(null);
 
   Timer? _hideScrubberTimer;
   double? _pendingJumpFraction;
+  bool _isProgrammaticJumping = false;
 
-  static const Set<String> _imageExts = {
+  static const Set<String> _photoExts = {
     '.jpg',
     '.jpeg',
     '.png',
@@ -3450,7 +3473,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final cached = _LatestPhotosGridScreen._cachedEntries;
     if (cached != null && cached.isNotEmpty) {
       _entries = cached;
-      _visibleCount = min(_pageSize, _entries.length);
+      _fullSections = _buildMonthlySections(_entries);
+      _visibleCount = min(_initialVisibleCount, _entries.length);
       _isLoading = false;
     } else {
       _loadAllPhotos();
@@ -3505,90 +3529,196 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     );
   }
 
-  void _scheduleScrubberHide({int milliseconds = 1600}) {
+  void _scheduleScrubberHide({int milliseconds = 1500}) {
     _hideScrubberTimer?.cancel();
     if (_scrubDraggingNotifier.value) return;
     _hideScrubberTimer = Timer(Duration(milliseconds: milliseconds), () {
       if (!mounted || _scrubDraggingNotifier.value) return;
       _scrubVisibleNotifier.value = false;
-      _scrubMonthPillNotifier.value = null;
+      _scrubDatePillNotifier.value = null;
     });
   }
 
-  void _onScroll() {
-    if (!_scrollController.hasClients) return;
-    final pos = _scrollController.position;
-    final total = _entries.length;
+  double _cellExtent(double viewportWidth) {
+    final double usableW =
+        max(120.0, viewportWidth - (_gridHorizontalPadding * 2.0) - (_gridSpacing * 2.0));
+    return usableW / 3.0;
+  }
 
-    if (!_scrubDraggingNotifier.value) {
-      final double effectiveMax = pos.maxScrollExtent > 0
-          ? pos.maxScrollExtent
-          : _estimatedTotalScrollExtent(total);
-      if (effectiveMax > 0) {
-        final frac = (pos.pixels / effectiveMax).clamp(0.0, 1.0);
-        _scrubFractionNotifier.value = frac;
-        if (!_scrubVisibleNotifier.value && pos.pixels > 4) {
-          _scrubVisibleNotifier.value = true;
-        }
-      }
-      _scheduleScrubberHide();
+  double _totalComputedHeight(double viewportWidth, {int? upToItemCount}) {
+    final int limit = upToItemCount == null
+        ? _entries.length
+        : upToItemCount.clamp(0, _entries.length);
+    if (_fullSections.isEmpty || limit <= 0) return 0.0;
 
-      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
-        setState(() {
-          _visibleCount = min(total, _visibleCount + _pageSize);
-        });
+    final double cell = _cellExtent(viewportWidth);
+    final double rowStride = cell + _gridSpacing;
+    double totalH = 0.0;
+
+    for (final sec in _fullSections) {
+      if (sec.startGlobalIndex >= limit) break;
+      final int remainingInSec = limit - sec.startGlobalIndex;
+      final int countInSec = min(sec.entries.length, remainingInSec);
+      if (countInSec <= 0) continue;
+
+      final int rows = (countInSec / 3.0).ceil();
+      totalH += _headerHeight + (rows * rowStride) + _gridSpacing;
+    }
+
+    return max(0.0, totalH);
+  }
+
+  double _offsetForGlobalIndex(int globalIndex, double viewportWidth) {
+    if (_fullSections.isEmpty || _entries.isEmpty) return 0.0;
+    final int clampedIdx = globalIndex.clamp(0, _entries.length - 1);
+    final double cell = _cellExtent(viewportWidth);
+    final double rowStride = cell + _gridSpacing;
+    double y = 0.0;
+
+    for (final sec in _fullSections) {
+      final int secEnd = sec.startGlobalIndex + sec.entries.length;
+      if (clampedIdx < secEnd) {
+        final int localIdx = max(0, clampedIdx - sec.startGlobalIndex);
+        final int rowIdx = localIdx ~/ 3;
+        return y + _headerHeight + (rowIdx * rowStride);
+      } else {
+        final int rows = (sec.entries.length / 3.0).ceil();
+        y += _headerHeight + (rows * rowStride) + _gridSpacing;
       }
     }
+
+    return y;
   }
 
-  double _estimatedTotalScrollExtent(int itemCount) {
-    if (itemCount <= 0) return 0.0;
-    final double rows = (itemCount / 3.0).ceil().toDouble();
-    final double screenW = MediaQuery.of(context).size.width;
-    final double cellSize = max(90.0, (screenW - 14.0) / 3.0);
-    return max(1.0, rows * (cellSize + 3.0) + 180.0);
+  int _globalIndexAtOffset(double scrollY, double viewportWidth) {
+    if (_fullSections.isEmpty || _entries.isEmpty || scrollY <= 0) return 0;
+    final double cell = _cellExtent(viewportWidth);
+    final double rowStride = cell + _gridSpacing;
+    double y = 0.0;
+
+    for (final sec in _fullSections) {
+      final int rows = (sec.entries.length / 3.0).ceil();
+      final double secHeight = _headerHeight + (rows * rowStride) + _gridSpacing;
+      if (scrollY <= y + secHeight) {
+        final double insideSec = max(0.0, scrollY - y - _headerHeight);
+        final int rowIdx =
+            (insideSec / rowStride).floor().clamp(0, max(0, rows - 1));
+        final int idx = sec.startGlobalIndex + (rowIdx * 3);
+        return idx.clamp(0, _entries.length - 1);
+      }
+      y += secHeight;
+    }
+
+    return _entries.length - 1;
   }
 
-  String _resolveMonthLabelAtFraction(double fraction) {
+  String _formatDatePill(DateTime dt) {
+    if (dt.millisecondsSinceEpoch <= 0) return 'Foto';
+    final DateTime now = DateTime.now();
+    final DateTime today = DateTime(now.year, now.month, now.day);
+    final DateTime targetDay = DateTime(dt.year, dt.month, dt.day);
+    final int diffDays = today.difference(targetDay).inDays;
+
+    if (diffDays == 0) return 'Hari ini';
+    if (diffDays == 1) return 'Kemarin';
+
+    final String mShort = (dt.month >= 1 && dt.month <= 12)
+        ? _bulanSingkatIndo[dt.month - 1]
+        : 'Bln ${dt.month}';
+    return '${dt.day} $mShort ${dt.year}';
+  }
+
+  String _resolveDateLabelAtFraction(double fraction) {
     if (_entries.isEmpty) return 'Terbaru';
     final int idx = (fraction * (_entries.length - 1))
         .round()
         .clamp(0, _entries.length - 1);
-    final dt = _entries[idx].modified;
-    final String monthName = (dt.month >= 1 && dt.month <= 12)
-        ? _bulanIndo[dt.month - 1]
-        : 'Bulan ${dt.month}';
-    return dt.year == DateTime.now().year ? monthName : '$monthName ${dt.year}';
+    return _formatDatePill(_entries[idx].modified);
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients || _isProgrammaticJumping) return;
+    final pos = _scrollController.position;
+    final total = _entries.length;
+    if (total <= 0) return;
+
+    if (!_scrubDraggingNotifier.value) {
+      final double viewportW = MediaQuery.of(context).size.width;
+      final double viewportH = pos.viewportDimension > 0
+          ? pos.viewportDimension
+          : MediaQuery.of(context).size.height;
+      final double fullEstHeight = _totalComputedHeight(viewportW);
+      final double maxScroll = max(1.0, fullEstHeight - viewportH);
+      final int currentIdx = _globalIndexAtOffset(pos.pixels, viewportW);
+      final double frac = total <= 1
+          ? 0.0
+          : (currentIdx / (total - 1)).clamp(
+              0.0,
+              pos.maxScrollExtent > 0
+                  ? (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0)
+                  : (pos.pixels / maxScroll).clamp(0.0, 1.0),
+            );
+
+      _scrubFractionNotifier.value = frac;
+      if (!_scrubVisibleNotifier.value && pos.pixels > 6) {
+        _scrubVisibleNotifier.value = true;
+      }
+      _scheduleScrubberHide();
+
+      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 700) {
+        setState(() {
+          _visibleCount = min(total, _visibleCount + _pageBatchSize);
+        });
+      }
+    }
+  }
+
+  void _jumpToFractionAccurate(double frac, {required bool isFinalCommit}) {
+    if (!_scrollController.hasClients || _entries.isEmpty) return;
+    final double clampedFrac = frac.clamp(0.0, 1.0);
+    final int targetIdx =
+        (clampedFrac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
+    final int neededVisible = min(
+      _entries.length,
+      max(_visibleCount, targetIdx + (isFinalCommit ? 90 : 120)),
+    );
+
+    final double viewportW = MediaQuery.of(context).size.width;
+    final double desiredOffset = _offsetForGlobalIndex(targetIdx, viewportW);
+
+    void performClampedJump() {
+      if (!mounted || !_scrollController.hasClients) return;
+      final pos = _scrollController.position;
+      final double maxExtent = pos.maxScrollExtent;
+      final double safeOffset = desiredOffset.clamp(0.0, max(0.0, maxExtent));
+      _isProgrammaticJumping = true;
+      try {
+        _scrollController.jumpTo(safeOffset);
+      } finally {
+        _isProgrammaticJumping = false;
+      }
+    }
+
+    if (neededVisible > _visibleCount) {
+      _pendingJumpFraction = clampedFrac;
+      setState(() => _visibleCount = neededVisible);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _pendingJumpFraction = null;
+        performClampedJump();
+      });
+    } else {
+      performClampedJump();
+    }
   }
 
   void _updateScrubThumbPosition(double localY, double trackHeight) {
-    if (trackHeight <= 0) return;
+    if (trackHeight <= 0 || _entries.isEmpty) return;
     final frac = (localY / trackHeight).clamp(0.0, 1.0);
     _scrubFractionNotifier.value = frac;
     _scrubVisibleNotifier.value = true;
     _scrubDraggingNotifier.value = true;
-    _scrubMonthPillNotifier.value = _resolveMonthLabelAtFraction(frac);
-
-    if (_scrollController.hasClients && _entries.isNotEmpty) {
-      final pos = _scrollController.position;
-      final double maxExtent = pos.maxScrollExtent > 0
-          ? pos.maxScrollExtent
-          : _estimatedTotalScrollExtent(_entries.length);
-      final int targetIdx = (frac * (_entries.length - 1))
-          .round()
-          .clamp(0, _entries.length - 1);
-
-      if (targetIdx >= _visibleCount - 12 && _visibleCount < _entries.length) {
-        _pendingJumpFraction = frac;
-        setState(() {
-          _visibleCount = min(_entries.length, max(_visibleCount, targetIdx + 90));
-        });
-      } else {
-        final double targetOffset =
-            (frac * maxExtent).clamp(0.0, pos.maxScrollExtent);
-        _scrollController.jumpTo(targetOffset);
-      }
-    }
+    _scrubDatePillNotifier.value = _resolveDateLabelAtFraction(frac);
+    _jumpToFractionAccurate(frac, isFinalCommit: false);
   }
 
   void _commitScrubJump() {
@@ -3596,39 +3726,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final double frac =
         (_pendingJumpFraction ?? _scrubFractionNotifier.value).clamp(0.0, 1.0);
     _pendingJumpFraction = null;
-
-    if (_scrollController.hasClients && _entries.isNotEmpty) {
-      final int targetIdx = (frac * (_entries.length - 1))
-          .round()
-          .clamp(0, _entries.length - 1);
-      final int neededVisible =
-          min(_entries.length, max(_visibleCount, targetIdx + 60));
-
-      void applyJump() {
-        if (!mounted || !_scrollController.hasClients) return;
-        final pos = _scrollController.position;
-        final double maxExtent = pos.maxScrollExtent > 0
-            ? pos.maxScrollExtent
-            : _estimatedTotalScrollExtent(_entries.length);
-        final double targetOffset =
-            (frac * maxExtent).clamp(0.0, pos.maxScrollExtent);
-        _scrollController.jumpTo(targetOffset);
-      }
-
-      if (neededVisible != _visibleCount) {
-        setState(() => _visibleCount = neededVisible);
-        WidgetsBinding.instance.addPostFrameCallback((_) => applyJump());
-      } else {
-        applyJump();
-      }
-    }
-
+    _jumpToFractionAccurate(frac, isFinalCommit: true);
     _scheduleScrubberHide();
   }
 
-  bool _isImageFile(String path) {
+  bool _isPhotoFile(String path) {
     final lower = path.toLowerCase();
-    for (final ext in _imageExts) {
+    for (final ext in _photoExts) {
       if (lower.endsWith(ext)) return true;
     }
     return false;
@@ -3655,7 +3759,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       for (final item in rawList) {
         if (results.length >= _maxFilesScan) break;
         final String path = item?.toString().trim() ?? '';
-        if (path.isEmpty || seen.contains(path)) continue;
+        if (path.isEmpty || !_isPhotoFile(path) || seen.contains(path)) {
+          continue;
+        }
         seen.add(path);
 
         final File f = File(path);
@@ -3683,7 +3789,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         '/storage/emulated/0/DCIM',
         '/storage/emulated/0/Pictures',
         '/storage/emulated/0/Download',
-        '/storage/emulated/0/Movies',
         '/storage/emulated/0/Android/media',
         '/storage/emulated/0/Pictures/Screenshots',
         '/storage/emulated/0/DCIM/Screenshots',
@@ -3709,7 +3814,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             final baseName = path.split(Platform.pathSeparator).last;
             if (baseName.startsWith('.')) continue;
             await scanDir(entity, depth: depth + 1);
-          } else if (entity is File && _isImageFile(path)) {
+          } else if (entity is File && _isPhotoFile(path)) {
             DateTime mod = DateTime.fromMillisecondsSinceEpoch(0);
             try {
               mod = entity.statSync().modified;
@@ -3731,9 +3836,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         _LatestPhotosGridScreen._cachedEntries != null &&
         _LatestPhotosGridScreen._cachedEntries!.isNotEmpty) {
       if (mounted) {
+        final cached = _LatestPhotosGridScreen._cachedEntries!;
         setState(() {
-          _entries = _LatestPhotosGridScreen._cachedEntries!;
-          _visibleCount = min(_pageSize, _entries.length);
+          _entries = cached;
+          _fullSections = _buildMonthlySections(cached);
+          _visibleCount = min(_initialVisibleCount, _entries.length);
           _isLoading = false;
         });
       }
@@ -3755,7 +3862,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!mounted) return;
     setState(() {
       _entries = collected;
-      _visibleCount = min(_pageSize, _entries.length);
+      _fullSections = _buildMonthlySections(collected);
+      _visibleCount = min(_initialVisibleCount, _entries.length);
       _isLoading = false;
     });
   }
@@ -3777,20 +3885,53 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       grouped[key]!.add(entry);
     }
 
-    return orderedKeys.map((key) {
+    final List<_MonthlyPhotoSection> result = [];
+    int cursor = 0;
+
+    for (final key in orderedKeys) {
       final list = grouped[key]!;
       final firstDt = list.first.modified;
       final String monthName = (firstDt.month >= 1 && firstDt.month <= 12)
           ? _bulanIndo[firstDt.month - 1]
           : 'Bulan ${firstDt.month}';
-      return _MonthlyPhotoSection(
-        year: firstDt.year,
-        month: firstDt.month,
-        monthName: monthName,
-        title: '$monthName ${firstDt.year} (${list.length})',
-        entries: list,
+      result.add(
+        _MonthlyPhotoSection(
+          year: firstDt.year,
+          month: firstDt.month,
+          monthName: monthName,
+          title: '$monthName ${firstDt.year} (${list.length})',
+          entries: list,
+          startGlobalIndex: cursor,
+        ),
       );
-    }).toList();
+      cursor += list.length;
+    }
+
+    return result;
+  }
+
+  List<_MonthlyPhotoSection> _buildVisibleSections(int limit) {
+    if (_fullSections.isEmpty || limit <= 0) return const [];
+    final int safeLimit = limit.clamp(0, _entries.length);
+    final List<_MonthlyPhotoSection> visible = [];
+
+    for (final sec in _fullSections) {
+      if (sec.startGlobalIndex >= safeLimit) break;
+      final int takeCount = min(sec.entries.length, safeLimit - sec.startGlobalIndex);
+      if (takeCount <= 0) continue;
+      visible.add(
+        _MonthlyPhotoSection(
+          year: sec.year,
+          month: sec.month,
+          monthName: sec.monthName,
+          title: sec.title,
+          entries: sec.entries.take(takeCount).toList(),
+          startGlobalIndex: sec.startGlobalIndex,
+        ),
+      );
+    }
+
+    return visible;
   }
 
   Future<void> _openPhotoWatermarkEditorAtIndex(int initialIndex) async {
@@ -3836,7 +3977,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                 builder: (context, isDragging, _) {
                   if (!isDragging) return const SizedBox.shrink();
                   return ValueListenableBuilder<String?>(
-                    valueListenable: _scrubMonthPillNotifier,
+                    valueListenable: _scrubDatePillNotifier,
                     builder: (context, pillText, _) {
                       if (pillText == null) return const SizedBox.shrink();
                       return Positioned(
@@ -3981,25 +4122,24 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     _scrubFractionNotifier.dispose();
     _scrubVisibleNotifier.dispose();
     _scrubDraggingNotifier.dispose();
-    _scrubMonthPillNotifier.dispose();
+    _scrubDatePillNotifier.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final total = _entries.length;
-    final visibleEntries = _entries.take(_visibleCount).toList();
-    final sections = _buildMonthlySections(visibleEntries);
+    final sections = _buildVisibleSections(_visibleCount);
     final hasMore = _visibleCount < total;
-
-    int runningIndex = 0;
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: Text(
-          _selectionMode ? '${_selectedPaths.length} ditandai' : 'Terbaru',
+          _selectionMode
+              ? '${_selectedPaths.length} ditandai'
+              : (total > 0 ? 'Terbaru ($total)' : 'Terbaru'),
           style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
         ),
         actions: [
@@ -4059,66 +4199,74 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
+                        cacheExtent: 1200,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(
-                              child: Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(12, 14, 12, 8),
-                                child: Text(
-                                  sec.title,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w700,
+                              child: SizedBox(
+                                height: _headerHeight,
+                                child: Padding(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(12, 14, 12, 8),
+                                  child: Text(
+                                    sec.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
-                            () {
-                              final int baseIdx = runningIndex;
-                              runningIndex += sec.entries.length;
-                              return SliverPadding(
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 4),
-                                sliver: SliverGrid(
-                                  gridDelegate:
-                                      const SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: 3,
-                                    crossAxisSpacing: 3,
-                                    mainAxisSpacing: 3,
-                                  ),
-                                  delegate: SliverChildBuilderDelegate(
-                                    (ctx, idx) {
-                                      final File file = sec.entries[idx].file;
-                                      final int globalIdx = baseIdx + idx;
-                                      final bool isChecked =
-                                          _selectedPaths.contains(file.path);
+                            SliverPadding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: _gridHorizontalPadding,
+                              ),
+                              sliver: SliverGrid(
+                                gridDelegate:
+                                    const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 3,
+                                  crossAxisSpacing: _gridSpacing,
+                                  mainAxisSpacing: _gridSpacing,
+                                ),
+                                delegate: SliverChildBuilderDelegate(
+                                  (ctx, idx) {
+                                    final File file = sec.entries[idx].file;
+                                    final int globalIdx =
+                                        sec.startGlobalIndex + idx;
+                                    final bool isChecked =
+                                        _selectedPaths.contains(file.path);
 
-                                      return GestureDetector(
-                                        onLongPress: () {
-                                          setState(() {
-                                            _selectionMode = true;
-                                            _selectedPaths.add(file.path);
-                                          });
-                                        },
-                                        onTap: () {
-                                          if (_selectionMode) {
-                                            _toggleSelectPath(file.path);
-                                          } else {
-                                            _openPhotoWatermarkEditorAtIndex(
-                                              globalIdx,
-                                            );
-                                          }
-                                        },
+                                    return GestureDetector(
+                                      onLongPress: () {
+                                        setState(() {
+                                          _selectionMode = true;
+                                          _selectedPaths.add(file.path);
+                                        });
+                                      },
+                                      onTap: () {
+                                        if (_selectionMode) {
+                                          _toggleSelectPath(file.path);
+                                        } else {
+                                          _openPhotoWatermarkEditorAtIndex(
+                                            globalIdx,
+                                          );
+                                        }
+                                      },
+                                      child: ColoredBox(
+                                        color: const Color(0xFF14171E),
                                         child: Stack(
                                           fit: StackFit.expand,
                                           children: [
                                             Image.file(
                                               file,
-                                              cacheWidth: 160,
+                                              cacheWidth: 220,
                                               filterQuality: FilterQuality.low,
                                               fit: BoxFit.cover,
+                                              gaplessPlayback: true,
                                               errorBuilder: (_, __, ___) =>
                                                   const ColoredBox(
                                                 color: Color(0xFF1C2029),
@@ -4166,13 +4314,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                               ),
                                           ],
                                         ),
-                                      );
-                                    },
-                                    childCount: sec.entries.length,
-                                  ),
+                                      ),
+                                    );
+                                  },
+                                  childCount: sec.entries.length,
                                 ),
-                              );
-                            }(),
+                              ),
+                            ),
                           ],
                           SliverToBoxAdapter(
                             child: Padding(
@@ -4184,7 +4332,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                           setState(() {
                                             _visibleCount = min(
                                               total,
-                                              _visibleCount + _pageSize,
+                                              _visibleCount + _pageBatchSize,
                                             );
                                           });
                                         },

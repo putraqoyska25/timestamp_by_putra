@@ -3841,11 +3841,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   int _visibleCount = 0;
   double _cachedViewportWidth = 390.0;
 
-  bool _trashSelectionMode = false;
-  final Set<String> _selectedTrashPaths = {};
-
-  bool _collageSelectionMode = false;
-  final List<String> _selectedCollagePaths = [];
+  bool _selectionMode = false;
+  final List<String> _selectedPaths = [];
 
   final ValueNotifier<double> _scrubFractionNotifier =
       ValueNotifier<double>(0.0);
@@ -3892,71 +3889,41 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  void _toggleTrashSelectionMode() {
+  void _toggleSelectionMode() {
     setState(() {
-      _trashSelectionMode = !_trashSelectionMode;
-      if (_trashSelectionMode) {
-        _collageSelectionMode = false;
-        _selectedCollagePaths.clear();
-      } else {
-        _selectedTrashPaths.clear();
+      _selectionMode = !_selectionMode;
+      if (!_selectionMode) {
+        _selectedPaths.clear();
       }
     });
   }
 
-  void _toggleCollageSelectionMode() {
+  void _enterSelectionWithPath(String path) {
     setState(() {
-      _collageSelectionMode = !_collageSelectionMode;
-      if (_collageSelectionMode) {
-        _trashSelectionMode = false;
-        _selectedTrashPaths.clear();
-      } else {
-        _selectedCollagePaths.clear();
+      _selectionMode = true;
+      if (!_selectedPaths.contains(path)) {
+        _selectedPaths.add(path);
       }
     });
   }
 
-  void _toggleSelectTrashPath(String path) {
+  void _toggleSelectPath(String path) {
     setState(() {
-      if (_selectedTrashPaths.contains(path)) {
-        _selectedTrashPaths.remove(path);
+      final int idx = _selectedPaths.indexOf(path);
+      if (idx != -1) {
+        _selectedPaths.removeAt(idx);
       } else {
-        _selectedTrashPaths.add(path);
+        _selectedPaths.add(path);
       }
     });
-  }
-
-  void _toggleSelectCollagePath(String path) {
-    final int existingIdx = _selectedCollagePaths.indexOf(path);
-    if (existingIdx != -1) {
-      setState(() => _selectedCollagePaths.removeAt(existingIdx));
-      return;
-    }
-
-    if (_selectedCollagePaths.length >= _maxCollagePhotos) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Maksimal 6 foto untuk kolase'),
-            backgroundColor: Color(0xFF282C36),
-            duration: Duration(milliseconds: 1200),
-          ),
-        );
-      }
-      return;
-    }
-
-    setState(() => _selectedCollagePaths.add(path));
   }
 
   Future<void> _openCollageStageFromSelection() async {
-    if (_selectedCollagePaths.length < _minCollagePhotos ||
-        _selectedCollagePaths.length > _maxCollagePhotos) {
+    final int count = _selectedPaths.length;
+    if (count < _minCollagePhotos || count > _maxCollagePhotos) {
       return;
     }
-    final List<File> chosenFiles =
-        _selectedCollagePaths.map((p) => File(p)).toList();
+    final List<File> chosenFiles = _selectedPaths.map((p) => File(p)).toList();
 
     final bool? savedNew = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
@@ -3969,8 +3936,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     if (!mounted) return;
     setState(() {
-      _collageSelectionMode = false;
-      _selectedCollagePaths.clear();
+      _selectionMode = false;
+      _selectedPaths.clear();
     });
 
     if (savedNew == true) {
@@ -3980,8 +3947,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Future<void> _deleteSelectedToTrash() async {
-    if (_selectedTrashPaths.isEmpty || _isDeleting) return;
-    final List<String> targets = _selectedTrashPaths.toList();
+    if (_selectedPaths.isEmpty || _isDeleting) return;
+    final List<String> targets = _selectedPaths.toList();
     final bool ok = await _TrashService.confirmMoveToTrash(
       context,
       count: targets.length,
@@ -3996,8 +3963,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!mounted) return;
     setState(() {
       _isDeleting = false;
-      _trashSelectionMode = false;
-      _selectedTrashPaths.clear();
+      _selectionMode = false;
+      _selectedPaths.clear();
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -4612,10 +4579,14 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     );
   }
 
-  Widget _buildCollageSelectionBar() {
-    if (!_collageSelectionMode) return const SizedBox.shrink();
-    final int count = _selectedCollagePaths.length;
-    final bool canProceed =
+  Widget _buildSelectionActionBar() {
+    if (!_selectionMode || _selectedPaths.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final int count = _selectedPaths.length;
+    final bool overCollageLimit = count > _maxCollagePhotos;
+    final bool canCollage =
         count >= _minCollagePhotos && count <= _maxCollagePhotos;
 
     return Container(
@@ -4627,30 +4598,52 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
           children: [
             Expanded(
               child: Text(
-                count < _minCollagePhotos
-                    ? 'Pilih 2–6 foto ($count/6)'
-                    : 'Terpilih $count dari maks. 6 foto',
-                style: const TextStyle(
-                  color: Colors.white70,
+                overCollageLimit
+                    ? '$count foto dipilih • Kolase maks. 6 foto'
+                    : '$count foto dipilih',
+                style: TextStyle(
+                  color: overCollageLimit
+                      ? const Color(0xFFFFB74D)
+                      : Colors.white70,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                 ),
               ),
             ),
+            IconButton(
+              onPressed: _isDeleting ? null : _deleteSelectedToTrash,
+              icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
+              tooltip: 'Pindahkan ke Sampah',
+            ),
+            const SizedBox(width: 6),
             FilledButton(
               style: FilledButton.styleFrom(
                 backgroundColor:
-                    canProceed ? const Color(0xFFFFD000) : Colors.white12,
-                foregroundColor: canProceed ? Colors.black : Colors.white38,
+                    (canCollage && !_isDeleting)
+                        ? const Color(0xFFFFD000)
+                        : Colors.white12,
+                foregroundColor:
+                    (canCollage && !_isDeleting)
+                        ? Colors.black
+                        : Colors.white38,
+                disabledBackgroundColor: Colors.white12,
+                disabledForegroundColor: Colors.white38,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              onPressed: canProceed ? _openCollageStageFromSelection : null,
+              onPressed:
+                  (canCollage && !_isDeleting)
+                      ? _openCollageStageFromSelection
+                      : null,
               child: Text(
-                canProceed ? 'Lanjut ($count)' : 'Lanjut',
+                overCollageLimit
+                    ? 'Kolase (Maks 6)'
+                    : (count < _minCollagePhotos
+                        ? 'Kolase'
+                        : 'Kolase ($count)'),
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
@@ -4680,15 +4673,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final total = _entries.length;
     final sections = _buildVisibleSections(_visibleCount);
     final hasMore = _visibleCount < total;
+    final int selectedCount = _selectedPaths.length;
 
-    String appBarTitle;
-    if (_collageSelectionMode) {
-      appBarTitle = 'Pilih Kolase (${_selectedCollagePaths.length}/6)';
-    } else if (_trashSelectionMode) {
-      appBarTitle = '${_selectedTrashPaths.length} ditandai';
-    } else {
-      appBarTitle = total > 0 ? 'Terbaru ($total)' : 'Terbaru';
-    }
+    final String appBarTitle = _selectionMode
+        ? (selectedCount > 0 ? '$selectedCount ditandai' : 'Tandai foto')
+        : (total > 0 ? 'Terbaru ($total)' : 'Terbaru');
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -4699,43 +4688,21 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
         ),
         actions: [
-          if (_trashSelectionMode && _selectedTrashPaths.isEmpty)
-            const SizedBox.shrink()
-          else if (_trashSelectionMode && _selectedTrashPaths.isNotEmpty)
-            IconButton(
-              onPressed: _isDeleting ? null : _deleteSelectedToTrash,
-              icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
-              tooltip: 'Pindahkan ke Sampah',
-            ),
-          if (!_trashSelectionMode && total >= _minCollagePhotos)
+          if (total > 0)
             TextButton(
-              onPressed: _isDeleting ? null : _toggleCollageSelectionMode,
+              onPressed: _isDeleting ? null : _toggleSelectionMode,
               child: Text(
-                _collageSelectionMode ? 'Batal' : 'Kolase',
+                _selectionMode ? 'Batal' : 'Tandai',
                 style: TextStyle(
-                  color: _collageSelectionMode
-                      ? const Color(0xFFFFD000)
-                      : Colors.white,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          if (!_collageSelectionMode && total > 0)
-            TextButton(
-              onPressed: _isDeleting ? null : _toggleTrashSelectionMode,
-              child: Text(
-                _trashSelectionMode ? 'Batal' : 'Tandai',
-                style: TextStyle(
-                  color: _trashSelectionMode
-                      ? const Color(0xFFFFD000)
-                      : Colors.white,
+                  color:
+                      _selectionMode ? const Color(0xFFFFD000) : Colors.white,
                   fontWeight: FontWeight.w600,
                 ),
               ),
             ),
         ],
       ),
-      bottomNavigationBar: _buildCollageSelectionBar(),
+      bottomNavigationBar: _buildSelectionActionBar(),
       body: _isLoading
           ? const Center(
               child: CircularProgressIndicator(
@@ -4814,32 +4781,20 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                     final File file = sec.entries[idx].file;
                                     final int globalIdx =
                                         sec.startGlobalIndex + idx;
-                                    final int collageOrder = _collageSelectionMode
-                                        ? (_selectedCollagePaths
-                                                .indexOf(file.path) +
-                                            1)
-                                        : 0;
-                                    final bool isChecked = _collageSelectionMode
-                                        ? collageOrder > 0
-                                        : _selectedTrashPaths
-                                            .contains(file.path);
+                                    final int selIndex =
+                                        _selectedPaths.indexOf(file.path);
+                                    final bool isChecked = selIndex != -1;
+                                    final int orderBadge =
+                                        (isChecked && selIndex < _maxCollagePhotos)
+                                            ? (selIndex + 1)
+                                            : 0;
 
                                     return GestureDetector(
-                                      onLongPress: () {
-                                        if (_collageSelectionMode) {
-                                          _toggleSelectCollagePath(file.path);
-                                        } else {
-                                          setState(() {
-                                            _trashSelectionMode = true;
-                                            _selectedTrashPaths.add(file.path);
-                                          });
-                                        }
-                                      },
+                                      onLongPress: () =>
+                                          _enterSelectionWithPath(file.path),
                                       onTap: () {
-                                        if (_collageSelectionMode) {
-                                          _toggleSelectCollagePath(file.path);
-                                        } else if (_trashSelectionMode) {
-                                          _toggleSelectTrashPath(file.path);
+                                        if (_selectionMode) {
+                                          _toggleSelectPath(file.path);
                                         } else {
                                           _openPhotoWatermarkEditorAtIndex(
                                             globalIdx,
@@ -4871,7 +4826,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                                 color: Colors.black
                                                     .withValues(alpha: 0.34),
                                               ),
-                                            if (_collageSelectionMode)
+                                            if (_selectionMode || isChecked)
                                               Positioned(
                                                 top: 6,
                                                 right: 6,
@@ -4895,50 +4850,26 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                                   ),
                                                   child: isChecked
                                                       ? Center(
-                                                          child: Text(
-                                                            '$collageOrder',
-                                                            style:
-                                                                const TextStyle(
-                                                              color:
-                                                                  Colors.black,
-                                                              fontSize: 12,
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .w800,
-                                                            ),
-                                                          ),
-                                                        )
-                                                      : null,
-                                                ),
-                                              )
-                                            else if (_trashSelectionMode ||
-                                                isChecked)
-                                              Positioned(
-                                                top: 6,
-                                                right: 6,
-                                                child: Container(
-                                                  width: 22,
-                                                  height: 22,
-                                                  decoration: BoxDecoration(
-                                                    shape: BoxShape.circle,
-                                                    color: isChecked
-                                                        ? const Color(
-                                                            0xFFFFD000,
-                                                          )
-                                                        : Colors.black
-                                                            .withValues(
-                                                              alpha: 0.45,
-                                                            ),
-                                                    border: Border.all(
-                                                      color: Colors.white,
-                                                      width: 1.5,
-                                                    ),
-                                                  ),
-                                                  child: isChecked
-                                                      ? const Icon(
-                                                          Icons.check,
-                                                          size: 14,
-                                                          color: Colors.black,
+                                                          child: orderBadge > 0
+                                                              ? Text(
+                                                                  '$orderBadge',
+                                                                  style:
+                                                                      const TextStyle(
+                                                                    color:
+                                                                        Colors
+                                                                            .black,
+                                                                    fontSize: 12,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w800,
+                                                                  ),
+                                                                )
+                                                              : const Icon(
+                                                                  Icons.check,
+                                                                  size: 14,
+                                                                  color: Colors
+                                                                      .black,
+                                                                ),
                                                         )
                                                       : null,
                                                 ),

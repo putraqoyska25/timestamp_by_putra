@@ -3819,101 +3819,88 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Widget _buildRightFastScrubber() {
-    if (_entries.length < 18) return const SizedBox.shrink();
+    if (_entries.length < 6) return const SizedBox.shrink();
 
-    return LayoutBuilder(
-      builder: (context, box) {
-        const double thumbHeight = 58.0;
-        const double thumbWidth = 30.0;
-        final double trackHeight = max(1.0, box.maxHeight - 24.0);
-        final double usableHeight = max(1.0, trackHeight - thumbHeight);
+    return Positioned.fill(
+      child: LayoutBuilder(
+        builder: (context, box) {
+          const double thumbHeight = 62.0;
+          const double thumbWidth = 32.0;
+          final double trackHeight = max(80.0, box.maxHeight - 24.0);
+          final double usableHeight = max(1.0, trackHeight - thumbHeight);
 
-        return Stack(
-          children: [
-            ValueListenableBuilder<bool>(
-              valueListenable: _scrubDraggingNotifier,
-              builder: (context, isDragging, _) {
-                if (!isDragging) return const SizedBox.shrink();
-                return ValueListenableBuilder<String?>(
-                  valueListenable: _scrubMonthPillNotifier,
-                  builder: (context, pillText, _) {
-                    if (pillText == null) return const SizedBox.shrink();
-                    return Positioned(
-                      top: 14,
-                      left: 0,
-                      right: 0,
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 18,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF282C36),
-                            borderRadius: BorderRadius.circular(24),
-                            border: Border.all(
-                              color: const Color(0xFFFFD000)
-                                  .withValues(alpha: 0.55),
+          return Stack(
+            children: [
+              ValueListenableBuilder<bool>(
+                valueListenable: _scrubDraggingNotifier,
+                builder: (context, isDragging, _) {
+                  if (!isDragging) return const SizedBox.shrink();
+                  return ValueListenableBuilder<String?>(
+                    valueListenable: _scrubMonthPillNotifier,
+                    builder: (context, pillText, _) {
+                      if (pillText == null) return const SizedBox.shrink();
+                      return Positioned(
+                        top: 16,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 8,
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.5),
-                                blurRadius: 10,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF282C36),
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(
+                                color: const Color(0xFFFFD000),
+                                width: 1.2,
                               ),
-                            ],
-                          ),
-                          child: Text(
-                            pillText,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.55),
+                                  blurRadius: 10,
+                                ),
+                              ],
+                            ),
+                            child: Text(
+                              pillText,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
-            Positioned(
-              right: 2,
-              top: 12,
-              bottom: 12,
-              width: 48,
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onVerticalDragStart: (details) => _updateScrubThumbPosition(
-                  details.localPosition.dy,
-                  trackHeight,
-                ),
-                onVerticalDragUpdate: (details) => _updateScrubThumbPosition(
-                  details.localPosition.dy,
-                  trackHeight,
-                ),
-                onVerticalDragEnd: (_) => _commitScrubJump(),
-                onVerticalDragCancel: () => _commitScrubJump(),
-                onTapDown: (details) {
-                  _updateScrubThumbPosition(
+                      );
+                    },
+                  );
+                },
+              ),
+              Positioned(
+                right: 0,
+                top: 12,
+                height: trackHeight,
+                width: 52,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onVerticalDragStart: (details) => _updateScrubThumbPosition(
                     details.localPosition.dy,
                     trackHeight,
-                  );
-                  _commitScrubJump();
-                },
-                child: ValueListenableBuilder<bool>(
-                  valueListenable: _scrubVisibleNotifier,
-                  builder: (context, isVisible, child) {
-                    return ValueListenableBuilder<bool>(
-                      valueListenable: _scrubDraggingNotifier,
-                      builder: (context, isDragging, __) {
-                        return AnimatedOpacity(
-                          opacity: (isVisible || isDragging) ? 1.0 : 0.4,
-                          duration: const Duration(milliseconds: 110),
-                          child: child,
-                        );
-                      },
+                  ),
+                  onVerticalDragUpdate: (details) => _updateScrubThumbPosition(
+                    details.localPosition.dy,
+                    trackHeight,
+                  ),
+                  onVerticalDragEnd: (_) => _commitScrubJump(),
+                  onVerticalDragCancel: () => _commitScrubJump(),
+                  onTapDown: (details) {
+                    _updateScrubThumbPosition(
+                      details.localPosition.dy,
+                      trackHeight,
                     );
+                    _commitScrubJump();
                   },
                   child: ValueListenableBuilder<double>(
                     valueListenable: _scrubFractionNotifier,
@@ -3926,7 +3913,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                           return Stack(
                             children: [
                               Positioned(
-                                right: 12,
+                                right: 8,
                                 top: thumbTop,
                                 child: Container(
                                   width: thumbWidth,
@@ -3934,16 +3921,18 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                   decoration: BoxDecoration(
                                     color: isDragging
                                         ? const Color(0xFFFFD000)
-                                        : const Color(0xFF2B303C),
-                                    borderRadius: BorderRadius.circular(15),
+                                        : const Color(0xFF2E3440),
+                                    borderRadius: BorderRadius.circular(16),
                                     border: Border.all(
-                                      color: Colors.white24,
-                                      width: 1,
+                                      color: isDragging
+                                          ? Colors.white
+                                          : Colors.white38,
+                                      width: 1.2,
                                     ),
                                     boxShadow: [
                                       BoxShadow(
                                         color:
-                                            Colors.black.withValues(alpha: 0.45),
+                                            Colors.black.withValues(alpha: 0.5),
                                         blurRadius: 6,
                                       ),
                                     ],
@@ -3953,17 +3942,17 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                     children: [
                                       Icon(
                                         Icons.arrow_drop_up,
-                                        size: 16,
+                                        size: 18,
                                         color: isDragging
                                             ? Colors.black
-                                            : Colors.white70,
+                                            : Colors.white,
                                       ),
                                       Icon(
                                         Icons.arrow_drop_down,
-                                        size: 16,
+                                        size: 18,
                                         color: isDragging
                                             ? Colors.black
-                                            : Colors.white70,
+                                            : Colors.white,
                                       ),
                                     ],
                                   ),
@@ -3977,10 +3966,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                   ),
                 ),
               ),
-            ),
-          ],
-        );
-      },
+            ],
+          );
+        },
+      ),
     );
   }
 

@@ -3396,8 +3396,8 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   static const int _maxFilesScan = 8000;
-  static const int _initialVisibleCount = 180;
-  static const int _pageBatchSize = 150;
+  static const int _initialVisibleCount = 120;
+  static const int _pageBatchSize = 120;
   static const double _headerHeight = 42.0;
   static const double _gridSpacing = 3.0;
   static const double _gridHorizontalPadding = 4.0;
@@ -3441,6 +3441,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   List<_MediaEntry> _entries = [];
   List<_MonthlyPhotoSection> _fullSections = [];
   int _visibleCount = 0;
+  double _cachedViewportWidth = 390.0;
 
   bool _selectionMode = false;
   final Set<String> _selectedPaths = {};
@@ -3453,7 +3454,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       ValueNotifier<String?>(null);
 
   Timer? _hideScrubberTimer;
-  double? _pendingJumpFraction;
+  double? _scrubTargetFraction;
   bool _isProgrammaticJumping = false;
 
   static const Set<String> _photoExts = {
@@ -3478,6 +3479,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _isLoading = false;
     } else {
       _loadAllPhotos();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final double w = MediaQuery.of(context).size.width;
+    if (w > 0) {
+      _cachedViewportWidth = w;
     }
   }
 
@@ -3540,32 +3550,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   double _cellExtent(double viewportWidth) {
-    final double usableW =
-        max(120.0, viewportWidth - (_gridHorizontalPadding * 2.0) - (_gridSpacing * 2.0));
+    final double usableW = max(
+      120.0,
+      viewportWidth - (_gridHorizontalPadding * 2.0) - (_gridSpacing * 2.0),
+    );
     return usableW / 3.0;
-  }
-
-  double _totalComputedHeight(double viewportWidth, {int? upToItemCount}) {
-    final int limit = upToItemCount == null
-        ? _entries.length
-        : upToItemCount.clamp(0, _entries.length);
-    if (_fullSections.isEmpty || limit <= 0) return 0.0;
-
-    final double cell = _cellExtent(viewportWidth);
-    final double rowStride = cell + _gridSpacing;
-    double totalH = 0.0;
-
-    for (final sec in _fullSections) {
-      if (sec.startGlobalIndex >= limit) break;
-      final int remainingInSec = limit - sec.startGlobalIndex;
-      final int countInSec = min(sec.entries.length, remainingInSec);
-      if (countInSec <= 0) continue;
-
-      final int rows = (countInSec / 3.0).ceil();
-      totalH += _headerHeight + (rows * rowStride) + _gridSpacing;
-    }
-
-    return max(0.0, totalH);
   }
 
   double _offsetForGlobalIndex(int globalIndex, double viewportWidth) {
@@ -3643,20 +3632,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (total <= 0) return;
 
     if (!_scrubDraggingNotifier.value) {
-      final double viewportW = MediaQuery.of(context).size.width;
-      final double viewportH = pos.viewportDimension > 0
-          ? pos.viewportDimension
-          : MediaQuery.of(context).size.height;
-      final double fullEstHeight = _totalComputedHeight(viewportW);
-      final double maxScroll = max(1.0, fullEstHeight - viewportH);
-      final int currentIdx = _globalIndexAtOffset(pos.pixels, viewportW);
+      final int currentIdx =
+          _globalIndexAtOffset(pos.pixels, _cachedViewportWidth);
       final double frac = total <= 1
           ? 0.0
           : (currentIdx / (total - 1)).clamp(
               0.0,
               pos.maxScrollExtent > 0
                   ? (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0)
-                  : (pos.pixels / maxScroll).clamp(0.0, 1.0),
+                  : 0.0,
             );
 
       _scrubFractionNotifier.value = frac;
@@ -3665,7 +3649,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       }
       _scheduleScrubberHide();
 
-      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 700) {
+      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 650) {
         setState(() {
           _visibleCount = min(total, _visibleCount + _pageBatchSize);
         });
@@ -3673,24 +3657,57 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  void _jumpToFractionAccurate(double frac, {required bool isFinalCommit}) {
-    if (!_scrollController.hasClients || _entries.isEmpty) return;
+  void _previewScrubAtFraction(double frac) {
+    if (_entries.isEmpty) return;
     final double clampedFrac = frac.clamp(0.0, 1.0);
-    final int targetIdx =
-        (clampedFrac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
-    final int neededVisible = min(
-      _entries.length,
-      max(_visibleCount, targetIdx + (isFinalCommit ? 90 : 120)),
-    );
+    _scrubTargetFraction = clampedFrac;
+    _scrubFractionNotifier.value = clampedFrac;
+    _scrubVisibleNotifier.value = true;
+    _scrubDraggingNotifier.value = true;
+    _scrubDatePillNotifier.value = _resolveDateLabelAtFraction(clampedFrac);
 
-    final double viewportW = MediaQuery.of(context).size.width;
-    final double desiredOffset = _offsetForGlobalIndex(targetIdx, viewportW);
+    if (!_scrollController.hasClients) return;
+    final int targetIdx = (clampedFrac * (_entries.length - 1))
+        .round()
+        .clamp(0, _entries.length - 1);
+    if (targetIdx < _visibleCount) {
+      final double desiredOffset =
+          _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
+      final pos = _scrollController.position;
+      final double safeOffset =
+          desiredOffset.clamp(0.0, max(0.0, pos.maxScrollExtent));
+      _isProgrammaticJumping = true;
+      try {
+        _scrollController.jumpTo(safeOffset);
+      } finally {
+        _isProgrammaticJumping = false;
+      }
+    }
+  }
+
+  void _commitScrubJump() {
+    _scrubDraggingNotifier.value = false;
+    final double frac =
+        (_scrubTargetFraction ?? _scrubFractionNotifier.value).clamp(0.0, 1.0);
+    _scrubTargetFraction = null;
+
+    if (!_scrollController.hasClients || _entries.isEmpty) {
+      _scheduleScrubberHide();
+      return;
+    }
+
+    final int targetIdx =
+        (frac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
+    final int neededVisible =
+        min(_entries.length, max(_visibleCount, targetIdx + 90));
+    final double desiredOffset =
+        _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
 
     void performClampedJump() {
       if (!mounted || !_scrollController.hasClients) return;
       final pos = _scrollController.position;
-      final double maxExtent = pos.maxScrollExtent;
-      final double safeOffset = desiredOffset.clamp(0.0, max(0.0, maxExtent));
+      final double safeOffset =
+          desiredOffset.clamp(0.0, max(0.0, pos.maxScrollExtent));
       _isProgrammaticJumping = true;
       try {
         _scrollController.jumpTo(safeOffset);
@@ -3700,33 +3717,14 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
 
     if (neededVisible > _visibleCount) {
-      _pendingJumpFraction = clampedFrac;
       setState(() => _visibleCount = neededVisible);
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _pendingJumpFraction = null;
         performClampedJump();
       });
     } else {
       performClampedJump();
     }
-  }
 
-  void _updateScrubThumbPosition(double localY, double trackHeight) {
-    if (trackHeight <= 0 || _entries.isEmpty) return;
-    final frac = (localY / trackHeight).clamp(0.0, 1.0);
-    _scrubFractionNotifier.value = frac;
-    _scrubVisibleNotifier.value = true;
-    _scrubDraggingNotifier.value = true;
-    _scrubDatePillNotifier.value = _resolveDateLabelAtFraction(frac);
-    _jumpToFractionAccurate(frac, isFinalCommit: false);
-  }
-
-  void _commitScrubJump() {
-    _scrubDraggingNotifier.value = false;
-    final double frac =
-        (_pendingJumpFraction ?? _scrubFractionNotifier.value).clamp(0.0, 1.0);
-    _pendingJumpFraction = null;
-    _jumpToFractionAccurate(frac, isFinalCommit: true);
     _scheduleScrubberHide();
   }
 
@@ -3917,7 +3915,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     for (final sec in _fullSections) {
       if (sec.startGlobalIndex >= safeLimit) break;
-      final int takeCount = min(sec.entries.length, safeLimit - sec.startGlobalIndex);
+      final int takeCount =
+          min(sec.entries.length, safeLimit - sec.startGlobalIndex);
       if (takeCount <= 0) continue;
       visible.add(
         _MonthlyPhotoSection(
@@ -4026,21 +4025,22 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                 width: 52,
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
-                  onVerticalDragStart: (details) => _updateScrubThumbPosition(
-                    details.localPosition.dy,
-                    trackHeight,
-                  ),
-                  onVerticalDragUpdate: (details) => _updateScrubThumbPosition(
-                    details.localPosition.dy,
-                    trackHeight,
-                  ),
+                  onVerticalDragStart: (details) {
+                    final frac =
+                        (details.localPosition.dy / trackHeight).clamp(0.0, 1.0);
+                    _previewScrubAtFraction(frac);
+                  },
+                  onVerticalDragUpdate: (details) {
+                    final frac =
+                        (details.localPosition.dy / trackHeight).clamp(0.0, 1.0);
+                    _previewScrubAtFraction(frac);
+                  },
                   onVerticalDragEnd: (_) => _commitScrubJump(),
                   onVerticalDragCancel: () => _commitScrubJump(),
                   onTapDown: (details) {
-                    _updateScrubThumbPosition(
-                      details.localPosition.dy,
-                      trackHeight,
-                    );
+                    final frac =
+                        (details.localPosition.dy / trackHeight).clamp(0.0, 1.0);
+                    _previewScrubAtFraction(frac);
                     _commitScrubJump();
                   },
                   child: ValueListenableBuilder<double>(
@@ -4128,6 +4128,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final double w = MediaQuery.of(context).size.width;
+    if (w > 0) _cachedViewportWidth = w;
+
     final total = _entries.length;
     final sections = _buildVisibleSections(_visibleCount);
     final hasMore = _visibleCount < total;
@@ -4199,7 +4202,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 1200,
+                        cacheExtent: 700,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(
@@ -4263,7 +4266,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                           children: [
                                             Image.file(
                                               file,
-                                              cacheWidth: 220,
+                                              cacheWidth: 140,
                                               filterQuality: FilterQuality.low,
                                               fit: BoxFit.cover,
                                               gaplessPlayback: true,

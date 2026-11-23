@@ -2511,7 +2511,6 @@ class _CameraScreenState extends State<CameraScreen>
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
 
-      // Segera matikan cahaya setelah frame berhasil diambil
       if (isFront) {
         await _deactivateFrontScreenFlash();
       } else {
@@ -2883,7 +2882,7 @@ class _CameraScreenState extends State<CameraScreen>
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
-            const SizedBox(height: 12),
+            const SizedBox.height(12),
             FilledButton.icon(
               onPressed: () => _initCameraByDirection(
                 CameraLensDirection.back,
@@ -3424,12 +3423,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   bool _selectionMode = false;
   final Set<String> _selectedPaths = {};
 
-  bool _showScrubber = false;
-  bool _isDraggingScrubber = false;
-  double _scrubberFraction = 0.0;
-  String? _activeMonthPill;
+  final ValueNotifier<double> _scrubFractionNotifier =
+      ValueNotifier<double>(0.0);
+  final ValueNotifier<bool> _scrubVisibleNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> _scrubDraggingNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<String?> _scrubMonthPillNotifier =
+      ValueNotifier<String?>(null);
+
   Timer? _hideScrubberTimer;
-  DateTime _lastScrubUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+  double? _pendingJumpFraction;
 
   static const Set<String> _imageExts = {
     '.jpg',
@@ -3503,15 +3505,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     );
   }
 
-  void _scheduleScrubberHide({int milliseconds = 1500}) {
+  void _scheduleScrubberHide({int milliseconds = 1600}) {
     _hideScrubberTimer?.cancel();
-    if (_isDraggingScrubber) return;
+    if (_scrubDraggingNotifier.value) return;
     _hideScrubberTimer = Timer(Duration(milliseconds: milliseconds), () {
-      if (!mounted || _isDraggingScrubber) return;
-      setState(() {
-        _showScrubber = false;
-        _activeMonthPill = null;
-      });
+      if (!mounted || _scrubDraggingNotifier.value) return;
+      _scrubVisibleNotifier.value = false;
+      _scrubMonthPillNotifier.value = null;
     });
   }
 
@@ -3520,27 +3520,33 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final pos = _scrollController.position;
     final total = _entries.length;
 
-    if (!_isDraggingScrubber && pos.maxScrollExtent > 0) {
-      final frac = (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0);
-      final now = DateTime.now();
-      if (!_showScrubber ||
-          now.difference(_lastScrubUiUpdate).inMilliseconds >= 45) {
-        _lastScrubUiUpdate = now;
-        setState(() {
-          _scrubberFraction = frac;
-          _showScrubber = true;
-        });
+    if (!_scrubDraggingNotifier.value) {
+      final double effectiveMax = pos.maxScrollExtent > 0
+          ? pos.maxScrollExtent
+          : _estimatedTotalScrollExtent(total);
+      if (effectiveMax > 0) {
+        final frac = (pos.pixels / effectiveMax).clamp(0.0, 1.0);
+        _scrubFractionNotifier.value = frac;
+        if (!_scrubVisibleNotifier.value && pos.pixels > 4) {
+          _scrubVisibleNotifier.value = true;
+        }
       }
       _scheduleScrubberHide();
-    }
 
-    if (!_isDraggingScrubber &&
-        _visibleCount < total &&
-        pos.pixels >= pos.maxScrollExtent - 450) {
-      setState(() {
-        _visibleCount = min(total, _visibleCount + _pageSize);
-      });
+      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
+        setState(() {
+          _visibleCount = min(total, _visibleCount + _pageSize);
+        });
+      }
     }
+  }
+
+  double _estimatedTotalScrollExtent(int itemCount) {
+    if (itemCount <= 0) return 0.0;
+    final double rows = (itemCount / 3.0).ceil().toDouble();
+    final double screenW = MediaQuery.of(context).size.width;
+    final double cellSize = max(90.0, (screenW - 14.0) / 3.0);
+    return max(1.0, rows * (cellSize + 3.0) + 180.0);
   }
 
   String _resolveMonthLabelAtFraction(double fraction) {
@@ -3558,58 +3564,66 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   void _updateScrubThumbPosition(double localY, double trackHeight) {
     if (trackHeight <= 0) return;
     final frac = (localY / trackHeight).clamp(0.0, 1.0);
-    final now = DateTime.now();
-    final nextPill = _resolveMonthLabelAtFraction(frac);
+    _scrubFractionNotifier.value = frac;
+    _scrubVisibleNotifier.value = true;
+    _scrubDraggingNotifier.value = true;
+    _scrubMonthPillNotifier.value = _resolveMonthLabelAtFraction(frac);
 
-    if (!_isDraggingScrubber ||
-        nextPill != _activeMonthPill ||
-        now.difference(_lastScrubUiUpdate).inMilliseconds >= 32) {
-      _lastScrubUiUpdate = now;
-      setState(() {
-        _scrubberFraction = frac;
-        _showScrubber = true;
-        _isDraggingScrubber = true;
-        _activeMonthPill = nextPill;
-      });
+    if (_scrollController.hasClients && _entries.isNotEmpty) {
+      final pos = _scrollController.position;
+      final double maxExtent = pos.maxScrollExtent > 0
+          ? pos.maxScrollExtent
+          : _estimatedTotalScrollExtent(_entries.length);
+      final int targetIdx = (frac * (_entries.length - 1))
+          .round()
+          .clamp(0, _entries.length - 1);
+
+      if (targetIdx >= _visibleCount - 12 && _visibleCount < _entries.length) {
+        _pendingJumpFraction = frac;
+        setState(() {
+          _visibleCount = min(_entries.length, max(_visibleCount, targetIdx + 90));
+        });
+      } else {
+        final double targetOffset =
+            (frac * maxExtent).clamp(0.0, pos.maxScrollExtent);
+        _scrollController.jumpTo(targetOffset);
+      }
     }
   }
 
   void _commitScrubJump() {
-    if (!_scrollController.hasClients || _entries.isEmpty) {
-      setState(() => _isDraggingScrubber = false);
-      _scheduleScrubberHide();
-      return;
+    _scrubDraggingNotifier.value = false;
+    final double frac =
+        (_pendingJumpFraction ?? _scrubFractionNotifier.value).clamp(0.0, 1.0);
+    _pendingJumpFraction = null;
+
+    if (_scrollController.hasClients && _entries.isNotEmpty) {
+      final int targetIdx = (frac * (_entries.length - 1))
+          .round()
+          .clamp(0, _entries.length - 1);
+      final int neededVisible =
+          min(_entries.length, max(_visibleCount, targetIdx + 60));
+
+      void applyJump() {
+        if (!mounted || !_scrollController.hasClients) return;
+        final pos = _scrollController.position;
+        final double maxExtent = pos.maxScrollExtent > 0
+            ? pos.maxScrollExtent
+            : _estimatedTotalScrollExtent(_entries.length);
+        final double targetOffset =
+            (frac * maxExtent).clamp(0.0, pos.maxScrollExtent);
+        _scrollController.jumpTo(targetOffset);
+      }
+
+      if (neededVisible != _visibleCount) {
+        setState(() => _visibleCount = neededVisible);
+        WidgetsBinding.instance.addPostFrameCallback((_) => applyJump());
+      } else {
+        applyJump();
+      }
     }
 
-    final frac = _scrubberFraction.clamp(0.0, 1.0);
-    final targetIndex = (frac * (_entries.length - 1))
-        .round()
-        .clamp(0, _entries.length - 1);
-    final neededVisible =
-        min(_entries.length, max(_visibleCount, targetIndex + 45));
-
-    setState(() {
-      _visibleCount = neededVisible;
-      _isDraggingScrubber = false;
-    });
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
-      final maxExtent = _scrollController.position.maxScrollExtent;
-      if (maxExtent > 0) {
-        final ratio = (_entries.length > 1)
-            ? (targetIndex / max(1, _visibleCount - 1)).clamp(0.0, 1.0)
-            : frac;
-        final targetOffset = (frac * maxExtent).clamp(0.0, maxExtent);
-        _scrollController.jumpTo(
-          max(
-            0.0,
-            min(maxExtent, targetOffset * 0.5 + ratio * maxExtent * 0.5),
-          ),
-        );
-      }
-      _scheduleScrubberHide();
-    });
+    _scheduleScrubberHide();
   }
 
   bool _isImageFile(String path) {
@@ -3766,10 +3780,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     return orderedKeys.map((key) {
       final list = grouped[key]!;
       final firstDt = list.first.modified;
-      final String monthName =
-          (firstDt.month >= 1 && firstDt.month <= 12)
-              ? _bulanIndo[firstDt.month - 1]
-              : 'Bulan ${firstDt.month}';
+      final String monthName = (firstDt.month >= 1 && firstDt.month <= 12)
+          ? _bulanIndo[firstDt.month - 1]
+          : 'Bulan ${firstDt.month}';
       return _MonthlyPhotoSection(
         year: firstDt.year,
         month: firstDt.month,
@@ -3810,121 +3823,157 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     return LayoutBuilder(
       builder: (context, box) {
-        const double thumbHeight = 56.0;
-        const double thumbWidth = 28.0;
-        final double usableHeight = max(1.0, box.maxHeight - thumbHeight);
-        final double thumbTop = _scrubberFraction * usableHeight;
+        const double thumbHeight = 58.0;
+        const double thumbWidth = 30.0;
+        final double trackHeight = max(1.0, box.maxHeight - 24.0);
+        final double usableHeight = max(1.0, trackHeight - thumbHeight);
 
         return Stack(
           children: [
-            if (_isDraggingScrubber && _activeMonthPill != null)
-              Positioned(
-                top: 14,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF282C36),
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(
-                        color: const Color(0xFFFFD000).withValues(alpha: 0.55),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.5),
-                          blurRadius: 10,
+            ValueListenableBuilder<bool>(
+              valueListenable: _scrubDraggingNotifier,
+              builder: (context, isDragging, _) {
+                if (!isDragging) return const SizedBox.shrink();
+                return ValueListenableBuilder<String?>(
+                  valueListenable: _scrubMonthPillNotifier,
+                  builder: (context, pillText, _) {
+                    if (pillText == null) return const SizedBox.shrink();
+                    return Positioned(
+                      top: 14,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF282C36),
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: const Color(0xFFFFD000)
+                                  .withValues(alpha: 0.55),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.5),
+                                blurRadius: 10,
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            pillText,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
-                      ],
-                    ),
-                    child: Text(
-                      _activeMonthPill!,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
                       ),
-                    ),
-                  ),
-                ),
-              ),
+                    );
+                  },
+                );
+              },
+            ),
             Positioned(
               right: 2,
               top: 12,
               bottom: 12,
-              width: 44,
+              width: 48,
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onVerticalDragStart: (details) => _updateScrubThumbPosition(
                   details.localPosition.dy,
-                  box.maxHeight - 24,
+                  trackHeight,
                 ),
                 onVerticalDragUpdate: (details) => _updateScrubThumbPosition(
                   details.localPosition.dy,
-                  box.maxHeight - 24,
+                  trackHeight,
                 ),
                 onVerticalDragEnd: (_) => _commitScrubJump(),
                 onVerticalDragCancel: () => _commitScrubJump(),
                 onTapDown: (details) {
                   _updateScrubThumbPosition(
                     details.localPosition.dy,
-                    box.maxHeight - 24,
+                    trackHeight,
                   );
                   _commitScrubJump();
                 },
-                child: AnimatedOpacity(
-                  opacity: (_showScrubber || _isDraggingScrubber) ? 1.0 : 0.35,
-                  duration: const Duration(milliseconds: 140),
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        right: 12,
-                        top: thumbTop.clamp(0.0, usableHeight),
-                        child: Container(
-                          width: thumbWidth,
-                          height: thumbHeight,
-                          decoration: BoxDecoration(
-                            color: _isDraggingScrubber
-                                ? const Color(0xFFFFD000)
-                                : const Color(0xFF2B303C),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: Colors.white24,
-                              width: 1,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.45),
-                                blurRadius: 6,
-                              ),
-                            ],
-                          ),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: _scrubVisibleNotifier,
+                  builder: (context, isVisible, child) {
+                    return ValueListenableBuilder<bool>(
+                      valueListenable: _scrubDraggingNotifier,
+                      builder: (context, isDragging, __) {
+                        return AnimatedOpacity(
+                          opacity: (isVisible || isDragging) ? 1.0 : 0.4,
+                          duration: const Duration(milliseconds: 110),
+                          child: child,
+                        );
+                      },
+                    );
+                  },
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: _scrubFractionNotifier,
+                    builder: (context, frac, _) {
+                      final double thumbTop =
+                          (frac * usableHeight).clamp(0.0, usableHeight);
+                      return ValueListenableBuilder<bool>(
+                        valueListenable: _scrubDraggingNotifier,
+                        builder: (context, isDragging, __) {
+                          return Stack(
                             children: [
-                              Icon(
-                                Icons.arrow_drop_up,
-                                size: 15,
-                                color: _isDraggingScrubber
-                                    ? Colors.black
-                                    : Colors.white70,
-                              ),
-                              Icon(
-                                Icons.arrow_drop_down,
-                                size: 15,
-                                color: _isDraggingScrubber
-                                    ? Colors.black
-                                    : Colors.white70,
+                              Positioned(
+                                right: 12,
+                                top: thumbTop,
+                                child: Container(
+                                  width: thumbWidth,
+                                  height: thumbHeight,
+                                  decoration: BoxDecoration(
+                                    color: isDragging
+                                        ? const Color(0xFFFFD000)
+                                        : const Color(0xFF2B303C),
+                                    borderRadius: BorderRadius.circular(15),
+                                    border: Border.all(
+                                      color: Colors.white24,
+                                      width: 1,
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color:
+                                            Colors.black.withValues(alpha: 0.45),
+                                        blurRadius: 6,
+                                      ),
+                                    ],
+                                  ),
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(
+                                        Icons.arrow_drop_up,
+                                        size: 16,
+                                        color: isDragging
+                                            ? Colors.black
+                                            : Colors.white70,
+                                      ),
+                                      Icon(
+                                        Icons.arrow_drop_down,
+                                        size: 16,
+                                        color: isDragging
+                                            ? Colors.black
+                                            : Colors.white70,
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             ],
-                          ),
-                        ),
-                      ),
-                    ],
+                          );
+                        },
+                      );
+                    },
                   ),
                 ),
               ),
@@ -3940,6 +3989,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     _hideScrubberTimer?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _scrubFractionNotifier.dispose();
+    _scrubVisibleNotifier.dispose();
+    _scrubDraggingNotifier.dispose();
+    _scrubMonthPillNotifier.dispose();
     super.dispose();
   }
 
@@ -4074,7 +4127,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                           children: [
                                             Image.file(
                                               file,
-                                              cacheWidth: 200,
+                                              cacheWidth: 160,
+                                              filterQuality: FilterQuality.low,
                                               fit: BoxFit.cover,
                                               errorBuilder: (_, __, ___) =>
                                                   const ColoredBox(

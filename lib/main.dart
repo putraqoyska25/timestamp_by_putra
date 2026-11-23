@@ -7,6 +7,7 @@ import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
@@ -20,7 +21,7 @@ List<CameraDescription> cameras = [];
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    cameras = await availableCameras();
+    cameras = await availableCameras().timeout(const Duration(seconds: 6));
   } catch (e) {
     debugPrint('Error kamera awal: $e');
   }
@@ -62,6 +63,196 @@ enum CollageLayoutId {
   sixGrid2x3,
   sixHeroLeft2Right3Bottom,
   sixHeroLeft3Right2Bottom,
+}
+
+class _CropResizeRequest {
+  final Uint8List bytes;
+  final PhotoAspectRatio ratio;
+  final int qualityHeight;
+
+  const _CropResizeRequest({
+    required this.bytes,
+    required this.ratio,
+    required this.qualityHeight,
+  });
+}
+
+class _SlotCropRequest {
+  final Uint8List bytes;
+  final int dstW;
+  final int dstH;
+  final double panX;
+  final double panY;
+
+  const _SlotCropRequest({
+    required this.bytes,
+    required this.dstW,
+    required this.dstH,
+    required this.panX,
+    required this.panY,
+  });
+}
+
+class _CompositeBaseRequest {
+  final Uint8List baseJpgBytes;
+  final int targetW;
+  final int targetH;
+  final Uint8List? overlayRgbaBytes;
+
+  const _CompositeBaseRequest({
+    required this.baseJpgBytes,
+    required this.targetW,
+    required this.targetH,
+    required this.overlayRgbaBytes,
+  });
+}
+
+Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
+  final img.Image? decoded = img.decodeImage(req.bytes);
+  if (decoded == null || decoded.width <= 16 || decoded.height <= 16) {
+    throw Exception('Gagal mendekode frame kamera');
+  }
+
+  final img.Image oriented = img.bakeOrientation(decoded);
+  final int sw = oriented.width;
+  final int sh = oriented.height;
+
+  double targetRatio;
+  if (req.ratio == PhotoAspectRatio.ratio1x1) {
+    targetRatio = 1.0;
+  } else if (req.ratio == PhotoAspectRatio.ratio4x3) {
+    targetRatio = sh >= sw ? (3.0 / 4.0) : (4.0 / 3.0);
+  } else {
+    targetRatio = sh >= sw ? (9.0 / 16.0) : (16.0 / 9.0);
+  }
+
+  final double currentRatio = sw / sh;
+  int cropW = sw;
+  int cropH = sh;
+
+  if ((currentRatio - targetRatio).abs() > 0.01) {
+    if (currentRatio > targetRatio) {
+      cropW = (sh * targetRatio).round();
+    } else {
+      cropH = (sw / targetRatio).round();
+    }
+  }
+
+  cropW = max(1, min(sw, cropW));
+  cropH = max(1, min(sh, cropH));
+
+  final int offsetX = ((sw - cropW) / 2.0).floor();
+  final int offsetY = ((sh - cropH) / 2.0).floor();
+
+  img.Image cropped = img.copyCrop(
+    oriented,
+    x: offsetX,
+    y: offsetY,
+    width: cropW,
+    height: cropH,
+  );
+
+  final int baseRef = min(cropped.width, cropped.height);
+  if (baseRef > 0 && req.qualityHeight > 0 && baseRef > req.qualityHeight) {
+    final double scaleFactor = req.qualityHeight / baseRef;
+    final int outW = max(1, (cropped.width * scaleFactor).round());
+    final int outH = max(1, (cropped.height * scaleFactor).round());
+    cropped = img.copyResize(
+      cropped,
+      width: outW,
+      height: outH,
+      interpolation: img.Interpolation.linear,
+    );
+  }
+
+  return Uint8List.fromList(img.encodeJpg(cropped, quality: 92));
+}
+
+Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
+  if (req.bytes.isEmpty) return null;
+  final img.Image? decoded = img.decodeImage(req.bytes);
+  if (decoded == null || decoded.width <= 1 || decoded.height <= 1) {
+    return null;
+  }
+
+  final img.Image oriented = img.bakeOrientation(decoded);
+  final int sw = oriented.width;
+  final int sh = oriented.height;
+
+  final double targetRatio = req.dstW / max(1, req.dstH);
+  final double srcRatio = sw / max(1, sh);
+
+  int cropW = sw;
+  int cropH = sh;
+  if ((srcRatio - targetRatio).abs() > 0.005) {
+    if (srcRatio > targetRatio) {
+      cropW = max(1, (sh * targetRatio).round());
+    } else {
+      cropH = max(1, (sw / targetRatio).round());
+    }
+  }
+
+  cropW = min(sw, max(1, cropW));
+  cropH = min(sh, max(1, cropH));
+
+  final double halfRangeX = max(0.0, (sw - cropW) / 2.0);
+  final double halfRangeY = max(0.0, (sh - cropH) / 2.0);
+
+  final double centerX = (sw / 2.0) - (req.panX.clamp(-1.0, 1.0) * halfRangeX);
+  final double centerY = (sh / 2.0) - (req.panY.clamp(-1.0, 1.0) * halfRangeY);
+
+  final int cropX =
+      (centerX - (cropW / 2.0)).round().clamp(0, max(0, sw - cropW));
+  final int cropY =
+      (centerY - (cropH / 2.0)).round().clamp(0, max(0, sh - cropH));
+
+  final img.Image cropped = img.copyCrop(
+    oriented,
+    x: cropX,
+    y: cropY,
+    width: min(sw - cropX, cropW),
+    height: min(sh - cropY, cropH),
+  );
+
+  final img.Image resized = img.copyResize(
+    cropped,
+    width: max(1, req.dstW),
+    height: max(1, req.dstH),
+    interpolation: img.Interpolation.linear,
+  );
+
+  return Uint8List.fromList(img.encodeJpg(resized, quality: 92));
+}
+
+Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
+  final img.Image? decoded = img.decodeImage(req.baseJpgBytes);
+  if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
+    throw Exception('Gagal mendekode gambar');
+  }
+
+  final img.Image oriented = img.bakeOrientation(decoded);
+  final img.Image baseImg = oriented.numChannels == 4
+      ? oriented
+      : oriented.convert(numChannels: 4, alpha: 255);
+
+  final Uint8List? overlayBytes = req.overlayRgbaBytes;
+  if (overlayBytes != null && overlayBytes.isNotEmpty) {
+    final img.Image overlayImg = img.Image.fromBytes(
+      width: baseImg.width,
+      height: baseImg.height,
+      bytes: overlayBytes.buffer,
+      numChannels: 4,
+      order: img.ChannelOrder.rgba,
+    );
+    img.compositeImage(
+      baseImg,
+      overlayImg,
+      dstX: 0,
+      dstY: 0,
+    );
+  }
+
+  return Uint8List.fromList(img.encodeJpg(baseImg, quality: 92));
 }
 
 class _CollageLayoutDef {
@@ -455,7 +646,9 @@ class _NativeBrightnessService {
   static Future<void> boostToMax() async {
     if (!Platform.isAndroid) return;
     try {
-      await _channel.invokeMethod('setMaxBrightness');
+      await _channel.invokeMethod('setMaxBrightness').timeout(
+            const Duration(seconds: 2),
+          );
       _isBoosted = true;
     } catch (e) {
       debugPrint('Gagal menaikkan kecerahan layar native: $e');
@@ -466,7 +659,9 @@ class _NativeBrightnessService {
     if (!Platform.isAndroid) return;
     if (!_isBoosted) return;
     try {
-      await _channel.invokeMethod('restoreBrightness');
+      await _channel.invokeMethod('restoreBrightness').timeout(
+            const Duration(seconds: 2),
+          );
     } catch (e) {
       debugPrint('Gagal memulihkan kecerahan layar native: $e');
     } finally {
@@ -982,7 +1177,7 @@ class _TrashService {
         final dynamic nativeRes = await _mediaStoreChannel.invokeMethod(
           'moveToTrash',
           {'paths': remainingPaths},
-        );
+        ).timeout(const Duration(seconds: 6));
         if (nativeRes is Map) {
           handledBySystemTrash = true;
           movedCount += (nativeRes['movedCount'] as num?)?.toInt() ?? 0;
@@ -1426,19 +1621,17 @@ class _StampRenderer {
     required DateTime activeDt,
     required _WatermarkConfig cfg,
   }) async {
-    final img.Image? decoded = img.decodeImage(baseJpgBytes);
-    if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
+    final img.Image? probe = img.decodeImage(baseJpgBytes);
+    if (probe == null || probe.width <= 4 || probe.height <= 4) {
       throw Exception('Gagal mendekode gambar');
     }
-
-    final img.Image oriented = img.bakeOrientation(decoded);
-    final img.Image baseImg = oriented.numChannels == 4
-        ? oriented
-        : oriented.convert(numChannels: 4, alpha: 255);
+    final img.Image orientedProbe = img.bakeOrientation(probe);
+    final int w = orientedProbe.width;
+    final int h = orientedProbe.height;
 
     final ui.Image overlayUi = await renderOverlayImage(
-      targetW: baseImg.width,
-      targetH: baseImg.height,
+      targetW: w,
+      targetH: h,
       activeDt: activeDt,
       cfg: cfg,
     );
@@ -1447,23 +1640,20 @@ class _StampRenderer {
         await overlayUi.toByteData(format: ui.ImageByteFormat.rawRgba);
     overlayUi.dispose();
 
-    if (byteData != null && byteData.lengthInBytes > 0) {
-      final img.Image overlayImg = img.Image.fromBytes(
-        width: baseImg.width,
-        height: baseImg.height,
-        bytes: byteData.buffer,
-        numChannels: 4,
-        order: img.ChannelOrder.rgba,
-      );
-      img.compositeImage(
-        baseImg,
-        overlayImg,
-        dstX: 0,
-        dstY: 0,
-      );
-    }
+    final Uint8List? overlayRgba =
+        (byteData != null && byteData.lengthInBytes > 0)
+            ? byteData.buffer.asUint8List()
+            : null;
 
-    return Uint8List.fromList(img.encodeJpg(baseImg, quality: 92));
+    return compute(
+      _processCompositeIsolate,
+      _CompositeBaseRequest(
+        baseJpgBytes: baseJpgBytes,
+        targetW: w,
+        targetH: h,
+        overlayRgbaBytes: overlayRgba,
+      ),
+    );
   }
 }
 
@@ -1883,6 +2073,8 @@ class _CameraScreenState extends State<CameraScreen>
   String? _cameraErrorMessage;
   bool _isInitializingCamera = false;
   bool _startupPermissionsRequested = false;
+  bool _isFetchingLocation = false;
+  bool _isPausedBackground = false;
 
   bool _shutterSoundEnabled = true;
   bool _gridEnabled = false;
@@ -1989,25 +2181,28 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _bootstrapStartupSequence() async {
     final saved = await _AppPrefsStore.load();
+    if (!mounted || _isPausedBackground) return;
     _applyLoadedPersistentSettings(saved);
 
     await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
-    if (!mounted || _startupPermissionsRequested) return;
+    if (!mounted || _isPausedBackground || _startupPermissionsRequested) return;
     _startupPermissionsRequested = true;
 
     if (Platform.isAndroid) {
       try {
-        await _mediaStoreChannel.invokeMethod('requestMediaPermissions');
+        await _mediaStoreChannel.invokeMethod('requestMediaPermissions').timeout(
+              const Duration(seconds: 5),
+            );
       } catch (e) {
         debugPrint('requestMediaPermissions awal: $e');
       }
     }
 
-    if (!mounted) return;
-    await _getLocation(requestIfDenied: true);
+    if (!mounted || _isPausedBackground) return;
+    unawaited(_getLocation(requestIfDenied: true));
 
-    if (!mounted) return;
-    await _ShutterAudioService.warmupAudio();
+    if (!mounted || _isPausedBackground) return;
+    unawaited(_ShutterAudioService.warmupAudio());
   }
 
   @override
@@ -2015,6 +2210,7 @@ class _CameraScreenState extends State<CameraScreen>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
+      _isPausedBackground = true;
       _cancelCountdown();
       _cooldownTimer?.cancel();
       _cooldownTimer = null;
@@ -2028,10 +2224,11 @@ class _CameraScreenState extends State<CameraScreen>
       _isDraggingExposure = false;
       unawaited(_NativeBrightnessService.restoreNormal());
       unawaited(_forceTorchOff(controllerOverride: _controller));
-      if (_isManualTime ||
-          _openDrawer != ActiveDrawer.none ||
-          _currentLens != CameraLensDirection.back ||
-          _isCoolingDown) {
+      if (mounted &&
+          (_isManualTime ||
+              _openDrawer != ActiveDrawer.none ||
+              _currentLens != CameraLensDirection.back ||
+              _isCoolingDown)) {
         setState(() {
           _isManualTime = false;
           _openDrawer = ActiveDrawer.none;
@@ -2039,17 +2236,27 @@ class _CameraScreenState extends State<CameraScreen>
           _systemNow = DateTime.now();
         });
       }
-      _disposeControllerSafely();
+      unawaited(_disposeControllerSafely());
     } else if (state == AppLifecycleState.resumed) {
+      if (!_isPausedBackground &&
+          _controller != null &&
+          _controller!.value.isInitialized) {
+        return;
+      }
+      _isPausedBackground = false;
       _screenFlashActive = false;
       unawaited(_NativeBrightnessService.restoreNormal());
-      setState(() {
-        _isManualTime = false;
-        _systemNow = DateTime.now();
-      });
-      unawaited(
-        _initCameraByDirection(CameraLensDirection.back, refreshList: true),
-      );
+      if (mounted) {
+        setState(() {
+          _isManualTime = false;
+          _systemNow = DateTime.now();
+        });
+      }
+      if (_controller == null || !_controller!.value.isInitialized) {
+        unawaited(
+          _initCameraByDirection(CameraLensDirection.back, refreshList: false),
+        );
+      }
     }
   }
 
@@ -2106,10 +2313,14 @@ class _CameraScreenState extends State<CameraScreen>
     _controller = null;
     if (prev != null) {
       try {
-        await prev.setFlashMode(FlashMode.off);
+        if (prev.value.isInitialized) {
+          await prev.setFlashMode(FlashMode.off).timeout(
+                const Duration(milliseconds: 500),
+              );
+        }
       } catch (_) {}
       try {
-        await prev.dispose();
+        await prev.dispose().timeout(const Duration(seconds: 3));
       } catch (e) {
         debugPrint('Error dispose controller: $e');
       }
@@ -2119,7 +2330,7 @@ class _CameraScreenState extends State<CameraScreen>
   void _startClockTimer() {
     _clockTimer?.cancel();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
+      if (!mounted || _isPausedBackground) return;
       if (!_isManualTime) {
         setState(() {
           _systemNow = DateTime.now();
@@ -2363,7 +2574,7 @@ class _CameraScreenState extends State<CameraScreen>
   ResolutionPreset _getCameraResolutionPreset() {
     switch (_qualityPreset) {
       case ImageQualityPreset.p1080:
-        return ResolutionPreset.high;
+        return ResolutionPreset.veryHigh;
       case ImageQualityPreset.p720:
         return ResolutionPreset.high;
       case ImageQualityPreset.p480:
@@ -2483,6 +2694,9 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _showSizePickerDialog() async {
+    StampFormSize tempSize = _formSize;
+    StampTextColor tempColor = _textColor;
+
     await showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -2497,39 +2711,29 @@ class _CameraScreenState extends State<CameraScreen>
                   'Ukuran Form',
                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                 ),
-                RadioListTile<StampFormSize>(
-                  title: const Text('Kecil'),
-                  value: StampFormSize.small,
-                  groupValue: _formSize,
-                  onChanged: (val) {
-                    if (val == null) return;
-                    setState(() => _formSize = val);
-                    setDialogState(() {});
-                    unawaited(_persistCurrentSettings());
-                  },
-                ),
-                RadioListTile<StampFormSize>(
-                  title: const Text('Sedang'),
-                  value: StampFormSize.medium,
-                  groupValue: _formSize,
-                  onChanged: (val) {
-                    if (val == null) return;
-                    setState(() => _formSize = val);
-                    setDialogState(() {});
-                    unawaited(_persistCurrentSettings());
-                  },
-                ),
-                RadioListTile<StampFormSize>(
-                  title: const Text('Besar'),
-                  value: StampFormSize.large,
-                  groupValue: _formSize,
-                  onChanged: (val) {
-                    if (val == null) return;
-                    setState(() => _formSize = val);
-                    setDialogState(() {});
-                    unawaited(_persistCurrentSettings());
-                  },
-                ),
+                for (final item in const [
+                  (StampFormSize.small, 'Kecil'),
+                  (StampFormSize.medium, 'Sedang'),
+                  (StampFormSize.large, 'Besar'),
+                ])
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      tempSize == item.$1
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      color: tempSize == item.$1
+                          ? const Color(0xFFFFD000)
+                          : Colors.white60,
+                    ),
+                    title: Text(item.$2),
+                    onTap: () {
+                      tempSize = item.$1;
+                      if (mounted) setState(() => _formSize = item.$1);
+                      setDialogState(() {});
+                      unawaited(_persistCurrentSettings());
+                    },
+                  ),
                 const SizedBox(height: 8),
                 const Text(
                   'Warna Dasar Tulisan',
@@ -2540,7 +2744,7 @@ class _CameraScreenState extends State<CameraScreen>
                   spacing: 8,
                   runSpacing: 8,
                   children: StampTextColor.values.map((c) {
-                    final bool isSelected = _textColor == c;
+                    final bool isSelected = tempColor == c;
                     return ChoiceChip(
                       selected: isSelected,
                       avatar: CircleAvatar(
@@ -2549,7 +2753,8 @@ class _CameraScreenState extends State<CameraScreen>
                       ),
                       label: Text(_StampRenderer.colorLabel(c)),
                       onSelected: (_) {
-                        setState(() => _textColor = c);
+                        tempColor = c;
+                        if (mounted) setState(() => _textColor = c);
                         setDialogState(() {});
                         unawaited(_persistCurrentSettings());
                       },
@@ -2558,7 +2763,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  _textColor == StampTextColor.black
+                  tempColor == StampTextColor.black
                       ? 'Shadow aktif: Putih (karena teks Hitam)'
                       : 'Shadow aktif: Hitam',
                   style: const TextStyle(fontSize: 12, color: Colors.white70),
@@ -2588,7 +2793,9 @@ class _CameraScreenState extends State<CameraScreen>
     if (ctrl == null) return;
     try {
       if (ctrl.value.isInitialized) {
-        await ctrl.setFlashMode(FlashMode.off);
+        await ctrl.setFlashMode(FlashMode.off).timeout(
+              const Duration(milliseconds: 500),
+            );
       }
     } catch (e) {
       debugPrint('Gagal mematikan flash/torch: $e');
@@ -2622,7 +2829,7 @@ class _CameraScreenState extends State<CameraScreen>
     CameraLensDirection targetDir, {
     bool refreshList = false,
   }) async {
-    if (_isInitializingCamera) return;
+    if (_isInitializingCamera || _isPausedBackground) return;
     if (mounted) {
       setState(() {
         _isInitializingCamera = true;
@@ -2635,8 +2842,10 @@ class _CameraScreenState extends State<CameraScreen>
     CameraController? newController;
     try {
       if (refreshList || cameras.isEmpty) {
-        cameras = await availableCameras().timeout(const Duration(seconds: 8));
+        cameras = await availableCameras().timeout(const Duration(seconds: 6));
       }
+
+      if (!mounted || _isPausedBackground) return;
 
       if (cameras.isEmpty) {
         if (mounted) {
@@ -2654,7 +2863,9 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       await _disposeControllerSafely();
-      await Future.delayed(const Duration(milliseconds: 120));
+      await Future.delayed(const Duration(milliseconds: 80));
+
+      if (!mounted || _isPausedBackground) return;
 
       newController = CameraController(
         cameras[foundIndex],
@@ -2663,7 +2874,7 @@ class _CameraScreenState extends State<CameraScreen>
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
-      await newController.initialize().timeout(const Duration(seconds: 10));
+      await newController.initialize().timeout(const Duration(seconds: 8));
       try {
         await newController.setFlashMode(FlashMode.off);
       } catch (_) {}
@@ -2675,7 +2886,7 @@ class _CameraScreenState extends State<CameraScreen>
         maxExp = await newController.getMaxExposureOffset();
       } catch (_) {}
 
-      if (!mounted) {
+      if (!mounted || _isPausedBackground) {
         await newController.dispose();
         return;
       }
@@ -2749,44 +2960,66 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _getLocation({bool requestIfDenied = true}) async {
-    if (mounted) setState(() => _gpsCoordsText = 'Mencari GPS...');
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      if (mounted) setState(() => _gpsCoordsText = 'GPS Nonaktif');
-      return;
-    }
-
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied && requestIfDenied) {
-      permission = await Geolocator.requestPermission();
-    }
-
-    if (permission == LocationPermission.denied) {
-      if (mounted) setState(() => _gpsCoordsText = 'Izin Lokasi Ditolak');
-      return;
-    }
-
-    if (permission == LocationPermission.deniedForever) {
-      if (mounted) {
-        setState(() => _gpsCoordsText = 'Izin Lokasi Permanen Ditolak');
-      }
-      return;
-    }
-
+    if (_isFetchingLocation) return;
+    _isFetchingLocation = true;
     try {
-      Position pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-      if (mounted) {
+      if (mounted) setState(() => _gpsCoordsText = 'Mencari GPS...');
+      final bool serviceEnabled = await Geolocator.isLocationServiceEnabled()
+          .timeout(const Duration(seconds: 4), onTimeout: () => false);
+      if (!serviceEnabled) {
+        if (mounted) setState(() => _gpsCoordsText = 'GPS Nonaktif');
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission()
+          .timeout(
+            const Duration(seconds: 4),
+            onTimeout: () => LocationPermission.denied,
+          );
+      if (permission == LocationPermission.denied && requestIfDenied) {
+        permission = await Geolocator.requestPermission().timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => LocationPermission.denied,
+        );
+      }
+
+      if (permission == LocationPermission.denied) {
+        if (mounted) setState(() => _gpsCoordsText = 'Izin Lokasi Ditolak');
+        return;
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          setState(() => _gpsCoordsText = 'Izin Lokasi Permanen Ditolak');
+        }
+        return;
+      }
+
+      Position? pos;
+      try {
+        pos = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 6),
+          ),
+        );
+      } catch (_) {
+        pos = await Geolocator.getLastKnownPosition();
+      }
+
+      if (!mounted) return;
+      if (pos != null) {
         setState(() {
           _gpsCoordsText =
-              '${pos.latitude.toStringAsFixed(6)}°${pos.latitude < 0 ? 'S' : 'U'}, ${pos.longitude.toStringAsFixed(6)}°${pos.longitude < 0 ? 'B' : 'T'}';
+              '${pos!.latitude.toStringAsFixed(6)}°${pos.latitude < 0 ? 'S' : 'U'}, ${pos.longitude.toStringAsFixed(6)}°${pos.longitude < 0 ? 'B' : 'T'}';
         });
+      } else {
+        setState(() => _gpsCoordsText = 'Gagal membaca koordinat');
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) setState(() => _gpsCoordsText = 'Gagal membaca koordinat');
+    } finally {
+      _isFetchingLocation = false;
     }
   }
 
@@ -2816,64 +3049,14 @@ class _CameraScreenState extends State<CameraScreen>
       throw Exception('Berkas hasil kamera kosong');
     }
     final bytes = await rawFile.readAsBytes();
-    final img.Image? decoded = img.decodeImage(bytes);
-    if (decoded == null || decoded.width <= 16 || decoded.height <= 16) {
-      throw Exception('Gagal mendekode frame kamera');
-    }
-
-    final img.Image oriented = img.bakeOrientation(decoded);
-    final int sw = oriented.width;
-    final int sh = oriented.height;
-
-    double targetRatio;
-    if (ratio == PhotoAspectRatio.ratio1x1) {
-      targetRatio = 1.0;
-    } else if (ratio == PhotoAspectRatio.ratio4x3) {
-      targetRatio = sh >= sw ? (3.0 / 4.0) : (4.0 / 3.0);
-    } else {
-      targetRatio = sh >= sw ? (9.0 / 16.0) : (16.0 / 9.0);
-    }
-
-    final double currentRatio = sw / sh;
-    int cropW = sw;
-    int cropH = sh;
-
-    if ((currentRatio - targetRatio).abs() > 0.01) {
-      if (currentRatio > targetRatio) {
-        cropW = (sh * targetRatio).round();
-      } else {
-        cropH = (sw / targetRatio).round();
-      }
-    }
-
-    cropW = max(1, min(sw, cropW));
-    cropH = max(1, min(sh, cropH));
-
-    final int offsetX = ((sw - cropW) / 2.0).floor();
-    final int offsetY = ((sh - cropH) / 2.0).floor();
-
-    img.Image cropped = img.copyCrop(
-      oriented,
-      x: offsetX,
-      y: offsetY,
-      width: cropW,
-      height: cropH,
+    return compute(
+      _processCropResizeIsolate,
+      _CropResizeRequest(
+        bytes: bytes,
+        ratio: ratio,
+        qualityHeight: qualityHeight,
+      ),
     );
-
-    final int baseRef = min(cropped.width, cropped.height);
-    if (baseRef > 0 && qualityHeight > 0 && baseRef > qualityHeight) {
-      final double scaleFactor = qualityHeight / baseRef;
-      final int outW = max(1, (cropped.width * scaleFactor).round());
-      final int outH = max(1, (cropped.height * scaleFactor).round());
-      cropped = img.copyResize(
-        cropped,
-        width: outW,
-        height: outH,
-        interpolation: img.Interpolation.linear,
-      );
-    }
-
-    return Uint8List.fromList(img.encodeJpg(cropped, quality: 92));
   }
 
   Future<void> _onShutterPressed() async {
@@ -2979,7 +3162,7 @@ class _CameraScreenState extends State<CameraScreen>
       await Gal.putImage(tempRawPath);
       savedCount++;
 
-      await Future.delayed(const Duration(milliseconds: 200));
+      await Future.delayed(const Duration(milliseconds: 120));
 
       await Gal.putImage(tempStampedPath);
       savedCount++;
@@ -3550,12 +3733,12 @@ class _CameraScreenState extends State<CameraScreen>
               onChanged: (val) {
                 setState(() => _showCoords = val);
                 unawaited(_persistCurrentSettings());
-                if (val) _getLocation(requestIfDenied: true);
+                if (val) unawaited(_getLocation(requestIfDenied: true));
               },
               onTapContent: () {
                 setState(() => _showCoords = true);
                 unawaited(_persistCurrentSettings());
-                _getLocation(requestIfDenied: true);
+                unawaited(_getLocation(requestIfDenied: true));
               },
             ),
             _WatermarkRowTile(
@@ -3736,8 +3919,8 @@ class _CameraScreenState extends State<CameraScreen>
     final ctrl = _controller;
     _controller = null;
     if (ctrl != null) {
-      unawaited(ctrl.setFlashMode(FlashMode.off));
-      ctrl.dispose();
+      unawaited(_forceTorchOff(controllerOverride: ctrl));
+      unawaited(ctrl.dispose());
     }
     unawaited(_ShutterAudioService.dispose());
     super.dispose();
@@ -3918,7 +4101,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _visibleCount = min(_initialVisibleCount, _entries.length);
       _isLoading = false;
     } else {
-      _loadAllPhotos();
+      unawaited(_loadAllPhotos());
     }
   }
 
@@ -4229,7 +4412,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   Future<void> _ensureMediaPermissions() async {
     if (!Platform.isAndroid) return;
     try {
-      await _mediaStoreChannel.invokeMethod('requestMediaPermissions');
+      await _mediaStoreChannel.invokeMethod('requestMediaPermissions').timeout(
+            const Duration(seconds: 5),
+          );
     } catch (e) {
       debugPrint('requestMediaPermissions belum tersedia/gagal: $e');
     }
@@ -4239,7 +4424,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!Platform.isAndroid) return const [];
     try {
       final List<dynamic>? rawList =
-          await _mediaStoreChannel.invokeMethod<List<dynamic>>('getAllImages');
+          await _mediaStoreChannel.invokeMethod<List<dynamic>>(
+        'getAllImages',
+      ).timeout(const Duration(seconds: 6));
       if (rawList == null || rawList.isEmpty) return const [];
 
       final List<_MediaEntry> results = [];
@@ -4316,22 +4503,20 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Future<void> _hydrateModifiedDates(List<_MediaEntry> rawList) async {
-    const int chunkSize = 80;
+    const int chunkSize = 40;
     for (int i = 0; i < rawList.length; i += chunkSize) {
       if (!mounted) return;
       final int end = min(rawList.length, i + chunkSize);
       for (int j = i; j < end; j++) {
         try {
-          final st = rawList[j].file.statSync();
+          final st = await rawList[j].file.stat();
           rawList[j] = _MediaEntry(
             file: rawList[j].file,
             modified: st.modified,
           );
         } catch (_) {}
       }
-      if (i > 0 && i % 240 == 0) {
-        await Future<void>.delayed(Duration.zero);
-      }
+      await Future<void>.delayed(Duration.zero);
     }
   }
 
@@ -4838,8 +5023,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                         if (_selectionMode) {
                                           _toggleSelectPath(file.path);
                                         } else {
-                                          _openPhotoWatermarkEditorAtIndex(
-                                            globalIdx,
+                                          unawaited(
+                                            _openPhotoWatermarkEditorAtIndex(
+                                              globalIdx,
+                                            ),
                                           );
                                         }
                                       },
@@ -5021,17 +5208,23 @@ class _CollageStagePreviewScreenState
     try {
       if (!await file.exists()) return;
       final Uint8List bytes = await file.readAsBytes();
-      final img.Image? decoded = img.decodeImage(bytes);
-      if (decoded == null || decoded.width <= 0 || decoded.height <= 0) return;
-      final img.Image oriented = img.bakeOrientation(decoded);
-      if (!mounted) return;
+      final Size? dims = await compute(_decodeDimensionsIsolate, bytes);
+      if (dims == null || dims.width <= 0 || dims.height <= 0 || !mounted) {
+        return;
+      }
       setState(() {
-        _photoDimsCache[file.path] = Size(
-          oriented.width.toDouble(),
-          oriented.height.toDouble(),
-        );
+        _photoDimsCache[file.path] = dims;
       });
     } catch (_) {}
+  }
+
+  static Size? _decodeDimensionsIsolate(Uint8List bytes) {
+    final img.Image? decoded = img.decodeImage(bytes);
+    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+      return null;
+    }
+    final img.Image oriented = img.bakeOrientation(decoded);
+    return Size(oriented.width.toDouble(), oriented.height.toDouble());
   }
 
   Offset _panForSlot(int index) {
@@ -5218,67 +5411,24 @@ class _CollageStagePreviewScreenState
     return 2048;
   }
 
-  img.Image? _loadCroppedSlotImage({
+  Future<Uint8List?> _loadCroppedSlotBytesAsync({
     required File file,
     required int dstW,
     required int dstH,
     required Offset panNorm,
-  }) {
-    if (!file.existsSync()) return null;
-    final Uint8List bytes = file.readAsBytesSync();
+  }) async {
+    if (!await file.exists()) return null;
+    final Uint8List bytes = await file.readAsBytes();
     if (bytes.isEmpty) return null;
-
-    final img.Image? decoded = img.decodeImage(bytes);
-    if (decoded == null || decoded.width <= 1 || decoded.height <= 1) {
-      return null;
-    }
-
-    final img.Image oriented = img.bakeOrientation(decoded);
-    final int sw = oriented.width;
-    final int sh = oriented.height;
-
-    final double targetRatio = dstW / max(1, dstH);
-    final double srcRatio = sw / max(1, sh);
-
-    int cropW = sw;
-    int cropH = sh;
-    if ((srcRatio - targetRatio).abs() > 0.005) {
-      if (srcRatio > targetRatio) {
-        cropW = max(1, (sh * targetRatio).round());
-      } else {
-        cropH = max(1, (sw / targetRatio).round());
-      }
-    }
-
-    cropW = min(sw, max(1, cropW));
-    cropH = min(sh, max(1, cropH));
-
-    final double halfRangeX = max(0.0, (sw - cropW) / 2.0);
-    final double halfRangeY = max(0.0, (sh - cropH) / 2.0);
-
-    final double centerX = (sw / 2.0) - (panNorm.dx.clamp(-1.0, 1.0) * halfRangeX);
-    final double centerY = (sh / 2.0) - (panNorm.dy.clamp(-1.0, 1.0) * halfRangeY);
-
-    final int cropX = (centerX - (cropW / 2.0))
-        .round()
-        .clamp(0, max(0, sw - cropW));
-    final int cropY = (centerY - (cropH / 2.0))
-        .round()
-        .clamp(0, max(0, sh - cropH));
-
-    final img.Image cropped = img.copyCrop(
-      oriented,
-      x: cropX,
-      y: cropY,
-      width: min(sw - cropX, cropW),
-      height: min(sh - cropY, cropH),
-    );
-
-    return img.copyResize(
-      cropped,
-      width: max(1, dstW),
-      height: max(1, dstH),
-      interpolation: img.Interpolation.linear,
+    return compute(
+      _processSlotCropIsolate,
+      _SlotCropRequest(
+        bytes: bytes,
+        dstW: dstW,
+        dstH: dstH,
+        panX: panNorm.dx,
+        panY: panNorm.dy,
+      ),
     );
   }
 
@@ -5336,19 +5486,22 @@ class _CollageStagePreviewScreenState
         final int dw = max(1, r.w.round());
         final int dh = max(1, r.h.round());
 
-        final img.Image? tile = _loadCroppedSlotImage(
+        final Uint8List? tileBytes = await _loadCroppedSlotBytesAsync(
           file: activeFiles[i],
           dstW: dw,
           dstH: dh,
           panNorm: _panForSlot(i),
         );
-        if (tile != null) {
-          img.compositeImage(
-            canvasImg,
-            tile,
-            dstX: dx,
-            dstY: dy,
-          );
+        if (tileBytes != null) {
+          final img.Image? tile = img.decodeImage(tileBytes);
+          if (tile != null) {
+            img.compositeImage(
+              canvasImg,
+              tile,
+              dstX: dx,
+              dstY: dy,
+            );
+          }
         }
         await Future<void>.delayed(Duration.zero);
       }
@@ -5763,7 +5916,7 @@ class _GalleryWatermarkEditorScreenState
     _pageController = PageController(initialPage: _currentIndex);
     _stampVisible = false;
     if (_files.isNotEmpty) {
-      _resolvePhotoAspectRatio(_files[_currentIndex]);
+      unawaited(_resolvePhotoAspectRatio(_files[_currentIndex]));
     }
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
@@ -5866,13 +6019,21 @@ class _GalleryWatermarkEditorScreenState
 
     try {
       final bytes = await file.readAsBytes();
-      final decoded = img.decodeImage(bytes);
+      final decoded = await compute(_decodeDimensionsIsolate, bytes);
       if (decoded != null && decoded.width > 0 && decoded.height > 0) {
-        final oriented = img.bakeOrientation(decoded);
-        return Size(oriented.width.toDouble(), oriented.height.toDouble());
+        return decoded;
       }
     } catch (_) {}
     return null;
+  }
+
+  static Size? _decodeDimensionsIsolate(Uint8List bytes) {
+    final img.Image? decoded = img.decodeImage(bytes);
+    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+      return null;
+    }
+    final img.Image oriented = img.bakeOrientation(decoded);
+    return Size(oriented.width.toDouble(), oriented.height.toDouble());
   }
 
   @override
@@ -6001,6 +6162,9 @@ class _GalleryWatermarkEditorScreenState
   }
 
   Future<void> _pickSizeDialog() async {
+    StampFormSize tempSize = _cfg.formSize;
+    StampTextColor tempColor = _cfg.textColor;
+
     await showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -6015,36 +6179,28 @@ class _GalleryWatermarkEditorScreenState
                   'Ukuran Form',
                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                 ),
-                RadioListTile<StampFormSize>(
-                  title: const Text('Kecil'),
-                  value: StampFormSize.small,
-                  groupValue: _cfg.formSize,
-                  onChanged: (val) {
-                    if (val == null) return;
-                    _updateCfg(_cfg.copyWith(formSize: val));
-                    setDialogState(() {});
-                  },
-                ),
-                RadioListTile<StampFormSize>(
-                  title: const Text('Sedang'),
-                  value: StampFormSize.medium,
-                  groupValue: _cfg.formSize,
-                  onChanged: (val) {
-                    if (val == null) return;
-                    _updateCfg(_cfg.copyWith(formSize: val));
-                    setDialogState(() {});
-                  },
-                ),
-                RadioListTile<StampFormSize>(
-                  title: const Text('Besar'),
-                  value: StampFormSize.large,
-                  groupValue: _cfg.formSize,
-                  onChanged: (val) {
-                    if (val == null) return;
-                    _updateCfg(_cfg.copyWith(formSize: val));
-                    setDialogState(() {});
-                  },
-                ),
+                for (final item in const [
+                  (StampFormSize.small, 'Kecil'),
+                  (StampFormSize.medium, 'Sedang'),
+                  (StampFormSize.large, 'Besar'),
+                ])
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      tempSize == item.$1
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      color: tempSize == item.$1
+                          ? const Color(0xFFFFD000)
+                          : Colors.white60,
+                    ),
+                    title: Text(item.$2),
+                    onTap: () {
+                      tempSize = item.$1;
+                      _updateCfg(_cfg.copyWith(formSize: item.$1));
+                      setDialogState(() {});
+                    },
+                  ),
                 const SizedBox(height: 8),
                 const Text(
                   'Warna Dasar Tulisan',
@@ -6055,7 +6211,7 @@ class _GalleryWatermarkEditorScreenState
                   spacing: 8,
                   runSpacing: 8,
                   children: StampTextColor.values.map((c) {
-                    final bool isSelected = _cfg.textColor == c;
+                    final bool isSelected = tempColor == c;
                     return ChoiceChip(
                       selected: isSelected,
                       avatar: CircleAvatar(
@@ -6064,6 +6220,7 @@ class _GalleryWatermarkEditorScreenState
                       ),
                       label: Text(_StampRenderer.colorLabel(c)),
                       onSelected: (_) {
+                        tempColor = c;
                         _updateCfg(_cfg.copyWith(textColor: c));
                         setDialogState(() {});
                       },
@@ -6072,7 +6229,7 @@ class _GalleryWatermarkEditorScreenState
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  _cfg.textColor == StampTextColor.black
+                  tempColor == StampTextColor.black
                       ? 'Shadow aktif: Putih (karena teks Hitam)'
                       : 'Shadow aktif: Hitam',
                   style: const TextStyle(fontSize: 12, color: Colors.white70),
@@ -6152,7 +6309,7 @@ class _GalleryWatermarkEditorScreenState
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_pageController.hasClients) return;
       _pageController.jumpToPage(nextIdx);
-      _resolvePhotoAspectRatio(nextFiles[nextIdx]);
+      unawaited(_resolvePhotoAspectRatio(nextFiles[nextIdx]));
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -6502,7 +6659,7 @@ class _GalleryWatermarkEditorScreenState
                         itemCount: _files.length,
                         onPageChanged: (idx) {
                           setState(() => _currentIndex = idx);
-                          _resolvePhotoAspectRatio(_files[idx]);
+                          unawaited(_resolvePhotoAspectRatio(_files[idx]));
                         },
                         itemBuilder: (context, idx) {
                           final File itemFile = _files[idx];

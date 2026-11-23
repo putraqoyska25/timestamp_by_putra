@@ -668,6 +668,18 @@ class _NativeBrightnessService {
       MethodChannel('timestamp_by_putra/screen_brightness');
   static bool _isBoosted = false;
 
+  static Future<void> setKeepScreenOn(bool enabled) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod(
+        'setKeepScreenOn',
+        {'enabled': enabled},
+      ).timeout(const Duration(seconds: 2));
+    } catch (e) {
+      debugPrint('Gagal mengatur keep screen on native: $e');
+    }
+  }
+
   static Future<void> boostToMax() async {
     if (!Platform.isAndroid) return;
     try {
@@ -2216,6 +2228,7 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_NativeBrightnessService.setKeepScreenOn(true));
     unawaited(_bootstrapStartupSequence());
     _startClockTimer();
   }
@@ -2310,6 +2323,7 @@ class _CameraScreenState extends State<CameraScreen>
       _shutterBlinkActive = false;
       _showFocusRing = false;
       _isDraggingExposure = false;
+      unawaited(_NativeBrightnessService.setKeepScreenOn(false));
       unawaited(_NativeBrightnessService.restoreNormal());
       unawaited(_forceTorchOff(controllerOverride: _controller));
       if (mounted &&
@@ -2328,6 +2342,7 @@ class _CameraScreenState extends State<CameraScreen>
     } else if (state == AppLifecycleState.resumed) {
       final bool wasPaused = _isPausedBackground;
       _isPausedBackground = false;
+      unawaited(_NativeBrightnessService.setKeepScreenOn(true));
       if (!wasPaused &&
           _controller != null &&
           _controller!.value.isInitialized) {
@@ -4012,6 +4027,7 @@ class _CameraScreenState extends State<CameraScreen>
     _cooldownTimer?.cancel();
     _shutterBlinkTimer?.cancel();
     _focusRingTimer?.cancel();
+    unawaited(_NativeBrightnessService.setKeepScreenOn(false));
     unawaited(_NativeBrightnessService.restoreNormal());
     final ctrl = _controller;
     _controller = null;

@@ -3395,9 +3395,11 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 }
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
-  static const int _maxFilesScan = 8000;
-  static const int _initialVisibleCount = 60;
-  static const int _pageBatchSize = 60;
+  static const int _maxFilesScan = 6000;
+  static const int _initialVisibleCount = 45;
+  static const int _pageBatchSize = 45;
+  static const int _minCollagePhotos = 2;
+  static const int _maxCollagePhotos = 6;
   static const double _headerHeight = 42.0;
   static const double _gridSpacing = 3.0;
   static const double _gridHorizontalPadding = 4.0;
@@ -3443,8 +3445,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   int _visibleCount = 0;
   double _cachedViewportWidth = 390.0;
 
-  bool _selectionMode = false;
-  final Set<String> _selectedPaths = {};
+  bool _trashSelectionMode = false;
+  final Set<String> _selectedTrashPaths = {};
+
+  bool _collageSelectionMode = false;
+  final List<String> _selectedCollagePaths = [];
 
   final ValueNotifier<double> _scrubFractionNotifier =
       ValueNotifier<double>(0.0);
@@ -3491,28 +3496,96 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  void _toggleSelectionMode() {
+  void _toggleTrashSelectionMode() {
     setState(() {
-      _selectionMode = !_selectionMode;
-      if (!_selectionMode) {
-        _selectedPaths.clear();
+      _trashSelectionMode = !_trashSelectionMode;
+      if (_trashSelectionMode) {
+        _collageSelectionMode = false;
+        _selectedCollagePaths.clear();
+      } else {
+        _selectedTrashPaths.clear();
       }
     });
   }
 
-  void _toggleSelectPath(String path) {
+  void _toggleCollageSelectionMode() {
     setState(() {
-      if (_selectedPaths.contains(path)) {
-        _selectedPaths.remove(path);
+      _collageSelectionMode = !_collageSelectionMode;
+      if (_collageSelectionMode) {
+        _trashSelectionMode = false;
+        _selectedTrashPaths.clear();
       } else {
-        _selectedPaths.add(path);
+        _selectedCollagePaths.clear();
       }
     });
+  }
+
+  void _toggleSelectTrashPath(String path) {
+    setState(() {
+      if (_selectedTrashPaths.contains(path)) {
+        _selectedTrashPaths.remove(path);
+      } else {
+        _selectedTrashPaths.add(path);
+      }
+    });
+  }
+
+  void _toggleSelectCollagePath(String path) {
+    final int existingIdx = _selectedCollagePaths.indexOf(path);
+    if (existingIdx != -1) {
+      setState(() => _selectedCollagePaths.removeAt(existingIdx));
+      return;
+    }
+
+    if (_selectedCollagePaths.length >= _maxCollagePhotos) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Maksimal 6 foto untuk kolase'),
+            backgroundColor: Color(0xFF282C36),
+            duration: Duration(milliseconds: 1200),
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() => _selectedCollagePaths.add(path));
+  }
+
+  Future<void> _openCollageStageFromSelection() async {
+    if (_selectedCollagePaths.length < _minCollagePhotos ||
+        _selectedCollagePaths.length > _maxCollagePhotos) {
+      return;
+    }
+    final List<File> chosenFiles =
+        _selectedCollagePaths.map((p) => File(p)).toList();
+
+    final bool? savedNew = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => _CollageStagePreviewScreen(
+          selectedFiles: chosenFiles,
+          initialConfig: _config,
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _collageSelectionMode = false;
+      _selectedCollagePaths.clear();
+    });
+
+    if (savedNew == true) {
+      _LatestPhotosGridScreen.invalidateCache();
+      await _loadAllPhotos(forceRefresh: true);
+    }
   }
 
   Future<void> _deleteSelectedToTrash() async {
-    if (_selectedPaths.isEmpty || _isDeleting) return;
-    final List<String> targets = _selectedPaths.toList();
+    if (_selectedTrashPaths.isEmpty || _isDeleting) return;
+    final List<String> targets = _selectedTrashPaths.toList();
     final bool ok = await _TrashService.confirmMoveToTrash(
       context,
       count: targets.length,
@@ -3527,8 +3600,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!mounted) return;
     setState(() {
       _isDeleting = false;
-      _selectionMode = false;
-      _selectedPaths.clear();
+      _trashSelectionMode = false;
+      _selectedTrashPaths.clear();
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -3661,7 +3734,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       }
       _scheduleScrubberHide();
 
-      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
+      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 400) {
         setState(() {
           _visibleCount = min(total, _visibleCount + _pageBatchSize);
         });
@@ -3693,7 +3766,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final int targetIdx =
         (frac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
     final int neededVisible =
-        min(_entries.length, max(_visibleCount, targetIdx + 30));
+        min(_entries.length, max(_visibleCount, targetIdx + 24));
 
     final double rawTargetOffset =
         _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
@@ -3775,13 +3848,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         seen.add(path);
 
         final File f = File(path);
-        DateTime mod = DateTime.fromMillisecondsSinceEpoch(0);
-        try {
-          if (await f.exists()) {
-            mod = f.statSync().modified;
-          }
-        } catch (_) {}
-        results.add(_MediaEntry(file: f, modified: mod));
+        results.add(
+          _MediaEntry(
+            file: f,
+            modified: DateTime.fromMillisecondsSinceEpoch(0),
+          ),
+        );
       }
       return results;
     } catch (e) {
@@ -3799,10 +3871,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         '/storage/emulated/0/DCIM',
         '/storage/emulated/0/Pictures',
         '/storage/emulated/0/Download',
-        '/storage/emulated/0/Android/media',
-        '/storage/emulated/0/Pictures/Screenshots',
-        '/storage/emulated/0/DCIM/Screenshots',
-        '/storage/emulated/0/Pictures/WhatsApp',
       ]) {
         final d = Directory(p);
         if (await d.exists()) candidateDirs.add(d);
@@ -3812,7 +3880,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final Set<String> visitedPaths = {};
 
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
-      if (depth > 4 || allEntries.length >= _maxFilesScan) return;
+      if (depth > 3 || allEntries.length >= _maxFilesScan) return;
       try {
         await for (final entity in dir.list(followLinks: false)) {
           if (allEntries.length >= _maxFilesScan) break;
@@ -3825,11 +3893,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             if (baseName.startsWith('.')) continue;
             await scanDir(entity, depth: depth + 1);
           } else if (entity is File && _isPhotoFile(path)) {
-            DateTime mod = DateTime.fromMillisecondsSinceEpoch(0);
-            try {
-              mod = entity.statSync().modified;
-            } catch (_) {}
-            allEntries.add(_MediaEntry(file: entity, modified: mod));
+            allEntries.add(
+              _MediaEntry(
+                file: entity,
+                modified: DateTime.fromMillisecondsSinceEpoch(0),
+              ),
+            );
           }
         }
       } catch (_) {}
@@ -3839,6 +3908,26 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       await scanDir(d);
     }
     return allEntries;
+  }
+
+  Future<void> _hydrateModifiedDates(List<_MediaEntry> rawList) async {
+    const int chunkSize = 80;
+    for (int i = 0; i < rawList.length; i += chunkSize) {
+      if (!mounted) return;
+      final int end = min(rawList.length, i + chunkSize);
+      for (int j = i; j < end; j++) {
+        try {
+          final st = rawList[j].file.statSync();
+          rawList[j] = _MediaEntry(
+            file: rawList[j].file,
+            modified: st.modified,
+          );
+        } catch (_) {}
+      }
+      if (i > 0 && i % 240 == 0) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
   }
 
   Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
@@ -3866,6 +3955,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       collected = await _scanDirectoriesFallback();
     }
 
+    await _hydrateModifiedDates(collected);
     collected.sort((a, b) => b.modified.compareTo(a.modified));
     _LatestPhotosGridScreen._cachedEntries = collected;
 
@@ -4126,6 +4216,54 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     );
   }
 
+  Widget _buildCollageSelectionBar() {
+    if (!_collageSelectionMode) return const SizedBox.shrink();
+    final int count = _selectedCollagePaths.length;
+    final bool canProceed =
+        count >= _minCollagePhotos && count <= _maxCollagePhotos;
+
+    return Container(
+      color: const Color(0xFF14171E),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                count < _minCollagePhotos
+                    ? 'Pilih 2–6 foto ($count/6)'
+                    : 'Terpilih $count dari maks. 6 foto',
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor:
+                    canProceed ? const Color(0xFFFFD000) : Colors.white12,
+                foregroundColor: canProceed ? Colors.black : Colors.white38,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onPressed: canProceed ? _openCollageStageFromSelection : null,
+              child: Text(
+                canProceed ? 'Lanjut ($count)' : 'Lanjut',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _hideScrubberTimer?.cancel();
@@ -4147,30 +4285,50 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final sections = _buildVisibleSections(_visibleCount);
     final hasMore = _visibleCount < total;
 
+    String appBarTitle;
+    if (_collageSelectionMode) {
+      appBarTitle = 'Pilih Kolase (${_selectedCollagePaths.length}/6)';
+    } else if (_trashSelectionMode) {
+      appBarTitle = '${_selectedTrashPaths.length} ditandai';
+    } else {
+      appBarTitle = total > 0 ? 'Terbaru ($total)' : 'Terbaru';
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: Text(
-          _selectionMode
-              ? '${_selectedPaths.length} ditandai'
-              : (total > 0 ? 'Terbaru ($total)' : 'Terbaru'),
-          style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+          appBarTitle,
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
         ),
         actions: [
-          if (_selectionMode && _selectedPaths.isNotEmpty)
+          if (_trashSelectionMode && _selectedTrashPaths.isNotEmpty)
             IconButton(
               onPressed: _isDeleting ? null : _deleteSelectedToTrash,
               icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
               tooltip: 'Pindahkan ke Sampah',
             ),
-          if (total > 0)
+          if (!_trashSelectionMode && total >= _minCollagePhotos)
             TextButton(
-              onPressed: _isDeleting ? null : _toggleSelectionMode,
+              onPressed: _isDeleting ? null : _toggleCollageSelectionMode,
               child: Text(
-                _selectionMode ? 'Batal' : 'Tandai',
+                _collageSelectionMode ? 'Batal' : 'Kolase',
                 style: TextStyle(
-                  color: _selectionMode
+                  color: _collageSelectionMode
+                      ? const Color(0xFFFFD000)
+                      : Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          if (!_collageSelectionMode && total > 0)
+            TextButton(
+              onPressed: _isDeleting ? null : _toggleTrashSelectionMode,
+              child: Text(
+                _trashSelectionMode ? 'Batal' : 'Tandai',
+                style: TextStyle(
+                  color: _trashSelectionMode
                       ? const Color(0xFFFFD000)
                       : Colors.white,
                   fontWeight: FontWeight.w600,
@@ -4179,8 +4337,14 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             ),
         ],
       ),
+      bottomNavigationBar: _buildCollageSelectionBar(),
       body: _isLoading
-          ? const SizedBox.shrink()
+          ? const Center(
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: Color(0xFFFFD000),
+              ),
+            )
           : total == 0
               ? Center(
                   child: Padding(
@@ -4214,7 +4378,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 500,
+                        cacheExtent: 360,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(
@@ -4252,19 +4416,32 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                     final File file = sec.entries[idx].file;
                                     final int globalIdx =
                                         sec.startGlobalIndex + idx;
-                                    final bool isChecked =
-                                        _selectedPaths.contains(file.path);
+                                    final int collageOrder = _collageSelectionMode
+                                        ? (_selectedCollagePaths
+                                                .indexOf(file.path) +
+                                            1)
+                                        : 0;
+                                    final bool isChecked = _collageSelectionMode
+                                        ? collageOrder > 0
+                                        : _selectedTrashPaths
+                                            .contains(file.path);
 
                                     return GestureDetector(
                                       onLongPress: () {
-                                        setState(() {
-                                          _selectionMode = true;
-                                          _selectedPaths.add(file.path);
-                                        });
+                                        if (_collageSelectionMode) {
+                                          _toggleSelectCollagePath(file.path);
+                                        } else {
+                                          setState(() {
+                                            _trashSelectionMode = true;
+                                            _selectedTrashPaths.add(file.path);
+                                          });
+                                        }
                                       },
                                       onTap: () {
-                                        if (_selectionMode) {
-                                          _toggleSelectPath(file.path);
+                                        if (_collageSelectionMode) {
+                                          _toggleSelectCollagePath(file.path);
+                                        } else if (_trashSelectionMode) {
+                                          _toggleSelectTrashPath(file.path);
                                         } else {
                                           _openPhotoWatermarkEditorAtIndex(
                                             globalIdx,
@@ -4294,9 +4471,50 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                             if (isChecked)
                                               Container(
                                                 color: Colors.black
-                                                    .withValues(alpha: 0.32),
+                                                    .withValues(alpha: 0.34),
                                               ),
-                                            if (_selectionMode || isChecked)
+                                            if (_collageSelectionMode)
+                                              Positioned(
+                                                top: 6,
+                                                right: 6,
+                                                child: Container(
+                                                  width: 24,
+                                                  height: 24,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color: isChecked
+                                                        ? const Color(
+                                                            0xFFFFD000,
+                                                          )
+                                                        : Colors.black
+                                                            .withValues(
+                                                              alpha: 0.45,
+                                                            ),
+                                                    border: Border.all(
+                                                      color: Colors.white,
+                                                      width: 1.5,
+                                                    ),
+                                                  ),
+                                                  child: isChecked
+                                                      ? Center(
+                                                          child: Text(
+                                                            '$collageOrder',
+                                                            style:
+                                                                const TextStyle(
+                                                              color:
+                                                                  Colors.black,
+                                                              fontSize: 12,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .w800,
+                                                            ),
+                                                          ),
+                                                        )
+                                                      : null,
+                                                ),
+                                              )
+                                            else if (_trashSelectionMode ||
+                                                isChecked)
                                               Positioned(
                                                 top: 6,
                                                 right: 6,
@@ -4378,6 +4596,151 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 }
 
+class _CollageStagePreviewScreen extends StatefulWidget {
+  final List<File> selectedFiles;
+  final _WatermarkConfig initialConfig;
+
+  const _CollageStagePreviewScreen({
+    required this.selectedFiles,
+    required this.initialConfig,
+  });
+
+  @override
+  State<_CollageStagePreviewScreen> createState() =>
+      _CollageStagePreviewScreenState();
+}
+
+class _CollageStagePreviewScreenState
+    extends State<_CollageStagePreviewScreen> {
+  late List<File> _photos;
+
+  @override
+  void initState() {
+    super.initState();
+    _photos = List<File>.from(widget.selectedFiles);
+  }
+
+  Future<void> _confirmCancel() async {
+    final bool? discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1D24),
+        title: const Text('Batalkan kolase?'),
+        content: const Text(
+          'Pilihan foto kolase saat ini akan dibuang dan kembali ke album.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Lanjut mengedit'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFD9383A),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Buang'),
+          ),
+        ],
+      ),
+    );
+    if (discard == true && mounted) {
+      Navigator.of(context).pop(false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        leading: IconButton(
+          icon: const Icon(Icons.close, color: Colors.white),
+          tooltip: 'Batal',
+          onPressed: _confirmCancel,
+        ),
+        title: Text(
+          'Kolase (${_photos.length} foto)',
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+        ),
+        actions: [
+          TextButton(
+            onPressed: null,
+            child: const Text(
+              'Simpan',
+              style: TextStyle(color: Colors.white38, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: GridView.builder(
+                padding: const EdgeInsets.all(12),
+                itemCount: _photos.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 8,
+                ),
+                itemBuilder: (ctx, idx) {
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.file(
+                          _photos[idx],
+                          cacheWidth: 320,
+                          fit: BoxFit.cover,
+                        ),
+                        Positioned(
+                          top: 6,
+                          left: 6,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.7),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${idx + 1}',
+                              style: const TextStyle(
+                                color: Color(0xFFFFD000),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 14),
+              child: Text(
+                'Tahap 1 selesai: seleksi 2–6 foto terhubung. Langkah berikutnya: 10 pola kolase, kontrol +/-, serta ekspor HD proporsional.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white60, fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _GalleryWatermarkEditorScreen extends StatefulWidget {
   final List<File> photoFiles;
   final int initialIndex;
@@ -4443,15 +4806,89 @@ class _GalleryWatermarkEditorScreenState
     if (_aspectRatioCache.containsKey(file.path)) return;
     try {
       if (!await file.exists()) return;
-      final bytes = await file.readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null || decoded.width <= 0 || decoded.height <= 0) return;
-      final oriented = img.bakeOrientation(decoded);
+      final size = await _readImageDimensionsFast(file);
+      if (size == null || size.width <= 0 || size.height <= 0) return;
       if (!mounted) return;
       setState(() {
-        _aspectRatioCache[file.path] = oriented.width / oriented.height;
+        _aspectRatioCache[file.path] = size.width / size.height;
       });
     } catch (_) {}
+  }
+
+  Future<Size?> _readImageDimensionsFast(File file) async {
+    try {
+      final raf = await file.open(mode: FileMode.read);
+      try {
+        final len = await raf.length();
+        final int readLen = min(len, 65536);
+        final Uint8List head = await raf.read(readLen);
+
+        if (head.length >= 24 &&
+            head[0] == 0x89 &&
+            head[1] == 0x50 &&
+            head[2] == 0x4E &&
+            head[3] == 0x47) {
+          final int w = (head[16] << 24) |
+              (head[17] << 16) |
+              (head[18] << 8) |
+              head[19];
+          final int h = (head[20] << 24) |
+              (head[21] << 16) |
+              (head[22] << 8) |
+              head[23];
+          if (w > 0 && h > 0) {
+            return Size(w.toDouble(), h.toDouble());
+          }
+        }
+
+        if (head.length >= 4 && head[0] == 0xFF && head[1] == 0xD8) {
+          int i = 2;
+          while (i + 9 < head.length) {
+            if (head[i] != 0xFF) {
+              i++;
+              continue;
+            }
+            final int marker = head[i + 1];
+            if (marker == 0xD9 || marker == 0xDA) break;
+            if (marker == 0xC0 ||
+                marker == 0xC1 ||
+                marker == 0xC2 ||
+                marker == 0xC3 ||
+                marker == 0xC5 ||
+                marker == 0xC6 ||
+                marker == 0xC7 ||
+                marker == 0xC9 ||
+                marker == 0xCA ||
+                marker == 0xCB ||
+                marker == 0xCD ||
+                marker == 0xCE ||
+                marker == 0xCF) {
+              final int h = (head[i + 5] << 8) | head[i + 6];
+              final int w = (head[i + 7] << 8) | head[i + 8];
+              if (w > 0 && h > 0) {
+                return Size(w.toDouble(), h.toDouble());
+              }
+            }
+            if (i + 3 >= head.length) break;
+            final int segLen = (head[i + 2] << 8) | head[i + 3];
+            if (segLen < 2) break;
+            i += 2 + segLen;
+          }
+        }
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {}
+
+    try {
+      final bytes = await file.readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded != null && decoded.width > 0 && decoded.height > 0) {
+        final oriented = img.bakeOrientation(decoded);
+        return Size(oriented.width.toDouble(), oriented.height.toDouble());
+      }
+    } catch (_) {}
+    return null;
   }
 
   @override

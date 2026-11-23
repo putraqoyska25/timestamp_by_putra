@@ -51,6 +51,402 @@ enum PhotoAspectRatio { ratio1x1, ratio4x3, ratio16x9 }
 
 enum ImageQualityPreset { p1080, p720, p480, p360 }
 
+enum CollageLayoutId {
+  twoRows,
+  twoCols,
+  threeTopOneBottomTwo,
+  threeRows,
+  fourGrid2x2,
+  fourRows121,
+  fiveRows212,
+  sixGrid2x3,
+  sixHeroLeft2Right3Bottom,
+  sixHeroLeft3Right2Bottom,
+}
+
+class _CollageLayoutDef {
+  final CollageLayoutId id;
+  final int photoCount;
+  final String label;
+  final double aspectRatio;
+
+  const _CollageLayoutDef({
+    required this.id,
+    required this.photoCount,
+    required this.label,
+    required this.aspectRatio,
+  });
+}
+
+class _CollageSlotRect {
+  final int index;
+  final double x;
+  final double y;
+  final double w;
+  final double h;
+
+  const _CollageSlotRect({
+    required this.index,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+  });
+}
+
+class _CollageLayoutCatalog {
+  static const List<_CollageLayoutDef> all = [
+    _CollageLayoutDef(
+      id: CollageLayoutId.twoRows,
+      photoCount: 2,
+      label: '2 Baris',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.twoCols,
+      photoCount: 2,
+      label: '2 Kolom',
+      aspectRatio: 4.0 / 3.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.threeTopOneBottomTwo,
+      photoCount: 3,
+      label: '1 Atas + 2 Bawah',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.threeRows,
+      photoCount: 3,
+      label: '3 Baris',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.fourGrid2x2,
+      photoCount: 4,
+      label: 'Grid 2x2',
+      aspectRatio: 1.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.fourRows121,
+      photoCount: 4,
+      label: '1 Atas + 2 Tengah + 1 Bawah',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.fiveRows212,
+      photoCount: 5,
+      label: '2 Atas + 1 Tengah + 2 Bawah',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.sixGrid2x3,
+      photoCount: 6,
+      label: 'Grid 2x3',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.sixHeroLeft2Right3Bottom,
+      photoCount: 6,
+      label: '1 Besar Kiri + 2 Kanan + 3 Bawah',
+      aspectRatio: 3.0 / 4.0,
+    ),
+    _CollageLayoutDef(
+      id: CollageLayoutId.sixHeroLeft3Right2Bottom,
+      photoCount: 6,
+      label: '1 Besar Kiri + 3 Kanan + 2 Bawah',
+      aspectRatio: 3.0 / 4.0,
+    ),
+  ];
+
+  static List<_CollageLayoutDef> layoutsForCount(int count) {
+    return all.where((d) => d.photoCount == count).toList();
+  }
+
+  static _CollageLayoutDef defaultForCount(int count) {
+    final list = layoutsForCount(count);
+    return list.isNotEmpty ? list.first : all.first;
+  }
+
+  static _CollageLayoutDef findById(CollageLayoutId id) {
+    for (final d in all) {
+      if (d.id == id) return d;
+    }
+    return all.first;
+  }
+
+  static List<_CollageSlotRect> computeSlots({
+    required CollageLayoutId layoutId,
+    required double canvasW,
+    required double canvasH,
+    required double gap,
+    required double outerPadding,
+  }) {
+    final double innerW = max(10.0, canvasW - (outerPadding * 2.0));
+    final double innerH = max(10.0, canvasH - (outerPadding * 2.0));
+    final double left = outerPadding;
+    final double top = outerPadding;
+
+    switch (layoutId) {
+      case CollageLayoutId.twoRows:
+        final double rowH = max(4.0, (innerH - gap) / 2.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: innerW, h: rowH),
+          _CollageSlotRect(
+            index: 1,
+            x: left,
+            y: top + rowH + gap,
+            w: innerW,
+            h: rowH,
+          ),
+        ];
+
+      case CollageLayoutId.twoCols:
+        final double colW = max(4.0, (innerW - gap) / 2.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: colW, h: innerH),
+          _CollageSlotRect(
+            index: 1,
+            x: left + colW + gap,
+            y: top,
+            w: colW,
+            h: innerH,
+          ),
+        ];
+
+      case CollageLayoutId.threeTopOneBottomTwo:
+        final double topH = max(4.0, (innerH - gap) * 0.52);
+        final double botH = max(4.0, innerH - gap - topH);
+        final double botW = max(4.0, (innerW - gap) / 2.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: innerW, h: topH),
+          _CollageSlotRect(
+            index: 1,
+            x: left,
+            y: top + topH + gap,
+            w: botW,
+            h: botH,
+          ),
+          _CollageSlotRect(
+            index: 2,
+            x: left + botW + gap,
+            y: top + topH + gap,
+            w: botW,
+            h: botH,
+          ),
+        ];
+
+      case CollageLayoutId.threeRows:
+        final double rowH = max(4.0, (innerH - (gap * 2.0)) / 3.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: innerW, h: rowH),
+          _CollageSlotRect(
+            index: 1,
+            x: left,
+            y: top + rowH + gap,
+            w: innerW,
+            h: rowH,
+          ),
+          _CollageSlotRect(
+            index: 2,
+            x: left,
+            y: top + ((rowH + gap) * 2.0),
+            w: innerW,
+            h: rowH,
+          ),
+        ];
+
+      case CollageLayoutId.fourGrid2x2:
+        final double colW = max(4.0, (innerW - gap) / 2.0);
+        final double rowH = max(4.0, (innerH - gap) / 2.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: colW, h: rowH),
+          _CollageSlotRect(
+            index: 1,
+            x: left + colW + gap,
+            y: top,
+            w: colW,
+            h: rowH,
+          ),
+          _CollageSlotRect(
+            index: 2,
+            x: left,
+            y: top + rowH + gap,
+            w: colW,
+            h: rowH,
+          ),
+          _CollageSlotRect(
+            index: 3,
+            x: left + colW + gap,
+            y: top + rowH + gap,
+            w: colW,
+            h: rowH,
+          ),
+        ];
+
+      case CollageLayoutId.fourRows121:
+        final double topH = max(4.0, (innerH - (gap * 2.0)) * 0.28);
+        final double midH = max(4.0, (innerH - (gap * 2.0)) * 0.44);
+        final double botH = max(4.0, innerH - (gap * 2.0) - topH - midH);
+        final double midW = max(4.0, (innerW - gap) / 2.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: innerW, h: topH),
+          _CollageSlotRect(
+            index: 1,
+            x: left,
+            y: top + topH + gap,
+            w: midW,
+            h: midH,
+          ),
+          _CollageSlotRect(
+            index: 2,
+            x: left + midW + gap,
+            y: top + topH + gap,
+            w: midW,
+            h: midH,
+          ),
+          _CollageSlotRect(
+            index: 3,
+            x: left,
+            y: top + topH + gap + midH + gap,
+            w: innerW,
+            h: botH,
+          ),
+        ];
+
+      case CollageLayoutId.fiveRows212:
+        final double topH = max(4.0, (innerH - (gap * 2.0)) * 0.34);
+        final double midH = max(4.0, (innerH - (gap * 2.0)) * 0.32);
+        final double botH = max(4.0, innerH - (gap * 2.0) - topH - midH);
+        final double topW = max(4.0, (innerW - gap) / 2.0);
+        final double botW = max(4.0, (innerW - gap) / 2.0);
+        return [
+          _CollageSlotRect(index: 0, x: left, y: top, w: topW, h: topH),
+          _CollageSlotRect(
+            index: 1,
+            x: left + topW + gap,
+            y: top,
+            w: topW,
+            h: topH,
+          ),
+          _CollageSlotRect(
+            index: 2,
+            x: left,
+            y: top + topH + gap,
+            w: innerW,
+            h: midH,
+          ),
+          _CollageSlotRect(
+            index: 3,
+            x: left,
+            y: top + topH + gap + midH + gap,
+            w: botW,
+            h: botH,
+          ),
+          _CollageSlotRect(
+            index: 4,
+            x: left + botW + gap,
+            y: top + topH + gap + midH + gap,
+            w: botW,
+            h: botH,
+          ),
+        ];
+
+      case CollageLayoutId.sixGrid2x3:
+        final double colW = max(4.0, (innerW - gap) / 2.0);
+        final double rowH = max(4.0, (innerH - (gap * 2.0)) / 3.0);
+        return [
+          for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 2; c++)
+              _CollageSlotRect(
+                index: (r * 2) + c,
+                x: left + (c * (colW + gap)),
+                y: top + (r * (rowH + gap)),
+                w: colW,
+                h: rowH,
+              ),
+        ];
+
+      case CollageLayoutId.sixHeroLeft2Right3Bottom:
+        final double upperH = max(4.0, (innerH - gap) * 0.66);
+        final double botH = max(4.0, innerH - gap - upperH);
+        final double leftHeroW = max(4.0, (innerW - gap) * 0.56);
+        final double rightColW = max(4.0, innerW - gap - leftHeroW);
+        final double rightItemH = max(4.0, (upperH - gap) / 2.0);
+        final double botItemW = max(4.0, (innerW - (gap * 2.0)) / 3.0);
+        return [
+          _CollageSlotRect(
+            index: 0,
+            x: left,
+            y: top,
+            w: leftHeroW,
+            h: upperH,
+          ),
+          _CollageSlotRect(
+            index: 1,
+            x: left + leftHeroW + gap,
+            y: top,
+            w: rightColW,
+            h: rightItemH,
+          ),
+          _CollageSlotRect(
+            index: 2,
+            x: left + leftHeroW + gap,
+            y: top + rightItemH + gap,
+            w: rightColW,
+            h: rightItemH,
+          ),
+          for (int b = 0; b < 3; b++)
+            _CollageSlotRect(
+              index: 3 + b,
+              x: left + (b * (botItemW + gap)),
+              y: top + upperH + gap,
+              w: botItemW,
+              h: botH,
+            ),
+        ];
+
+      case CollageLayoutId.sixHeroLeft3Right2Bottom:
+        final double upperH = max(4.0, (innerH - gap) * 0.68);
+        final double botH = max(4.0, innerH - gap - upperH);
+        final double leftHeroW = max(4.0, (innerW - gap) * 0.54);
+        final double rightColW = max(4.0, innerW - gap - leftHeroW);
+        final double rightItemH = max(4.0, (upperH - (gap * 2.0)) / 3.0);
+        final double botItemW = max(4.0, (innerW - gap) / 2.0);
+        return [
+          _CollageSlotRect(
+            index: 0,
+            x: left,
+            y: top,
+            w: leftHeroW,
+            h: upperH,
+          ),
+          for (int r = 0; r < 3; r++)
+            _CollageSlotRect(
+              index: 1 + r,
+              x: left + leftHeroW + gap,
+              y: top + (r * (rightItemH + gap)),
+              w: rightColW,
+              h: rightItemH,
+            ),
+          _CollageSlotRect(
+            index: 4,
+            x: left,
+            y: top + upperH + gap,
+            w: botItemW,
+            h: botH,
+          ),
+          _CollageSlotRect(
+            index: 5,
+            x: left + botItemW + gap,
+            y: top + upperH + gap,
+            w: botItemW,
+            h: botH,
+          ),
+        ];
+    }
+  }
+}
+
 class _NativeBrightnessService {
   static const MethodChannel _channel =
       MethodChannel('timestamp_by_putra/screen_brightness');
@@ -2882,7 +3278,7 @@ class _CameraScreenState extends State<CameraScreen>
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
-            const SizedBox(height: 12),
+            const SizedBox.height(12),
             FilledButton.icon(
               onPressed: () => _initCameraByDirection(
                 CameraLensDirection.back,
@@ -4612,22 +5008,101 @@ class _CollageStagePreviewScreen extends StatefulWidget {
 
 class _CollageStagePreviewScreenState
     extends State<_CollageStagePreviewScreen> {
-  late List<File> _photos;
+  static const int _minSlots = 2;
+  static const int _maxSlots = 6;
+  static const double _previewGap = 4.0;
+  static const double _previewOuterPad = 4.0;
+
+  final ImagePicker _picker = ImagePicker();
+  final Random _rng = Random();
+
+  late int _slotCount;
+  late CollageLayoutId _layoutId;
+  late List<File?> _slots;
+  bool _hasDirtyChanges = false;
+  bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
-    _photos = List<File>.from(widget.selectedFiles);
+    final List<File> initial = widget.selectedFiles.take(_maxSlots).toList();
+    _slotCount = initial.length.clamp(_minSlots, _maxSlots);
+    _layoutId = _CollageLayoutCatalog.defaultForCount(_slotCount).id;
+    _slots = List<File?>.generate(
+      _slotCount,
+      (i) => i < initial.length ? initial[i] : null,
+    );
   }
 
-  Future<void> _confirmCancel() async {
+  void _changeSlotCount(int delta) {
+    if (_isSaving) return;
+    final int nextCount = (_slotCount + delta).clamp(_minSlots, _maxSlots);
+    if (nextCount == _slotCount) return;
+
+    final List<File?> nextSlots = List<File?>.filled(nextCount, null);
+    for (int i = 0; i < nextCount; i++) {
+      if (i < _slots.length) {
+        nextSlots[i] = _slots[i];
+      } else if (i < widget.selectedFiles.length) {
+        nextSlots[i] = widget.selectedFiles[i];
+      }
+    }
+
+    final List<_CollageLayoutDef> matchingLayouts =
+        _CollageLayoutCatalog.layoutsForCount(nextCount);
+    final CollageLayoutId nextLayout =
+        matchingLayouts.any((l) => l.id == _layoutId)
+            ? _layoutId
+            : matchingLayouts.first.id;
+
+    setState(() {
+      _slotCount = nextCount;
+      _slots = nextSlots;
+      _layoutId = nextLayout;
+      _hasDirtyChanges = true;
+    });
+  }
+
+  void _selectLayout(CollageLayoutId id) {
+    if (_isSaving || _layoutId == id) return;
+    setState(() {
+      _layoutId = id;
+      _hasDirtyChanges = true;
+    });
+  }
+
+  Future<void> _pickPhotoForSlot(int slotIndex) async {
+    if (_isSaving || slotIndex < 0 || slotIndex >= _slots.length) return;
+    try {
+      final XFile? picked = await _picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 92,
+      );
+      if (picked != null && mounted) {
+        setState(() {
+          _slots[slotIndex] = File(picked.path);
+          _hasDirtyChanges = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Gagal memilih foto slot kolase: $e');
+    }
+  }
+
+  Future<bool> _confirmCancel() async {
+    if (_isSaving) return false;
+    if (!_hasDirtyChanges) {
+      Navigator.of(context).pop(false);
+      return true;
+    }
+
     final bool? discard = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1D24),
         title: const Text('Batalkan kolase?'),
         content: const Text(
-          'Pilihan foto kolase saat ini akan dibuang dan kembali ke album.',
+          'Perubahan kolase saat ini akan dibuang dan kembali ke album.',
         ),
         actions: [
           TextButton(
@@ -4647,94 +5122,451 @@ class _CollageStagePreviewScreenState
     );
     if (discard == true && mounted) {
       Navigator.of(context).pop(false);
+      return true;
+    }
+    return false;
+  }
+
+  int _targetHdCanvasWidth(int count) {
+    if (count <= 3) return 1600;
+    if (count <= 5) return 1800;
+    return 2048;
+  }
+
+  img.Image? _loadCroppedSlotImage({
+    required File file,
+    required int dstW,
+    required int dstH,
+  }) {
+    if (!file.existsSync()) return null;
+    final Uint8List bytes = file.readAsBytesSync();
+    if (bytes.isEmpty) return null;
+
+    final img.Image? decoded = img.decodeImage(bytes);
+    if (decoded == null || decoded.width <= 1 || decoded.height <= 1) {
+      return null;
+    }
+
+    final img.Image oriented = img.bakeOrientation(decoded);
+    final int sw = oriented.width;
+    final int sh = oriented.height;
+
+    final double targetRatio = dstW / max(1, dstH);
+    final double srcRatio = sw / max(1, sh);
+
+    int cropW = sw;
+    int cropH = sh;
+    if ((srcRatio - targetRatio).abs() > 0.005) {
+      if (srcRatio > targetRatio) {
+        cropW = max(1, (sh * targetRatio).round());
+      } else {
+        cropH = max(1, (sw / targetRatio).round());
+      }
+    }
+
+    final int cropX = max(0, ((sw - cropW) / 2.0).floor());
+    final int cropY = max(0, ((sh - cropH) / 2.0).floor());
+
+    final img.Image cropped = img.copyCrop(
+      oriented,
+      x: cropX,
+      y: cropY,
+      width: min(sw - cropX, cropW),
+      height: min(sh - cropY, cropH),
+    );
+
+    return img.copyResize(
+      cropped,
+      width: max(1, dstW),
+      height: max(1, dstH),
+      interpolation: img.Interpolation.linear,
+    );
+  }
+
+  Future<void> _saveHdCollage() async {
+    if (_isSaving) return;
+
+    final List<File> activeFiles =
+        _slots.whereType<File>().take(_slotCount).toList();
+    if (activeFiles.length < _slotCount || _slotCount < _minSlots) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Isi semua slot foto terlebih dahulu sebelum menyimpan'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isSaving = true);
+    String? tempOutPath;
+
+    try {
+      final _CollageLayoutDef layoutDef =
+          _CollageLayoutCatalog.findById(_layoutId);
+      final int canvasW = _targetHdCanvasWidth(_slotCount);
+      final int canvasH = max(
+        600,
+        (canvasW / layoutDef.aspectRatio).round(),
+      );
+
+      final double hdPad = max(6.0, (canvasW * 0.01).roundToDouble());
+      final double hdGap = max(6.0, (canvasW * 0.01).roundToDouble());
+
+      final List<_CollageSlotRect> rects = _CollageLayoutCatalog.computeSlots(
+        layoutId: _layoutId,
+        canvasW: canvasW.toDouble(),
+        canvasH: canvasH.toDouble(),
+        gap: hdGap,
+        outerPadding: hdPad,
+      );
+
+      final img.Image canvasImg = img.Image(
+        width: canvasW,
+        height: canvasH,
+        numChannels: 4,
+      );
+      canvasImg.clear(img.ColorRgba8(18, 21, 28, 255));
+
+      for (int i = 0; i < rects.length && i < activeFiles.length; i++) {
+        final _CollageSlotRect r = rects[i];
+        final int dx = r.x.round();
+        final int dy = r.y.round();
+        final int dw = max(1, r.w.round());
+        final int dh = max(1, r.h.round());
+
+        final img.Image? tile = _loadCroppedSlotImage(
+          file: activeFiles[i],
+          dstW: dw,
+          dstH: dh,
+        );
+        if (tile != null) {
+          img.compositeImage(
+            canvasImg,
+            tile,
+            dstX: dx,
+            dstY: dy,
+          );
+        }
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      final Uint8List jpgBytes =
+          Uint8List.fromList(img.encodeJpg(canvasImg, quality: 92));
+
+      final Directory tempDir = await getTemporaryDirectory();
+      final String stampId =
+          '${DateTime.now().millisecondsSinceEpoch}_${_rng.nextInt(9999)}';
+      tempOutPath = '${tempDir.path}/collage_hd_$stampId.jpg';
+      await File(tempOutPath).writeAsBytes(jpgBytes, flush: true);
+
+      await Gal.putImage(tempOutPath);
+      _LatestPhotosGridScreen.invalidateCache();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Kolase HD (${canvasW}x$canvasH) tersimpan ke galeri',
+          ),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Gagal menyimpan kolase: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (tempOutPath != null) {
+        try {
+          final f = File(tempOutPath);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        leading: IconButton(
-          icon: const Icon(Icons.close, color: Colors.white),
-          tooltip: 'Batal',
-          onPressed: _confirmCancel,
-        ),
-        title: Text(
-          'Kolase (${_photos.length} foto)',
-          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-        ),
-        actions: [
-          TextButton(
-            onPressed: null,
-            child: const Text(
-              'Simpan',
-              style: TextStyle(color: Colors.white38, fontWeight: FontWeight.w600),
+  Widget _buildCollageCanvasPreview() {
+    final _CollageLayoutDef layoutDef =
+        _CollageLayoutCatalog.findById(_layoutId);
+
+    return LayoutBuilder(
+      builder: (context, outerBox) {
+        final double maxW = max(120.0, outerBox.maxWidth - 24.0);
+        final double maxH = max(140.0, outerBox.maxHeight - 16.0);
+        final double targetRatio = layoutDef.aspectRatio;
+
+        double boxW = maxW;
+        double boxH = boxW / targetRatio;
+        if (boxH > maxH) {
+          boxH = maxH;
+          boxW = boxH * targetRatio;
+        }
+
+        final List<_CollageSlotRect> rects = _CollageLayoutCatalog.computeSlots(
+          layoutId: _layoutId,
+          canvasW: boxW,
+          canvasH: boxH,
+          gap: _previewGap,
+          outerPadding: _previewOuterPad,
+        );
+
+        return Center(
+          child: Container(
+            width: boxW,
+            height: boxH,
+            decoration: BoxDecoration(
+              color: const Color(0xFF12151C),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Stack(
+              children: [
+                for (final r in rects)
+                  Positioned(
+                    left: r.x,
+                    top: r.y,
+                    width: r.w,
+                    height: r.h,
+                    child: _buildSlotTile(r.index, r.w, r.h),
+                  ),
+              ],
             ),
           ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: GridView.builder(
-                padding: const EdgeInsets.all(12),
-                itemCount: _photos.length,
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  crossAxisSpacing: 8,
-                  mainAxisSpacing: 8,
-                ),
-                itemBuilder: (ctx, idx) {
-                  return ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Image.file(
-                          _photos[idx],
-                          cacheWidth: 320,
-                          fit: BoxFit.cover,
+        );
+      },
+    );
+  }
+
+  Widget _buildSlotTile(int index, double w, double h) {
+    final File? file = index < _slots.length ? _slots[index] : null;
+
+    return GestureDetector(
+      onTap: _isSaving ? null : () => _pickPhotoForSlot(index),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Container(
+          color: const Color(0xFF1C212B),
+          child: file != null
+              ? Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Image.file(
+                      file,
+                      cacheWidth: max(180, (w * 1.5).round()),
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, __, ___) => const Center(
+                        child: Icon(
+                          Icons.broken_image_outlined,
+                          color: Colors.white54,
                         ),
-                        Positioned(
-                          top: 6,
-                          left: 6,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 3,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.7),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${idx + 1}',
-                              style: const TextStyle(
-                                color: Color(0xFFFFD000),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 6,
+                      left: 6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.72),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          '${index + 1}',
+                          style: const TextStyle(
+                            color: Color(0xFFFFD000),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
-                      ],
+                      ),
                     ),
+                  ],
+                )
+              : Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.add_photo_alternate_outlined,
+                      color: Color(0xFFFFD000),
+                      size: 26,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Tambah ${index + 1}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildControlsDock() {
+    final List<_CollageLayoutDef> layoutsForCurrent =
+        _CollageLayoutCatalog.layoutsForCount(_slotCount);
+
+    return Container(
+      color: const Color(0xFF14171E),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Jumlah Foto: $_slotCount (2–6)',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Row(
+                  children: [
+                    IconButton.filledTonal(
+                      onPressed:
+                          (_isSaving || _slotCount <= _minSlots)
+                              ? null
+                              : () => _changeSlotCount(-1),
+                      icon: const Icon(Icons.remove, size: 18),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Kurangi foto',
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed:
+                          (_isSaving || _slotCount >= _maxSlots)
+                              ? null
+                              : () => _changeSlotCount(1),
+                      icon: const Icon(Icons.add, size: 18),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Tambah foto',
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 40,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: layoutsForCurrent.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (ctx, idx) {
+                  final def = layoutsForCurrent[idx];
+                  final bool selected = def.id == _layoutId;
+                  return ChoiceChip(
+                    selected: selected,
+                    selectedColor: const Color(0xFFFFD000),
+                    backgroundColor: const Color(0xFF222732),
+                    labelStyle: TextStyle(
+                      color: selected ? Colors.black : Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    label: Text(def.label),
+                    onSelected: _isSaving ? null : (_) => _selectLayout(def.id),
                   );
                 },
               ),
             ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 4, 16, 14),
-              child: Text(
-                'Tahap 1 selesai: seleksi 2–6 foto terhubung. Langkah berikutnya: 10 pola kolase, kontrol +/-, serta ekspor HD proporsional.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white60, fontSize: 12),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool allFilled =
+        _slots.whereType<File>().length >= _slotCount && _slotCount >= _minSlots;
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        unawaited(_confirmCancel());
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          leading: IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            tooltip: 'Batal',
+            onPressed: _isSaving ? null : () => unawaited(_confirmCancel()),
+          ),
+          title: Text(
+            'Kolase ($_slotCount foto)',
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+          ),
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: (allFilled && !_isSaving)
+                      ? const Color(0xFFFFD000)
+                      : Colors.white12,
+                  foregroundColor: (allFilled && !_isSaving)
+                      ? Colors.black
+                      : Colors.white38,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: (allFilled && !_isSaving) ? _saveHdCollage : null,
+                child: _isSaving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Text(
+                        'Simpan',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
               ),
             ),
           ],
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(child: _buildCollageCanvasPreview()),
+              _buildControlsDock(),
+            ],
+          ),
         ),
       ),
     );

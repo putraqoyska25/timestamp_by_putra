@@ -784,29 +784,39 @@ class _AppPrefsStore {
 
 class _ShutterAudioService {
   static AudioPlayer? _player;
-  static Uint8List? _cachedWavBytes;
+  static String? _cachedWavFilePath;
 
-  static Uint8List _buildMechanicalClickWavBytes() {
-    if (_cachedWavBytes != null) return _cachedWavBytes!;
+  static Uint8List _buildLoudMechanicalShutterWavBytes() {
+    const int sampleRate = 44100;
+    // 180ms bunyi aktif + 240ms ekor hening agar Android Audio HAL tidak memotong klik
+    const int activeSamples = 7938;
+    const int tailSilenceSamples = 10584;
+    const int totalSamples = activeSamples + tailSilenceSamples;
 
-    const int sampleRate = 22050;
-    const int totalSamples = 2800;
     final List<double> samples = List<double>.filled(totalSamples, 0.0);
     final Random rng = Random(42);
 
-    for (int i = 0; i < 550 && i < totalSamples; i++) {
-      final double env = exp(-i / 85.0);
-      final double tone = sin(2 * pi * 2100 * (i / sampleRate)) * 0.65;
-      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.75;
-      samples[i] += (tone + transient) * env;
+    // 1. Klik pertama (cermin/tirai buka) 0..3200 sampel (~72ms) - keras & tajam
+    for (int i = 0; i < 3200 && i < activeSamples; i++) {
+      final double t = i / sampleRate;
+      final double env = exp(-i / 520.0);
+      final double f1 = sin(2 * pi * 1150.0 * t) * 0.65;
+      final double f2 = sin(2 * pi * 2350.0 * t) * 0.55;
+      final double f3 = sin(2 * pi * 3400.0 * t) * 0.35;
+      final double snap = (rng.nextDouble() * 2.0 - 1.0) * 0.85 * exp(-i / 180.0);
+      samples[i] += (f1 + f2 + f3 + snap) * env * 1.45;
     }
 
-    for (int i = 820; i < 1750 && i < totalSamples; i++) {
-      final int local = i - 820;
-      final double env = exp(-local / 110.0);
-      final double tone = sin(2 * pi * 1480 * (local / sampleRate)) * 0.55;
-      final double transient = (rng.nextDouble() * 2.0 - 1.0) * 0.55;
-      samples[i] += (tone + transient) * env;
+    // 2. Klik kedua (tirai tutup) 3600..7800 sampel (~81ms..176ms) - resonansi penuh
+    for (int i = 3600; i < 7800 && i < activeSamples; i++) {
+      final int local = i - 3600;
+      final double t = local / sampleRate;
+      final double env = exp(-local / 620.0);
+      final double f1 = sin(2 * pi * 980.0 * t) * 0.70;
+      final double f2 = sin(2 * pi * 1880.0 * t) * 0.55;
+      final double snap =
+          (rng.nextDouble() * 2.0 - 1.0) * 0.75 * exp(-local / 210.0);
+      samples[i] += (f1 + f2 + snap) * env * 1.40;
     }
 
     final int dataSize = totalSamples * 2;
@@ -834,14 +844,30 @@ class _ShutterAudioService {
 
     int offset = 44;
     for (int i = 0; i < totalSamples; i++) {
-      final double clamped = samples[i].clamp(-0.98, 0.98);
+      final double clamped = samples[i].clamp(-0.99, 0.99);
       final int pcm16 = (clamped * 32767.0).round();
       buffer.setInt16(offset, pcm16, Endian.little);
       offset += 2;
     }
 
-    _cachedWavBytes = buffer.buffer.asUint8List();
-    return _cachedWavBytes!;
+    return buffer.buffer.asUint8List();
+  }
+
+  static Future<String> _ensureWavFile() async {
+    final existingPath = _cachedWavFilePath;
+    if (existingPath != null && await File(existingPath).exists()) {
+      return existingPath;
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File(
+      '${dir.path}${Platform.pathSeparator}shutter_loud_v2.wav',
+    );
+    if (!await file.exists() || await file.length() == 0) {
+      final wavBytes = _buildLoudMechanicalShutterWavBytes();
+      await file.writeAsBytes(wavBytes, flush: true);
+    }
+    _cachedWavFilePath = file.path;
+    return file.path;
   }
 
   static Future<AudioPlayer> _ensurePlayer() async {
@@ -849,15 +875,17 @@ class _ShutterAudioService {
     if (existing != null) return existing;
 
     final player = AudioPlayer();
-    await player.setPlayerMode(PlayerMode.lowLatency);
+    await player.setPlayerMode(PlayerMode.mediaPlayer);
+    await player.setReleaseMode(ReleaseMode.stop);
+    await player.setVolume(1.0);
     await player.setAudioContext(
       AudioContext(
         android: AudioContextAndroid(
           isSpeakerphoneOn: false,
           stayAwake: false,
           contentType: AndroidContentType.sonification,
-          usageType: AndroidUsageType.media,
-          audioFocus: AndroidAudioFocus.none,
+          usageType: AndroidUsageType.assistanceSonification,
+          audioFocus: AndroidAudioFocus.gainTransientMayDuck,
         ),
       ),
     );
@@ -867,8 +895,9 @@ class _ShutterAudioService {
 
   static Future<void> warmupAudio() async {
     try {
-      await _ensurePlayer();
-      _buildMechanicalClickWavBytes();
+      final path = await _ensureWavFile();
+      final player = await _ensurePlayer();
+      await player.setSource(DeviceFileSource(path));
     } catch (e) {
       debugPrint('Audio warmup info: $e');
     }
@@ -876,14 +905,14 @@ class _ShutterAudioService {
 
   static Future<void> playShutterSound() async {
     try {
+      final path = await _ensureWavFile();
       final player = await _ensurePlayer();
-      final bytes = _buildMechanicalClickWavBytes();
-      await player.stop();
       await player.setVolume(1.0);
-      await player.play(BytesSource(bytes, mimeType: 'audio/wav'));
+      await player.seek(Duration.zero);
+      await player.play(DeviceFileSource(path), volume: 1.0);
       return;
     } catch (e) {
-      debugPrint('audioplayers shutter fallback: $e');
+      debugPrint('DeviceFileSource shutter fallback: $e');
     }
 
     try {
@@ -2034,22 +2063,22 @@ class _CameraScreenState extends State<CameraScreen>
           aspectRatio: _aspectRatio,
           qualityPreset: _qualityPreset,
           onShutterSoundChanged: (val) {
-            if (mounted) {
-              setState(() => _shutterSoundEnabled = val);
-              unawaited(_persistCurrentSettings());
+            if (!mounted) return;
+            setState(() => _shutterSoundEnabled = val);
+            unawaited(_persistCurrentSettings());
+            if (val) {
+              unawaited(_ShutterAudioService.playShutterSound());
             }
           },
           onGridChanged: (val) {
-            if (mounted) {
-              setState(() => _gridEnabled = val);
-              unawaited(_persistCurrentSettings());
-            }
+            if (!mounted) return;
+            setState(() => _gridEnabled = val);
+            unawaited(_persistCurrentSettings());
           },
           onAspectRatioChanged: (ratio) {
-            if (mounted) {
-              setState(() => _aspectRatio = ratio);
-              unawaited(_persistCurrentSettings());
-            }
+            if (!mounted) return;
+            setState(() => _aspectRatio = ratio);
+            unawaited(_persistCurrentSettings());
           },
           onQualityPresetChanged: (preset) {
             unawaited(_setQualityPreset(preset));
@@ -2057,6 +2086,14 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       ),
     );
+    if (mounted) {
+      setState(() {
+        _shutterSoundEnabled = _AppPrefsStore.current.shutterSoundEnabled;
+        _gridEnabled = _AppPrefsStore.current.gridEnabled;
+        _aspectRatio = _AppPrefsStore.current.aspectRatio;
+        _qualityPreset = _AppPrefsStore.current.qualityPreset;
+      });
+    }
   }
 
   Future<void> _disposeControllerSafely() async {

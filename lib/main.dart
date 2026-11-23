@@ -2882,7 +2882,7 @@ class _CameraScreenState extends State<CameraScreen>
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
-            const SizedBox(height: 12),
+            const SizedBox.height(12),
             FilledButton.icon(
               onPressed: () => _initCameraByDirection(
                 CameraLensDirection.back,
@@ -3557,6 +3557,18 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     return usableW / 3.0;
   }
 
+  double _totalEstimatedScrollHeight(double viewportWidth) {
+    if (_fullSections.isEmpty || _entries.isEmpty) return 0.0;
+    final double cell = _cellExtent(viewportWidth);
+    final double rowStride = cell + _gridSpacing;
+    double y = 0.0;
+    for (final sec in _fullSections) {
+      final int rows = (sec.entries.length / 3.0).ceil();
+      y += _headerHeight + (rows * rowStride) + _gridSpacing;
+    }
+    return y;
+  }
+
   double _offsetForGlobalIndex(int globalIndex, double viewportWidth) {
     if (_fullSections.isEmpty || _entries.isEmpty) return 0.0;
     final int clampedIdx = globalIndex.clamp(0, _entries.length - 1);
@@ -3649,7 +3661,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       }
       _scheduleScrubberHide();
 
-      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 650) {
+      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
         setState(() {
           _visibleCount = min(total, _visibleCount + _pageBatchSize);
         });
@@ -3681,30 +3693,48 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final int targetIdx =
         (frac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
     final int neededVisible =
-        min(_entries.length, max(_visibleCount, targetIdx + 36));
-    final double desiredOffset =
+        min(_entries.length, max(_visibleCount, targetIdx + 30));
+
+    final double rawTargetOffset =
         _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
 
-    void performClampedJump() {
-      if (!mounted || !_scrollController.hasClients) return;
+    double clampTargetToBounds(double target) {
+      if (!_scrollController.hasClients) return 0.0;
       final pos = _scrollController.position;
-      final double safeOffset =
-          desiredOffset.clamp(0.0, max(0.0, pos.maxScrollExtent));
+      final double viewportH = pos.viewportDimension > 0
+          ? pos.viewportDimension
+          : max(200.0, MediaQuery.of(context).size.height - 140.0);
+      final double estimatedMax = max(
+        pos.maxScrollExtent,
+        _totalEstimatedScrollHeight(_cachedViewportWidth) - viewportH,
+      );
+      return target.clamp(0.0, max(0.0, estimatedMax));
+    }
+
+    void runJump(double offset) {
+      if (!mounted || !_scrollController.hasClients) return;
       _isProgrammaticJumping = true;
       try {
-        _scrollController.jumpTo(safeOffset);
-      } finally {
+        _scrollController.jumpTo(offset);
+      } catch (_) {}
+      WidgetsBinding.instance.addPostFrameCallback((_) {
         _isProgrammaticJumping = false;
-      }
+      });
     }
 
     if (neededVisible > _visibleCount) {
+      _isProgrammaticJumping = true;
       setState(() => _visibleCount = neededVisible);
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        performClampedJump();
+        if (!mounted || !_scrollController.hasClients) {
+          _isProgrammaticJumping = false;
+          return;
+        }
+        final double safeAfterExpand = clampTargetToBounds(rawTargetOffset);
+        runJump(safeAfterExpand);
       });
     } else {
-      performClampedJump();
+      runJump(clampTargetToBounds(rawTargetOffset));
     }
 
     _scheduleScrubberHide();
@@ -4184,7 +4214,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 700,
+                        cacheExtent: 500,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(

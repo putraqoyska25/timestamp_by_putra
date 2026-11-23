@@ -47,14 +47,7 @@ import sys
 from pathlib import Path
 
 kt_path = Path(sys.argv[1])
-original = kt_path.read_text(encoding="utf-8")
-
 pkg_name = "com.putra.timestamp_by_putra"
-for line in original.splitlines():
-    stripped = line.strip()
-    if stripped.startswith("package "):
-        pkg_name = stripped.removeprefix("package ").strip()
-        break
 
 kotlin_code = """package __PKG__
 
@@ -82,6 +75,7 @@ class MainActivity : FlutterActivity() {
 
     private var pendingPermResult: MethodChannel.Result? = null
     private var pendingTrashResult: MethodChannel.Result? = null
+    private var pendingTrashUriCount: Int = 0
     private var pendingTrashPaths: List<String> = emptyList()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -130,10 +124,7 @@ class MainActivity : FlutterActivity() {
 
     private fun requiredMediaPermissions(): Array<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(
-                Manifest.permission.READ_MEDIA_IMAGES,
-                Manifest.permission.READ_MEDIA_VIDEO,
-            )
+            arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
         } else {
             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
@@ -228,6 +219,7 @@ class MainActivity : FlutterActivity() {
                         true,
                     )
                     pendingTrashResult = result
+                    pendingTrashUriCount = uris.size
                     pendingTrashPaths = unresolved
                     ActivityCompat.startIntentSenderForResult(
                         this,
@@ -308,14 +300,16 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == reqTrashCode) {
             val res = pendingTrashResult
+            val uriCount = pendingTrashUriCount
             val rem = pendingTrashPaths
             pendingTrashResult = null
+            pendingTrashUriCount = 0
             pendingTrashPaths = emptyList()
             if (res != null) {
                 if (resultCode == Activity.RESULT_OK) {
                     res.success(
                         mapOf(
-                            "movedCount" to (rem.size + 1),
+                            "movedCount" to uriCount,
                             "unresolvedPaths" to emptyList<String>(),
                         )
                     )

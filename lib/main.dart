@@ -93,16 +93,16 @@ class _SlotCropRequest {
   });
 }
 
-class _CompositeBaseRequest {
-  final Uint8List baseJpgBytes;
-  final int targetW;
-  final int targetH;
+class _CompositeDecodedRequest {
+  final Uint8List baseRgbaBytes;
+  final int width;
+  final int height;
   final Uint8List? overlayRgbaBytes;
 
-  const _CompositeBaseRequest({
-    required this.baseJpgBytes,
-    required this.targetW,
-    required this.targetH,
+  const _CompositeDecodedRequest({
+    required this.baseRgbaBytes,
+    required this.width,
+    required this.height,
     required this.overlayRgbaBytes,
   });
 }
@@ -120,7 +120,7 @@ Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 93}) {
   return encoded;
 }
 
-Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
+img.Image _decodeAndCropResizeCore(_CropResizeRequest req) {
   if (req.bytes.length < 64) {
     throw Exception('Data byte gambar kosong atau tidak lengkap');
   }
@@ -181,6 +181,14 @@ Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
     );
   }
 
+  if (cropped.width <= 4 || cropped.height <= 4) {
+    throw Exception('Dimensi hasil crop/resize tidak valid');
+  }
+  return cropped;
+}
+
+Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
+  final img.Image cropped = _decodeAndCropResizeCore(req);
   return _encodeCleanJpgOrThrow(cropped, quality: 93);
 }
 
@@ -244,40 +252,42 @@ Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
   }
 }
 
-Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
-  if (req.baseJpgBytes.length < 64) {
-    throw Exception('Data gambar dasar kosong atau tidak lengkap');
-  }
-  final img.Image? decoded = img.decodeImage(req.baseJpgBytes);
-  if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
-    throw Exception('Gagal mendekode gambar dasar');
+Uint8List _processCompositeDecodedIsolate(_CompositeDecodedRequest req) {
+  final int expectedLen = req.width * req.height * 4;
+  if (req.width <= 4 ||
+      req.height <= 4 ||
+      req.baseRgbaBytes.lengthInBytes != expectedLen) {
+    throw Exception('Buffer gambar dasar tidak valid');
   }
 
-  final img.Image oriented = img.bakeOrientation(decoded);
-  final img.Image baseImg = oriented.convert(numChannels: 4, alpha: 255);
+  final Uint8List baseCopy = Uint8List.fromList(req.baseRgbaBytes);
+  final img.Image baseImg = img.Image.fromBytes(
+    width: req.width,
+    height: req.height,
+    bytes: baseCopy.buffer,
+    numChannels: 4,
+    order: img.ChannelOrder.rgba,
+  );
 
   final Uint8List? overlayBytes = req.overlayRgbaBytes;
-  if (overlayBytes != null && overlayBytes.isNotEmpty) {
-    final int expectedLen = baseImg.width * baseImg.height * 4;
-    if (req.targetW == baseImg.width &&
-        req.targetH == baseImg.height &&
-        overlayBytes.lengthInBytes == expectedLen) {
-      final Uint8List exactCopy = Uint8List.fromList(overlayBytes);
-      final img.Image overlayImg = img.Image.fromBytes(
-        width: baseImg.width,
-        height: baseImg.height,
-        bytes: exactCopy.buffer,
-        numChannels: 4,
-        order: img.ChannelOrder.rgba,
-      );
-      img.compositeImage(
-        baseImg,
-        overlayImg,
-        dstX: 0,
-        dstY: 0,
-        blend: img.BlendMode.alpha,
-      );
-    }
+  if (overlayBytes != null &&
+      overlayBytes.isNotEmpty &&
+      overlayBytes.lengthInBytes == expectedLen) {
+    final Uint8List overlayCopy = Uint8List.fromList(overlayBytes);
+    final img.Image overlayImg = img.Image.fromBytes(
+      width: req.width,
+      height: req.height,
+      bytes: overlayCopy.buffer,
+      numChannels: 4,
+      order: img.ChannelOrder.rgba,
+    );
+    img.compositeImage(
+      baseImg,
+      overlayImg,
+      dstX: 0,
+      dstY: 0,
+      blend: img.BlendMode.alpha,
+    );
   }
 
   return _encodeCleanJpgOrThrow(baseImg, quality: 93);
@@ -1720,26 +1730,23 @@ class _StampRenderer {
     return recorder.endRecording().toImage(targetW, targetH);
   }
 
-  static Future<Uint8List> buildStampedJpgBytes({
-    required Uint8List baseJpgBytes,
+  static Future<Uint8List> buildStampedJpgFromDecodedImage({
+    required img.Image baseImage,
     required DateTime activeDt,
     required _WatermarkConfig cfg,
   }) async {
-    if (baseJpgBytes.length < 64) {
-      throw Exception('Byte gambar dasar kosong atau tidak lengkap');
+    if (baseImage.width <= 4 || baseImage.height <= 4) {
+      throw Exception('Dimensi gambar dasar tidak valid');
     }
+
+    final img.Image rgbaBase = baseImage.convert(numChannels: 4, alpha: 255);
+    final int w = rgbaBase.width;
+    final int h = rgbaBase.height;
+    final Uint8List baseRgbaBytes = rgbaBase.getBytes(order: img.ChannelOrder.rgba);
 
     if (!hasActiveContent(cfg)) {
-      return baseJpgBytes;
+      return _encodeCleanJpgOrThrow(rgbaBase, quality: 93);
     }
-
-    final img.Image? probe = img.decodeImage(baseJpgBytes);
-    if (probe == null || probe.width <= 4 || probe.height <= 4) {
-      throw Exception('Gagal mendekode gambar');
-    }
-    final img.Image orientedProbe = img.bakeOrientation(probe);
-    final int w = orientedProbe.width;
-    final int h = orientedProbe.height;
 
     final ui.Image overlayUi = await renderOverlayImage(
       targetW: w,
@@ -1764,13 +1771,38 @@ class _StampRenderer {
     }
 
     return compute(
-      _processCompositeIsolate,
-      _CompositeBaseRequest(
-        baseJpgBytes: baseJpgBytes,
-        targetW: w,
-        targetH: h,
+      _processCompositeDecodedIsolate,
+      _CompositeDecodedRequest(
+        baseRgbaBytes: baseRgbaBytes,
+        width: w,
+        height: h,
         overlayRgbaBytes: overlayRgba,
       ),
+    );
+  }
+
+  static Future<Uint8List> buildStampedJpgBytes({
+    required Uint8List baseJpgBytes,
+    required DateTime activeDt,
+    required _WatermarkConfig cfg,
+  }) async {
+    if (baseJpgBytes.length < 64) {
+      throw Exception('Byte gambar dasar kosong atau tidak lengkap');
+    }
+
+    if (!hasActiveContent(cfg)) {
+      return baseJpgBytes;
+    }
+
+    final img.Image? decoded = img.decodeImage(baseJpgBytes);
+    if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
+      throw Exception('Gagal mendekode gambar');
+    }
+    final img.Image oriented = img.bakeOrientation(decoded);
+    return buildStampedJpgFromDecodedImage(
+      baseImage: oriented,
+      activeDt: activeDt,
+      cfg: cfg,
     );
   }
 }
@@ -2193,6 +2225,7 @@ class _CameraScreenState extends State<CameraScreen>
   bool _startupPermissionsRequested = false;
   bool _isFetchingLocation = false;
   bool _isPausedBackground = false;
+  bool _isDisposed = false;
 
   bool _shutterSoundEnabled = true;
   bool _gridEnabled = false;
@@ -2214,6 +2247,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   bool _isSaving = false;
   bool _isCoolingDown = false;
+  int _queuedCaptureTasks = 0;
   Timer? _cooldownTimer;
   Future<void> _captureQueue = Future<void>.value();
 
@@ -2242,6 +2276,9 @@ class _CameraScreenState extends State<CameraScreen>
   StampFormSize _formSize = StampFormSize.medium;
   StampTextColor _textColor = StampTextColor.white;
   ActiveDrawer _openDrawer = ActiveDrawer.none;
+
+  bool get _isAlbumBlocked =>
+      _isSaving || _isCoolingDown || _queuedCaptureTasks > 0;
 
   @override
   void initState() {
@@ -2332,8 +2369,6 @@ class _CameraScreenState extends State<CameraScreen>
         state == AppLifecycleState.detached) {
       _isPausedBackground = true;
       _cancelCountdown();
-      _cooldownTimer?.cancel();
-      _cooldownTimer = null;
       _shutterBlinkTimer?.cancel();
       _shutterBlinkTimer = null;
       _focusRingTimer?.cancel();
@@ -2348,12 +2383,10 @@ class _CameraScreenState extends State<CameraScreen>
       if (mounted &&
           (_isManualTime ||
               _openDrawer != ActiveDrawer.none ||
-              _currentLens != CameraLensDirection.back ||
-              _isCoolingDown)) {
+              _currentLens != CameraLensDirection.back)) {
         setState(() {
           _isManualTime = false;
           _openDrawer = ActiveDrawer.none;
-          _isCoolingDown = false;
           _systemNow = DateTime.now();
         });
       }
@@ -2362,6 +2395,7 @@ class _CameraScreenState extends State<CameraScreen>
       final bool wasPaused = _isPausedBackground;
       _isPausedBackground = false;
       unawaited(_NativeBrightnessService.setKeepScreenOn(true));
+      _LatestPhotosGridScreen.invalidateCache();
       if (!wasPaused &&
           _controller != null &&
           _controller!.value.isInitialized) {
@@ -2465,19 +2499,30 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  void _startPostCaptureCooldown({int milliseconds = 750}) {
+  Future<void> _waitPostCaptureCooldown({int milliseconds = 750}) async {
     _cooldownTimer?.cancel();
-    if (!mounted) return;
-    setState(() => _isCoolingDown = true);
+    if (mounted && !_isDisposed) {
+      setState(() => _isCoolingDown = true);
+    } else {
+      _isCoolingDown = true;
+    }
+
+    final completer = Completer<void>();
     _cooldownTimer = Timer(Duration(milliseconds: milliseconds), () {
-      if (!mounted) return;
-      setState(() => _isCoolingDown = false);
+      _isCoolingDown = false;
+      if (mounted && !_isDisposed) {
+        setState(() {});
+      }
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
     });
+    await completer.future;
   }
 
   void _triggerShutterBlink({int milliseconds = 110}) {
     _shutterBlinkTimer?.cancel();
-    if (!mounted) return;
+    if (!mounted || _isPausedBackground) return;
     setState(() => _shutterBlinkActive = true);
     _shutterBlinkTimer = Timer(Duration(milliseconds: milliseconds), () {
       if (!mounted) return;
@@ -2703,7 +2748,23 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _openGalleryAlbumBrowser() async {
-    if (!mounted) return;
+    if (!mounted || _isDisposed) return;
+    if (_isAlbumBlocked) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Menunggu proses foto & stempel selesai sebelum membuka album...',
+          ),
+          duration: Duration(milliseconds: 1200),
+        ),
+      );
+      return;
+    }
+    try {
+      await _captureQueue;
+    } catch (_) {}
+    if (!mounted || _isDisposed || _isAlbumBlocked) return;
+
     setState(() => _openDrawer = ActiveDrawer.none);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -2932,7 +2993,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _activateFrontScreenFlashForCapture() async {
     await _NativeBrightnessService.boostToMax();
-    if (!mounted) return;
+    if (!mounted || _isPausedBackground) return;
     setState(() => _screenFlashActive = true);
     await Future.delayed(const Duration(milliseconds: 220));
   }
@@ -2948,7 +3009,7 @@ class _CameraScreenState extends State<CameraScreen>
     CameraLensDirection targetDir, {
     bool refreshList = false,
   }) async {
-    if (_isInitializingCamera || _isPausedBackground) return;
+    if (_isInitializingCamera || _isPausedBackground || _isDisposed) return;
     if (mounted) {
       setState(() {
         _isInitializingCamera = true;
@@ -2964,7 +3025,7 @@ class _CameraScreenState extends State<CameraScreen>
         cameras = await availableCameras().timeout(const Duration(seconds: 6));
       }
 
-      if (!mounted || _isPausedBackground) return;
+      if (!mounted || _isPausedBackground || _isDisposed) return;
 
       if (cameras.isEmpty) {
         if (mounted) {
@@ -2984,7 +3045,7 @@ class _CameraScreenState extends State<CameraScreen>
       await _disposeControllerSafely();
       await Future.delayed(const Duration(milliseconds: 80));
 
-      if (!mounted || _isPausedBackground) return;
+      if (!mounted || _isPausedBackground || _isDisposed) return;
 
       newController = CameraController(
         cameras[foundIndex],
@@ -3005,7 +3066,7 @@ class _CameraScreenState extends State<CameraScreen>
         maxExp = await newController.getMaxExposureOffset();
       } catch (_) {}
 
-      if (!mounted || _isPausedBackground) {
+      if (!mounted || _isPausedBackground || _isDisposed) {
         await newController.dispose();
         return;
       }
@@ -3051,7 +3112,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _toggleFrontBackCamera() async {
-    if (_isInitializingCamera || _isSaving || _isCoolingDown) return;
+    if (_isInitializingCamera || _isAlbumBlocked) return;
     _screenFlashActive = false;
     unawaited(_NativeBrightnessService.restoreNormal());
     unawaited(_forceTorchOff(controllerOverride: _controller));
@@ -3158,7 +3219,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<Uint8List> _buildCroppedRawJpgBytes({
+  Future<img.Image> _buildCroppedDecodedImage({
     required String rawPhotoPath,
     required PhotoAspectRatio ratio,
     required int qualityHeight,
@@ -3171,7 +3232,8 @@ class _CameraScreenState extends State<CameraScreen>
     if (bytes.length < 64) {
       throw Exception('Byte hasil kamera kosong');
     }
-    return compute(
+
+    final Uint8List croppedJpg = await compute(
       _processCropResizeIsolate,
       _CropResizeRequest(
         bytes: bytes,
@@ -3179,10 +3241,18 @@ class _CameraScreenState extends State<CameraScreen>
         qualityHeight: qualityHeight,
       ),
     );
+    final img.Image? decoded = img.decodeImage(croppedJpg);
+    if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
+      throw Exception('Gagal mendekode hasil crop/resize');
+    }
+    return img.bakeOrientation(decoded);
   }
 
   Future<void> _onShutterPressed() async {
-    if (_isSaving || _isCoolingDown || _isInitializingCamera || _isPausedBackground) {
+    if (_isAlbumBlocked ||
+        _isInitializingCamera ||
+        _isPausedBackground ||
+        _isDisposed) {
       return;
     }
     if (_countdownRemaining != null) {
@@ -3192,7 +3262,7 @@ class _CameraScreenState extends State<CameraScreen>
 
     final int activeTimer = _normalizeTimer(_timerSeconds);
     if (activeTimer == 0) {
-      _enqueueCapture(usedTimer: 0);
+      unawaited(_enqueueCaptureAndWait(usedTimer: 0));
       return;
     }
 
@@ -3203,7 +3273,7 @@ class _CameraScreenState extends State<CameraScreen>
     _countdownTimer?.cancel();
 
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) {
+      if (!mounted || _isDisposed) {
         timer.cancel();
         return;
       }
@@ -3211,7 +3281,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (current <= 1) {
         timer.cancel();
         setState(() => _countdownRemaining = null);
-        _enqueueCapture(usedTimer: activeTimer);
+        unawaited(_enqueueCaptureAndWait(usedTimer: activeTimer));
       } else {
         final int nextVal = current - 1;
         setState(() => _countdownRemaining = nextVal);
@@ -3219,28 +3289,46 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  void _enqueueCapture({required int usedTimer}) {
-    if (_isSaving || _isCoolingDown) return;
-    setState(() {
+  Future<void> _enqueueCaptureAndWait({required int usedTimer}) async {
+    if (_isAlbumBlocked || _isDisposed) return;
+
+    _queuedCaptureTasks++;
+    if (mounted) {
+      setState(() {
+        _isSaving = true;
+        _openDrawer = ActiveDrawer.none;
+      });
+    } else {
       _isSaving = true;
-      _openDrawer = ActiveDrawer.none;
+    }
+
+    final Future<void> task = _captureQueue.then((_) async {
+      try {
+        await _executeTakePicture(usedTimer: usedTimer);
+      } finally {
+        _queuedCaptureTasks = max(0, _queuedCaptureTasks - 1);
+        if (_queuedCaptureTasks == 0) {
+          _isSaving = false;
+          if (mounted && !_isDisposed) {
+            setState(() {});
+          }
+        }
+      }
     });
-    _captureQueue = _captureQueue.then((_) async {
-      await _executeTakePicture(usedTimer: usedTimer);
-    });
+
+    _captureQueue = task;
+    await task;
   }
 
   Future<void> _executeTakePicture({required int usedTimer}) async {
     final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized || _isPausedBackground) {
-      if (mounted) {
-        setState(() => _isSaving = false);
-      }
+    if (ctrl == null || !ctrl.value.isInitialized) {
       return;
     }
 
-    final bool useAutoFlashOnShutter = _flashEnabled;
+    final bool useAutoFlashOnShutter = _flashEnabled && !_isPausedBackground;
     final bool isFront = _currentLens == CameraLensDirection.front;
+    final bool playSound = _shutterSoundEnabled && !_isPausedBackground;
 
     String? cameraRawPath;
     String? tempRawPath;
@@ -3262,7 +3350,7 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       _triggerShutterBlink(milliseconds: 110);
-      if (_shutterSoundEnabled) {
+      if (playSound) {
         await _ShutterAudioService.playShutterSound();
       }
       final XFile photo = await ctrl.takePicture();
@@ -3274,15 +3362,18 @@ class _CameraScreenState extends State<CameraScreen>
         await _forceTorchOff(controllerOverride: ctrl);
       }
 
-      final Uint8List cleanRawJpgBytes = await _buildCroppedRawJpgBytes(
+      final img.Image croppedBaseImg = await _buildCroppedDecodedImage(
         rawPhotoPath: cameraRawPath,
         ratio: _aspectRatio,
         qualityHeight: _getQualityHeightPixels(),
       );
 
+      final Uint8List cleanRawJpgBytes =
+          _encodeCleanJpgOrThrow(croppedBaseImg, quality: 93);
+
       final Uint8List stampedJpgBytes = _StampRenderer.hasActiveContent(cfg)
-          ? await _StampRenderer.buildStampedJpgBytes(
-              baseJpgBytes: cleanRawJpgBytes,
+          ? await _StampRenderer.buildStampedJpgFromDecodedImage(
+              baseImage: croppedBaseImg,
               activeDt: activeDt,
               cfg: cfg,
             )
@@ -3314,7 +3405,9 @@ class _CameraScreenState extends State<CameraScreen>
 
       _LatestPhotosGridScreen.invalidateCache();
 
-      if (mounted && (ModalRoute.of(context)?.isCurrent ?? true)) {
+      if (mounted &&
+          !_isPausedBackground &&
+          (ModalRoute.of(context)?.isCurrent ?? true)) {
         final String timerText = usedTimer == 0 ? '0s' : '${usedTimer}s';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -3326,7 +3419,9 @@ class _CameraScreenState extends State<CameraScreen>
         );
       }
     } catch (e) {
-      if (mounted && (ModalRoute.of(context)?.isCurrent ?? true)) {
+      if (mounted &&
+          !_isPausedBackground &&
+          (ModalRoute.of(context)?.isCurrent ?? true)) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -3344,13 +3439,12 @@ class _CameraScreenState extends State<CameraScreen>
       await _safeDeleteFile(cameraRawPath);
       await _safeDeleteFile(tempRawPath);
       await _safeDeleteFile(tempStampedPath);
-      if (mounted) {
+      if (mounted && !_isDisposed) {
         setState(() {
-          _isSaving = false;
           _screenFlashActive = false;
         });
-        _startPostCaptureCooldown(milliseconds: 750);
       }
+      await _waitPostCaptureCooldown(milliseconds: 750);
     }
   }
 
@@ -3582,7 +3676,7 @@ class _CameraScreenState extends State<CameraScreen>
                       ),
                     ),
                   ),
-                if (_isSaving || _isCoolingDown)
+                if (_isAlbumBlocked)
                   Positioned(
                     top: 12,
                     right: 12,
@@ -3608,7 +3702,9 @@ class _CameraScreenState extends State<CameraScreen>
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            _isSaving ? 'Memproses...' : 'Menyiapkan...',
+                            _isSaving
+                                ? 'Memproses...'
+                                : 'Menyiapkan hasil...',
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 11,
@@ -3973,7 +4069,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Widget _buildBottomBar() {
     final bool counting = _countdownRemaining != null;
-    final bool shutterLocked = _isSaving || _isCoolingDown;
+    final bool shutterLocked = _isAlbumBlocked;
 
     return Container(
       color: Colors.black,
@@ -3995,9 +4091,10 @@ class _CameraScreenState extends State<CameraScreen>
             children: [
               _BottomActionIcon(
                 icon: Icons.photo_library_outlined,
-                label: 'Album',
+                label: shutterLocked ? 'Proses...' : 'Album',
                 active: false,
-                onTap: _openGalleryAlbumBrowser,
+                disabled: shutterLocked,
+                onTap: () => unawaited(_openGalleryAlbumBrowser()),
               ),
               GestureDetector(
                 onTap: shutterLocked ? null : _onShutterPressed,
@@ -4054,6 +4151,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   void dispose() {
+    _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _clockTimer?.cancel();
     _countdownTimer?.cancel();
@@ -7024,20 +7122,24 @@ class _BottomActionIcon extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool active;
+  final bool disabled;
   final VoidCallback onTap;
 
   const _BottomActionIcon({
     required this.icon,
     required this.label,
     required this.active,
+    this.disabled = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final Color fg = active ? const Color(0xFFFFD000) : Colors.white;
+    final Color fg = disabled
+        ? Colors.white30
+        : (active ? const Color(0xFFFFD000) : Colors.white);
     return InkWell(
-      onTap: onTap,
+      onTap: disabled ? null : onTap,
       borderRadius: BorderRadius.circular(8),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),

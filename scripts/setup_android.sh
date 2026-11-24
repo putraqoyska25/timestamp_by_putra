@@ -96,7 +96,6 @@ except ImportError:
 if pil_ok:
     with Image.open(src) as im:
         rgb_im = im.convert("RGB")
-        # Beri margin 8% agar ikon tidak terpotong di launcher adaptif/bulat
         padded = ImageOps.expand(rgb_im, border=max(1, int(min(rgb_im.size) * 0.08)), fill=(255, 255, 255))
         for folder, px in sizes.items():
             out_dir = res_root / folder
@@ -104,8 +103,7 @@ if pil_ok:
             resized = padded.resize((px, px), Image.Resampling.LANCZOS)
             for fname in ("ic_launcher.png", "ic_launcher_round.png"):
                 target = out_dir / fname
-                if (out_dir / fname).parent.exists():
-                    resized.save(target, format="PNG")
+                resized.save(target, format="PNG")
     print("Berhasil memasang app_icon.png ke seluruh folder mipmap-* via Pillow")
 elif shutil.which("ffmpeg"):
     for folder, px in sizes.items():
@@ -297,11 +295,12 @@ class MainActivity : FlutterActivity() {
         }
 
         val projection = arrayOf(
+            MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DATA,
             MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.DATE_MODIFIED,
         )
-        val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC, ${MediaStore.Images.Media.DATE_MODIFIED} DESC"
+        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
 
         try {
             contentResolver.query(
@@ -321,8 +320,8 @@ class MainActivity : FlutterActivity() {
                     val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
                     val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
                     val effectiveSec = when {
-                        takenMs > 0L -> takenMs / 1000L
                         modSec > 0L -> modSec
+                        takenMs > 0L -> takenMs / 1000L
                         else -> System.currentTimeMillis() / 1000L
                     }
                     seen.add(path)

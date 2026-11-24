@@ -104,7 +104,7 @@ class MainActivity : FlutterActivity() {
     private var pendingPermResult: MethodChannel.Result? = null
     private var pendingTrashResult: MethodChannel.Result? = null
     private var pendingTrashUriCount: Int = 0
-    private var pendingTrashPaths: List<String> = emptyList()
+    private var pendingTrashPaths: ArrayList<String> = arrayListOf()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -150,10 +150,15 @@ class MainActivity : FlutterActivity() {
                     "getAllImages" -> result.success(queryAllImagePaths())
                     "moveToTrash" -> {
                         val rawPaths = call.argument<List<*>>("paths")
-                        val paths = rawPaths
-                            ?.mapNotNull { it?.toString()?.trim() }
-                            ?.filter { it.isNotEmpty() }
-                            ?: emptyList()
+                        val paths = arrayListOf<String>()
+                        if (rawPaths != null) {
+                            for (item in rawPaths) {
+                                val s = item?.toString()?.trim() ?: ""
+                                if (s.isNotEmpty()) {
+                                    paths.add(s)
+                                }
+                            }
+                        }
                         movePathsToTrash(paths, result)
                     }
                     else -> result.notImplemented()
@@ -193,10 +198,10 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun queryAllImagePaths(): List> {
-        if (!hasAllMediaPermissions()) return emptyList()
+    private fun queryAllImagePaths(): ArrayList> {
+        val list = arrayListOf>()
+        if (!hasAllMediaPermissions()) return list
 
-        val list = mutableListOf>()
         val seen = HashSet<String>()
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -220,12 +225,10 @@ class MainActivity : FlutterActivity() {
                             val path = cursor.getString(dataCol)?.trim() ?: ""
                             if (path.isNotEmpty() && seen.add(path) && File(path).exists()) {
                                 val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
-                                list.add(
-                                    mapOf(
-                                        "path" to path,
-                                        "dateModified" to modSec,
-                                    )
-                                )
+                                val entry = HashMap<String, Any>()
+                                entry["path"] = path
+                                entry["dateModified"] = modSec
+                                list.add(entry)
                             }
                         }
                     }
@@ -235,20 +238,18 @@ class MainActivity : FlutterActivity() {
         return list
     }
 
-    private fun movePathsToTrash(paths: List<String>, result: MethodChannel.Result) {
+    private fun movePathsToTrash(paths: ArrayList<String>, result: MethodChannel.Result) {
         if (paths.isEmpty()) {
-            result.success(
-                mapOf(
-                    "movedCount" to 0,
-                    "unresolvedPaths" to emptyList<String>(),
-                )
-            )
+            val resMap = HashMap<String, Any>()
+            resMap["movedCount"] = 0
+            resMap["unresolvedPaths"] = arrayListOf<String>()
+            result.success(resMap)
             return
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val uris = mutableListOf<Uri>()
-            val unresolved = mutableListOf<String>()
+            val uris = arrayListOf<Uri>()
+            val unresolved = arrayListOf<String>()
             val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
 
             for (p in paths) {
@@ -287,7 +288,7 @@ class MainActivity : FlutterActivity() {
         }
 
         var moved = 0
-        val remaining = mutableListOf<String>()
+        val remaining = arrayListOf<String>()
         for (p in paths) {
             try {
                 val f = File(p)
@@ -300,12 +301,10 @@ class MainActivity : FlutterActivity() {
                 remaining.add(p)
             }
         }
-        result.success(
-            mapOf(
-                "movedCount" to moved,
-                "unresolvedPaths" to remaining,
-            )
-        )
+        val resMap = HashMap<String, Any>()
+        resMap["movedCount"] = moved
+        resMap["unresolvedPaths"] = remaining
+        result.success(resMap)
     }
 
     private fun findImageUriByPath(
@@ -353,23 +352,17 @@ class MainActivity : FlutterActivity() {
             val rem = pendingTrashPaths
             pendingTrashResult = null
             pendingTrashUriCount = 0
-            pendingTrashPaths = emptyList()
+            pendingTrashPaths = arrayListOf()
             if (res != null) {
+                val resMap = HashMap<String, Any>()
                 if (resultCode == Activity.RESULT_OK) {
-                    res.success(
-                        mapOf(
-                            "movedCount" to uriCount,
-                            "unresolvedPaths" to emptyList<String>(),
-                        )
-                    )
+                    resMap["movedCount"] = uriCount
+                    resMap["unresolvedPaths"] = arrayListOf<String>()
                 } else {
-                    res.success(
-                        mapOf(
-                            "movedCount" to 0,
-                            "unresolvedPaths" to rem,
-                        )
-                    )
+                    resMap["movedCount"] = 0
+                    resMap["unresolvedPaths"] = rem
                 }
+                res.success(resMap)
             }
         }
     }

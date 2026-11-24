@@ -1,15 +1,13 @@
-name: Build timestamp_by_putra APK
+name: Build APK Timestamp by Putra
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "**" ]
   workflow_dispatch:
 
 jobs:
-  build:
+  build_apk:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,163 +18,71 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Flutter
+      - name: Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
-          cache: true
+          flutter-version: '3.29.3'
+          channel: 'stable'
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: Configure Android Permissions, MediaStore, Gradle & Lint
+      - name: Run Android setup script
         run: |
-          set -euo pipefail
-          mkdir -p android/app/src/main
-          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
-            flutter create --platforms=android --org com.putra --project-name timestamp_by_putra .
-          fi
-
-          if [ ! -f scripts/setup_android.sh ]; then
-            echo "ERROR: scripts/setup_android.sh tidak ditemukan di repository!"
-            exit 1
-          fi
-
           chmod +x scripts/setup_android.sh
           ./scripts/setup_android.sh
 
-          python3 - << 'PY'
-          from pathlib import Path
-          import re
-
-          for settings_path in ["android/settings.gradle.kts", "android/settings.gradle"]:
-              sp = Path(settings_path)
-              if not sp.exists():
-                  continue
-              stxt = sp.read_text(encoding="utf-8")
-              stxt = re.sub(
-                  r'(id\s*\(\s*"org\.jetbrains\.kotlin\.android"\s*\)\s*version\s*")2\.[23]\.[0-9]+(")',
-                  r'\g<1>2.1.0\g<2>',
-                  stxt,
-              )
-              stxt = re.sub(
-                  r'(id\s+["\']org\.jetbrains\.kotlin\.android["\']\s+version\s+["\'])2\.[23]\.[0-9]+(["\'])',
-                  r'\g<1>2.1.0\g<2>',
-                  stxt,
-              )
-              sp.write_text(stxt, encoding="utf-8")
-
-          target_pkg = "com.putra.timestamp_by_putra"
-          for gradle_path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
-              p = Path(gradle_path)
-              if not p.exists():
-                  continue
-              txt = p.read_text(encoding="utf-8")
-              is_kts = gradle_path.endswith(".kts")
-              sep = " = " if is_kts else " "
-
-              if re.search(r"namespace\s*=", txt):
-                  txt = re.sub(r'namespace\s*=\s*"[^"]+"', f'namespace = "{target_pkg}"', txt, count=1)
-              elif re.search(r"namespace\s+", txt):
-                  txt = re.sub(r'namespace\s+["\'][^"\']+["\']', f'namespace "{target_pkg}"', txt, count=1)
-
-              if re.search(r"applicationId\s*=", txt):
-                  txt = re.sub(r'applicationId\s*=\s*"[^"]+"', f'applicationId = "{target_pkg}"', txt, count=1)
-              elif re.search(r"applicationId\s+", txt):
-                  txt = re.sub(r'applicationId\s+["\'][^"\']+["\']', f'applicationId "{target_pkg}"', txt, count=1)
-
-              if "checkReleaseBuilds" not in txt:
-                  lint_block = (
-                      f"    lint {{\n"
-                      f"        checkReleaseBuilds{sep}false\n"
-                      f"        abortOnError{sep}false\n"
-                      f"    }}\n"
-                  )
-                  m = re.search(r"android\s*\{", txt)
-                  if m:
-                      idx = m.end()
-                      txt = txt[:idx] + "\n" + lint_block + txt[idx:]
-                  else:
-                      txt += "\nandroid {\n" + lint_block + "}\n"
-
-              p.write_text(txt, encoding="utf-8")
-
-          kotlin_root = Path("android/app/src/main/kotlin")
-          target_main = kotlin_root / "com/putra/timestamp_by_putra/MainActivity.kt"
-          if kotlin_root.exists() and target_main.exists():
-              for kt_file in kotlin_root.rglob("MainActivity.kt"):
-                  if kt_file.resolve() != target_main.resolve():
-                      kt_file.unlink()
-          PY
-
-      - name: Set Custom App Launcher Icon
+      - name: Ensure Android project & Kotlin compatibility
         run: |
-          set -euo pipefail
-          ICON_SRC=""
-          for candidate in "assets/icon/app_icon.png" "assets/Icon/app_icon.png"; do
-            if [ -f "$candidate" ]; then
-              ICON_SRC="$candidate"
-              break
-            fi
-          done
-
-          if [ -z "$ICON_SRC" ]; then
-            echo "ERROR: app_icon.png tidak ditemukan di assets/icon/ maupun assets/Icon/!"
-            exit 1
+          if [ ! -f android/app/build.gradle ] && [ ! -f android/app/build.gradle.kts ]; then
+            flutter create --platforms=android --org com.putra --project-name timestamp_by_putra .
+            chmod +x scripts/setup_android.sh
+            ./scripts/setup_android.sh
           fi
 
-          if ! file "$ICON_SRC" | grep -qi "PNG image"; then
-            echo "ERROR: $ICON_SRC bukan file PNG asli!"
-            file "$ICON_SRC" || true
-            exit 1
-          fi
+          python3 - <<'PY'
+from pathlib import Path
+import re
 
-          if command -v python3 >/dev/null 2>&1 && python3 -c "import PIL" 2>/dev/null; then
-            python3 - "$ICON_SRC" << 'PY'
-          from PIL import Image
-          import os
-          import sys
+for fname in ["android/settings.gradle", "android/settings.gradle.kts"]:
+    p = Path(fname)
+    if p.exists():
+        txt = p.read_text(encoding="utf-8")
+        new_txt = re.sub(
+            r'(id\s+[\'"]org\.jetbrains\.kotlin\.android[\'"]\s+version\s+[\'"])2\.[23]\.[0-9a-zA-Z._-]+([\'"])',
+            r'\g<1>2.1.0\g<2>',
+            txt,
+        )
+        if new_txt != txt:
+            p.write_text(new_txt, encoding="utf-8")
+            print(f"Updated Kotlin version in {fname}")
 
-          src = sys.argv[1]
-          img = Image.open(src).convert("RGBA")
-          sizes = {
-              "mipmap-mdpi": 48,
-              "mipmap-hdpi": 72,
-              "mipmap-xhdpi": 96,
-              "mipmap-xxhdpi": 144,
-              "mipmap-xxxhdpi": 192,
-          }
-          for folder, px in sizes.items():
-              out_dir = os.path.join("android/app/src/main/res", folder)
-              os.makedirs(out_dir, exist_ok=True)
-              resized = img.resize((px, px), Image.Resampling.LANCZOS)
-              resized.save(os.path.join(out_dir, "ic_launcher.png"), format="PNG")
-          print("Berhasil generate ic_launcher.png ke seluruh folder mipmap.")
-          PY
-          else
-            for d in android/app/src/main/res/mipmap-*; do
-              if [ -d "$d" ]; then
-                cp -f "$ICON_SRC" "$d/ic_launcher.png"
-              fi
-            done
-            echo "Menyalin $ICON_SRC langsung ke folder mipmap-*."
-          fi
+for fname in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+    p = Path(fname)
+    if p.exists():
+        txt = p.read_text(encoding="utf-8")
+        if "abortOnError" not in txt:
+            lint_block = """
+android {
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+"""
+            p.write_text(txt + "\n" + lint_block, encoding="utf-8")
+            print(f"Added lint config to {fname}")
+PY
 
-      - name: Get dependencies
+      - name: Get Flutter dependencies
         run: flutter pub get
 
-      - name: Run flutter build apk --release
+      - name: Analyze Flutter project
+        run: flutter analyze
+
+      - name: Build release APK
         run: flutter build apk --release
 
-      - name: Upload APK Artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: timestamp_by_putra-release-apk
+          name: timestamp-by-putra-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error

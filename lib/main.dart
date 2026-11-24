@@ -2543,6 +2543,12 @@ class _CameraScreenState extends State<CameraScreen>
       _shutterBlinkTimer = null;
       _focusRingTimer?.cancel();
       _focusRingTimer = null;
+      _cooldownTimer?.cancel();
+      _cooldownTimer = null;
+      _isInitializingCamera = false;
+      _isSaving = false;
+      _isCoolingDown = false;
+      _queuedCaptureTasks = 0;
       _screenFlashActive = false;
       _shutterBlinkActive = false;
       _showFocusRing = false;
@@ -2564,14 +2570,13 @@ class _CameraScreenState extends State<CameraScreen>
         await _disposeControllerSafely();
       });
     } else if (state == AppLifecycleState.resumed) {
-      final bool wasPaused = _isPausedBackground;
       _isPausedBackground = false;
+      _isInitializingCamera = false;
+      _isSaving = false;
+      _isCoolingDown = false;
+      _queuedCaptureTasks = 0;
       unawaited(_NativeBrightnessService.setKeepScreenOn(true));
       _LatestPhotosGridScreen.invalidateCache();
-      if (_isSaving || _queuedCaptureTasks > 0) {
-        _isCoolingDown = true;
-        unawaited(_waitPostCaptureCooldown(milliseconds: 650));
-      }
       _screenFlashActive = false;
       unawaited(_NativeBrightnessService.restoreNormal());
       if (mounted) {
@@ -2582,12 +2587,6 @@ class _CameraScreenState extends State<CameraScreen>
       }
       _cameraLifecycleChain = _cameraLifecycleChain.then((_) async {
         if (_isPausedBackground || _isDisposed || !mounted) return;
-        if (!wasPaused &&
-            _controller != null &&
-            _controller!.value.isInitialized) {
-          if (mounted) setState(() {});
-          return;
-        }
         await _initCameraByDirection(
           CameraLensDirection.back,
           refreshList: false,
@@ -2944,12 +2943,10 @@ class _CameraScreenState extends State<CameraScreen>
       );
       return;
     }
-    try {
-      await _captureQueue.timeout(const Duration(seconds: 25));
-    } catch (_) {}
-    if (!mounted || _isDisposed || _isAlbumBlocked) return;
 
+    _LatestPhotosGridScreen.invalidateCache();
     setState(() => _openDrawer = ActiveDrawer.none);
+
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => _LatestPhotosGridScreen(
@@ -4476,9 +4473,9 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 }
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
-  static const int _maxFilesScan = 6000;
-  static const int _initialVisibleCount = 45;
-  static const int _pageBatchSize = 45;
+  static const int _maxFilesScan = 2500;
+  static const int _initialVisibleCount = 24;
+  static const int _pageBatchSize = 24;
   static const int _minCollagePhotos = 2;
   static const int _maxCollagePhotos = 6;
   static const double _headerHeight = 42.0;
@@ -4521,6 +4518,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   late final ScrollController _scrollController;
   bool _isLoading = true;
   bool _isDeleting = false;
+  bool _isLoadingMore = false;
   List<_MediaEntry> _entries = [];
   List<_MonthlyPhotoSection> _fullSections = [];
   int _visibleCount = 0;
@@ -4552,15 +4550,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     super.initState();
     _config = widget.initialConfig;
     _scrollController = ScrollController()..addListener(_onScroll);
-    final cached = _LatestPhotosGridScreen._cachedEntries;
-    if (cached != null && cached.isNotEmpty) {
-      _entries = cached;
-      _fullSections = _buildMonthlySections(_entries);
-      _visibleCount = min(_initialVisibleCount, _entries.length);
-      _isLoading = false;
-    } else {
-      unawaited(_loadAllPhotos());
-    }
+    unawaited(_loadAllPhotos(forceRefresh: true));
   }
 
   @override
@@ -4774,9 +4764,16 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
       _scrubFractionNotifier.value = frac;
 
-      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
-        setState(() {
-          _visibleCount = min(total, _visibleCount + _pageBatchSize);
+      if (!_isLoadingMore &&
+          _visibleCount < total &&
+          pos.pixels >= pos.maxScrollExtent - 400) {
+        _isLoadingMore = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _isLoadingMore = false;
+          if (!mounted) return;
+          setState(() {
+            _visibleCount = min(total, _visibleCount + _pageBatchSize);
+          });
         });
       }
     }
@@ -4805,7 +4802,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final int targetIdx =
         (frac * (_entries.length - 1)).round().clamp(0, _entries.length - 1);
     final int neededVisible =
-        min(_entries.length, max(_visibleCount, targetIdx + 24));
+        min(_entries.length, max(_visibleCount, targetIdx + 18));
 
     final double rawTargetOffset =
         _offsetForGlobalIndex(targetIdx, _cachedViewportWidth);
@@ -4862,7 +4859,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!Platform.isAndroid) return;
     try {
       await _mediaStoreChannel.invokeMethod('requestMediaPermissions').timeout(
-            const Duration(seconds: 5),
+            const Duration(seconds: 4),
           );
     } catch (e) {
       debugPrint('requestMediaPermissions belum tersedia/gagal: $e');
@@ -4872,9 +4869,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   Future<List<_MediaEntry>> _queryMediaStoreNative() async {
     if (!Platform.isAndroid) return const [];
     try {
-      final dynamic rawRes = await _mediaStoreChannel.invokeMethod(
-        'getAllImages',
-      ).timeout(const Duration(seconds: 6));
+      final dynamic rawRes = await _mediaStoreChannel
+          .invokeMethod('getAllImages')
+          .timeout(const Duration(seconds: 5));
       if (rawRes == null) return const [];
 
       final List<_MediaEntry> results = [];
@@ -4884,7 +4881,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       if (rawRes is List) {
         for (int i = 0; i < rawRes.length; i++) {
           if (results.length >= _maxFilesScan) break;
-          if (i > 0 && i % 400 == 0) {
+          if (i > 0 && i % 500 == 0) {
             await Future<void>.delayed(Duration.zero);
           }
           final item = rawRes[i];
@@ -4932,6 +4929,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
 
     final Set<String> visitedPaths = {};
+    final DateTime nowFallback = DateTime.now();
 
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
       if (depth > 2 || allEntries.length >= _maxFilesScan) return;
@@ -4940,7 +4938,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         await for (final entity in dir.list(followLinks: false)) {
           if (allEntries.length >= _maxFilesScan) break;
           counter++;
-          if (counter % 200 == 0) {
+          if (counter % 250 == 0) {
             await Future<void>.delayed(Duration.zero);
           }
           final path = entity.path;
@@ -4952,15 +4950,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             if (baseName.startsWith('.')) continue;
             await scanDir(entity, depth: depth + 1);
           } else if (entity is File && _isPhotoFile(path)) {
-            DateTime mod = DateTime.now();
-            try {
-              final stat = await entity.stat();
-              mod = stat.modified;
-            } catch (_) {}
             allEntries.add(
               _MediaEntry(
                 file: entity,
-                modified: mod,
+                modified: nowFallback,
               ),
             );
           }
@@ -5411,7 +5404,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 200,
+                        cacheExtent: 150,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(
@@ -7063,9 +7056,6 @@ class _GalleryWatermarkEditorScreenState
                           final File itemFile = _files[idx];
                           final double? resolvedRatio =
                               _aspectRatioCache[itemFile.path];
-                          if (resolvedRatio == null) {
-                            unawaited(_resolvePhotoAspectRatio(itemFile));
-                          }
 
                           return Center(
                             child: LayoutBuilder(

@@ -107,6 +107,18 @@ class _CompositeDecodedRequest {
   });
 }
 
+class _ImageAspectInfo {
+  final double aspectRatio;
+  final int width;
+  final int height;
+
+  const _ImageAspectInfo({
+    required this.aspectRatio,
+    required this.width,
+    required this.height,
+  });
+}
+
 Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 92}) {
   if (image.width <= 4 || image.height <= 4) {
     throw Exception('Dimensi gambar tidak valid (${image.width}x${image.height})');
@@ -140,6 +152,21 @@ Uint8List _verifyEncodedJpgBytes(
     );
   }
   return jpgBytes;
+}
+
+_ImageAspectInfo? _inspectAspectFromBytesIsolate(Uint8List bytes) {
+  if (bytes.length < 24) return null;
+  final img.Image? decoded = img.decodeImage(bytes);
+  if (decoded == null || decoded.width <= 1 || decoded.height <= 1) {
+    return null;
+  }
+  final img.Image oriented = img.bakeOrientation(decoded);
+  if (oriented.width <= 1 || oriented.height <= 1) return null;
+  return _ImageAspectInfo(
+    aspectRatio: oriented.width / oriented.height,
+    width: oriented.width,
+    height: oriented.height,
+  );
 }
 
 img.Image _decodeAndCropResizeCore(_CropResizeRequest req) {
@@ -1215,7 +1242,7 @@ class _ShutterAudioService {
       bool wavPlayed = false;
       try {
         final path = await _ensureWavFile();
-        AudioPlayer player = await _ensurePlayer();
+        final AudioPlayer player = await _ensurePlayer();
         try {
           await player.stop();
         } catch (_) {}
@@ -1240,10 +1267,6 @@ class _ShutterAudioService {
 
       if (!wavPlayed) {
         await _triggerSystemClickFallback();
-      } else {
-        try {
-          await SystemSound.play(SystemSoundType.click);
-        } catch (_) {}
       }
     });
     return _playChain;
@@ -1260,11 +1283,11 @@ class _ShutterAudioService {
   }
 }
 
-class _TrashService {
+class _PermanentDeleteService {
   static const MethodChannel _mediaStoreChannel =
       MethodChannel('timestamp_by_putra/media_store');
 
-  static Future<bool> confirmMoveToTrash(
+  static Future<bool> confirmPermanentDeleteAndPermission(
     BuildContext context, {
     required int count,
   }) async {
@@ -1272,11 +1295,11 @@ class _TrashService {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1D24),
-        title: const Text('Pindahkan ke Sampah'),
+        title: const Text('Konfirmasi Hapus Permanen'),
         content: Text(
           count == 1
-              ? 'Foto ini akan dipindahkan ke sampah dan tidak dihapus secara permanen. Lanjutkan?'
-              : '$count foto terpilih akan dipindahkan ke sampah dan tidak dihapus secara permanen. Lanjutkan?',
+              ? 'Foto ini akan dihapus secara permanen dari perangkat dan tidak dapat dipulihkan, serta tidak menyisakan data tersisa. Izinkan penghapusan permanen?'
+              : '$count foto terpilih akan dihapus secara permanen dari perangkat dan tidak dapat dipulihkan, serta tidak menyisakan data tersisa. Izinkan penghapusan permanen?',
         ),
         actions: [
           TextButton(
@@ -1289,7 +1312,7 @@ class _TrashService {
               foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Pindah ke Sampah'),
+            child: const Text('Izinkan & Hapus Permanen'),
           ),
         ],
       ),
@@ -1297,7 +1320,56 @@ class _TrashService {
     return confirmed == true;
   }
 
-  static Future<int> moveFilesToTrash(List<String> filePaths) async {
+  static Future<void> _cleanupResidualAppFiles(List<String> deletedPaths) async {
+    final Set<String> baseNames = {};
+    for (final p in deletedPaths) {
+      final normalized = p.replaceAll('\\', '/');
+      final lastSlash = normalized.lastIndexOf('/');
+      if (lastSlash != -1 && lastSlash < normalized.length - 1) {
+        baseNames.add(normalized.substring(lastSlash + 1).toLowerCase());
+      }
+    }
+
+    final List<Directory> appDirs = [];
+    try {
+      appDirs.add(await getTemporaryDirectory());
+    } catch (_) {}
+    try {
+      appDirs.add(await getApplicationSupportDirectory());
+    } catch (_) {}
+    try {
+      appDirs.add(await getApplicationDocumentsDirectory());
+    } catch (_) {}
+
+    for (final dir in appDirs) {
+      try {
+        if (!await dir.exists()) continue;
+        await for (final entity in dir.list(followLinks: false)) {
+          if (entity is File) {
+            final nameLower = entity.path
+                .replaceAll('\\', '/')
+                .split('/')
+                .last
+                .toLowerCase();
+            final bool isMatched = baseNames.contains(nameLower) ||
+                (nameLower.startsWith('collage_hd_') ||
+                    nameLower.startsWith('album_stamp_') ||
+                    nameLower.startsWith('clean_raw_') ||
+                    nameLower.startsWith('with_stamp_'));
+            if (isMatched) {
+              try {
+                if (await entity.exists()) {
+                  await entity.delete();
+                }
+              } catch (_) {}
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  static Future<int> deleteFilesPermanently(List<String> filePaths) async {
     final List<String> cleanPaths = filePaths
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
@@ -1305,19 +1377,25 @@ class _TrashService {
         .toList();
     if (cleanPaths.isEmpty) return 0;
 
-    int movedCount = 0;
+    if (Platform.isAndroid) {
+      try {
+        await _mediaStoreChannel
+            .invokeMethod('requestMediaPermissions')
+            .timeout(const Duration(seconds: 6));
+      } catch (_) {}
+    }
+
+    int deletedCount = 0;
     List<String> remainingPaths = List<String>.from(cleanPaths);
-    bool handledBySystemTrash = false;
 
     if (Platform.isAndroid) {
       try {
         final dynamic nativeRes = await _mediaStoreChannel.invokeMethod(
-          'moveToTrash',
+          'deletePermanently',
           {'paths': remainingPaths},
-        ).timeout(const Duration(seconds: 6));
+        ).timeout(const Duration(seconds: 12));
         if (nativeRes is Map) {
-          handledBySystemTrash = true;
-          movedCount += (nativeRes['movedCount'] as num?)?.toInt() ?? 0;
+          deletedCount += (nativeRes['deletedCount'] as num?)?.toInt() ?? 0;
           final List<dynamic>? unresolvedRaw =
               nativeRes['unresolvedPaths'] as List<dynamic>?;
           remainingPaths = unresolvedRaw != null
@@ -1327,50 +1405,30 @@ class _TrashService {
                   .toList()
               : const [];
         } else if (nativeRes is bool && nativeRes) {
-          handledBySystemTrash = true;
-          movedCount += remainingPaths.length;
+          deletedCount += remainingPaths.length;
           remainingPaths = const [];
         }
       } catch (e) {
-        debugPrint('MediaStore moveToTrash belum tersedia/gagal: $e');
+        debugPrint('Native deletePermanently fallback ke file delete: $e');
       }
     }
 
-    if (!handledBySystemTrash && remainingPaths.isNotEmpty) {
-      Directory? baseDir;
+    for (final String p in remainingPaths) {
       try {
-        baseDir = await getExternalStorageDirectory();
-      } catch (_) {}
-      baseDir ??= await getApplicationDocumentsDirectory();
-
-      final Directory trashDir =
-          Directory('${baseDir.path}${Platform.pathSeparator}Sampah');
-      if (!await trashDir.exists()) {
-        await trashDir.create(recursive: true);
-      }
-
-      for (final String p in remainingPaths) {
-        try {
-          final File src = File(p);
-          if (!await src.exists()) continue;
-          final String baseName = p.split(Platform.pathSeparator).last;
-          final String destPath =
-              '${trashDir.path}${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_$baseName';
-          try {
-            await src.rename(destPath);
-            movedCount++;
-          } catch (_) {
-            await src.copy(destPath);
-            await src.delete();
-            movedCount++;
+        final File f = File(p);
+        if (await f.exists()) {
+          await f.delete();
+          if (!await f.exists()) {
+            deletedCount++;
           }
-        } catch (e) {
-          debugPrint('Gagal memindahkan $p ke folder sampah: $e');
         }
+      } catch (e) {
+        debugPrint('Gagal menghapus file fisik permanen $p: $e');
       }
     }
 
-    return movedCount;
+    await _cleanupResidualAppFiles(cleanPaths);
+    return deletedCount;
   }
 }
 
@@ -1502,12 +1560,14 @@ class _StampRenderer {
   static double aspectScaleFactor(int width, int height) {
     if (width <= 0 || height <= 0) return 1.0;
     final double ratio = width / height;
-    if (ratio >= 0.95) {
+    if (ratio >= 1.25) {
+      return 0.88;
+    } else if (ratio >= 0.95) {
       return 0.94;
     } else if (ratio >= 0.70) {
       return 1.0;
     } else {
-      return 0.90;
+      return 0.88;
     }
   }
 
@@ -2306,6 +2366,7 @@ class _CameraScreenState extends State<CameraScreen>
   int _queuedCaptureTasks = 0;
   Timer? _cooldownTimer;
   Future<void> _captureQueue = Future<void>.value();
+  Future<void> _cameraLifecycleChain = Future<void>.value();
 
   bool _showLogo = false;
   String? _logoFilePath;
@@ -2394,11 +2455,16 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _bootstrapStartupSequence() async {
     final saved = await _AppPrefsStore.load();
-    if (!mounted || _isPausedBackground) return;
+    if (!mounted || _isPausedBackground || _isDisposed) return;
     _applyLoadedPersistentSettings(saved);
 
     await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
-    if (!mounted || _isPausedBackground || _startupPermissionsRequested) return;
+    if (!mounted ||
+        _isPausedBackground ||
+        _isDisposed ||
+        _startupPermissionsRequested) {
+      return;
+    }
     _startupPermissionsRequested = true;
 
     if (Platform.isAndroid) {
@@ -2411,10 +2477,10 @@ class _CameraScreenState extends State<CameraScreen>
       }
     }
 
-    if (!mounted || _isPausedBackground) return;
+    if (!mounted || _isPausedBackground || _isDisposed) return;
     unawaited(_getLocation(requestIfDenied: true));
 
-    if (!mounted || _isPausedBackground) return;
+    if (!mounted || _isPausedBackground || _isDisposed) return;
     unawaited(_ShutterAudioService.warmupAudio());
   }
 
@@ -2435,7 +2501,6 @@ class _CameraScreenState extends State<CameraScreen>
       _isDraggingExposure = false;
       unawaited(_NativeBrightnessService.setKeepScreenOn(false));
       unawaited(_NativeBrightnessService.restoreNormal());
-      unawaited(_forceTorchOff(controllerOverride: _controller));
       if (mounted &&
           (_isManualTime ||
               _openDrawer != ActiveDrawer.none ||
@@ -2446,7 +2511,10 @@ class _CameraScreenState extends State<CameraScreen>
           _systemNow = DateTime.now();
         });
       }
-      unawaited(_disposeControllerSafely());
+      _cameraLifecycleChain = _cameraLifecycleChain.then((_) async {
+        await _forceTorchOff(controllerOverride: _controller);
+        await _disposeControllerSafely();
+      });
     } else if (state == AppLifecycleState.resumed) {
       final bool wasPaused = _isPausedBackground;
       _isPausedBackground = false;
@@ -2456,12 +2524,6 @@ class _CameraScreenState extends State<CameraScreen>
         _isCoolingDown = true;
         unawaited(_waitPostCaptureCooldown(milliseconds: 650));
       }
-      if (!wasPaused &&
-          _controller != null &&
-          _controller!.value.isInitialized) {
-        if (mounted) setState(() {});
-        return;
-      }
       _screenFlashActive = false;
       unawaited(_NativeBrightnessService.restoreNormal());
       if (mounted) {
@@ -2470,11 +2532,19 @@ class _CameraScreenState extends State<CameraScreen>
           _systemNow = DateTime.now();
         });
       }
-      if (_controller == null || !_controller!.value.isInitialized) {
-        unawaited(
-          _initCameraByDirection(CameraLensDirection.back, refreshList: false),
+      _cameraLifecycleChain = _cameraLifecycleChain.then((_) async {
+        if (_isPausedBackground || _isDisposed || !mounted) return;
+        if (!wasPaused &&
+            _controller != null &&
+            _controller!.value.isInitialized) {
+          if (mounted) setState(() {});
+          return;
+        }
+        await _initCameraByDirection(
+          CameraLensDirection.back,
+          refreshList: false,
         );
-      }
+      });
     }
   }
 
@@ -3174,7 +3244,10 @@ class _CameraScreenState extends State<CameraScreen>
     if (_qualityPreset == preset) return;
     setState(() => _qualityPreset = preset);
     await _persistCurrentSettings();
-    await _initCameraByDirection(_currentLens, refreshList: false);
+    _cameraLifecycleChain = _cameraLifecycleChain.then((_) async {
+      await _initCameraByDirection(_currentLens, refreshList: false);
+    });
+    await _cameraLifecycleChain;
   }
 
   Future<void> _toggleFrontBackCamera() async {
@@ -3183,15 +3256,17 @@ class _CameraScreenState extends State<CameraScreen>
     unawaited(_NativeBrightnessService.restoreNormal());
     unawaited(_forceTorchOff(controllerOverride: _controller));
 
-    if (cameras.length < 2) {
-      await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
-      return;
-    }
-    final CameraLensDirection nextDir =
-        _currentLens == CameraLensDirection.back
-            ? CameraLensDirection.front
-            : CameraLensDirection.back;
-    await _initCameraByDirection(nextDir, refreshList: false);
+    _cameraLifecycleChain = _cameraLifecycleChain.then((_) async {
+      if (cameras.length < 2) {
+        await _initCameraByDirection(CameraLensDirection.back, refreshList: true);
+        return;
+      }
+      final CameraLensDirection nextDir =
+          _currentLens == CameraLensDirection.back
+              ? CameraLensDirection.front
+              : CameraLensDirection.back;
+      await _initCameraByDirection(nextDir, refreshList: false);
+    });
   }
 
   void _toggleFlash() {
@@ -3470,16 +3545,13 @@ class _CameraScreenState extends State<CameraScreen>
       final File rawOutFile = File(tempRawPath);
       await rawOutFile.writeAsBytes(cleanRawJpgBytes, flush: true);
 
-      // Langkah 1: Simpan foto asli terlebih dahulu sampai selesai
       if (await rawOutFile.exists() && await rawOutFile.length() > 64) {
         await Gal.putImage(rawOutFile.path);
         savedCount++;
       }
 
-      // Beri jeda agar MediaStore/galeri mencatat foto asli sebelum foto stamp disimpan
       await Future<void>.delayed(const Duration(milliseconds: 220));
 
-      // Langkah 2: Proses, verifikasi, dan simpan foto stamp setelah foto asli selesai
       final Uint8List stampedJpgBytes = stampActive
           ? await _buildStampedWithRetry(
               baseImage: croppedBaseImg,
@@ -4410,12 +4482,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
   final ValueNotifier<double> _scrubFractionNotifier =
       ValueNotifier<double>(0.0);
-  final ValueNotifier<bool> _scrubVisibleNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> _scrubDraggingNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<String?> _scrubDatePillNotifier =
       ValueNotifier<String?>(null);
 
-  Timer? _hideScrubberTimer;
   double? _scrubTargetFraction;
   bool _isProgrammaticJumping = false;
 
@@ -4459,6 +4529,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       if (!_selectionMode) {
         _selectedPaths.clear();
       }
+      _scrubDraggingNotifier.value = false;
+      _scrubDatePillNotifier.value = null;
+      _scrubTargetFraction = null;
     });
   }
 
@@ -4468,6 +4541,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       if (!_selectedPaths.contains(path)) {
         _selectedPaths.add(path);
       }
+      _scrubDraggingNotifier.value = false;
+      _scrubDatePillNotifier.value = null;
+      _scrubTargetFraction = null;
     });
   }
 
@@ -4510,17 +4586,19 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  Future<void> _deleteSelectedToTrash() async {
+  Future<void> _deleteSelectedPermanently() async {
     if (_selectedPaths.isEmpty || _isDeleting) return;
     final List<String> targets = _selectedPaths.toList();
-    final bool ok = await _TrashService.confirmMoveToTrash(
+    final bool ok =
+        await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
       context,
       count: targets.length,
     );
     if (!ok || !mounted) return;
 
     setState(() => _isDeleting = true);
-    final int moved = await _TrashService.moveFilesToTrash(targets);
+    final int deleted =
+        await _PermanentDeleteService.deleteFilesPermanently(targets);
     _LatestPhotosGridScreen.invalidateCache();
     await _loadAllPhotos(forceRefresh: true);
 
@@ -4533,20 +4611,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('$moved foto dipindahkan ke sampah'),
+        content: Text('$deleted foto dihapus permanen'),
         backgroundColor: Colors.green,
       ),
     );
-  }
-
-  void _scheduleScrubberHide({int milliseconds = 1500}) {
-    _hideScrubberTimer?.cancel();
-    if (_scrubDraggingNotifier.value) return;
-    _hideScrubberTimer = Timer(Duration(milliseconds: milliseconds), () {
-      if (!mounted || _scrubDraggingNotifier.value) return;
-      _scrubVisibleNotifier.value = false;
-      _scrubDatePillNotifier.value = null;
-    });
   }
 
   double _cellExtent(double viewportWidth) {
@@ -4656,10 +4724,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             );
 
       _scrubFractionNotifier.value = frac;
-      if (!_scrubVisibleNotifier.value && pos.pixels > 6) {
-        _scrubVisibleNotifier.value = true;
-      }
-      _scheduleScrubberHide();
 
       if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
         setState(() {
@@ -4674,19 +4738,18 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final double clampedFrac = frac.clamp(0.0, 1.0);
     _scrubTargetFraction = clampedFrac;
     _scrubFractionNotifier.value = clampedFrac;
-    _scrubVisibleNotifier.value = true;
     _scrubDraggingNotifier.value = true;
     _scrubDatePillNotifier.value = _resolveDateLabelAtFraction(clampedFrac);
   }
 
   void _commitScrubJump() {
     _scrubDraggingNotifier.value = false;
+    _scrubDatePillNotifier.value = null;
     final double frac =
         (_scrubTargetFraction ?? _scrubFractionNotifier.value).clamp(0.0, 1.0);
     _scrubTargetFraction = null;
 
     if (!_scrollController.hasClients || _entries.isEmpty) {
-      _scheduleScrubberHide();
       return;
     }
 
@@ -4736,8 +4799,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     } else {
       runJump(clampTargetToBounds(rawTargetOffset));
     }
-
-    _scheduleScrubberHide();
   }
 
   bool _isPhotoFile(String path) {
@@ -4772,8 +4833,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       final DateTime nowFallback = DateTime.now();
 
       if (rawRes is List) {
-        for (final item in rawRes) {
+        for (int i = 0; i < rawRes.length; i++) {
           if (results.length >= _maxFilesScan) break;
+          if (i > 0 && i % 400 == 0) {
+            await Future<void>.delayed(Duration.zero);
+          }
+          final item = rawRes[i];
           String path = '';
           DateTime mod = nowFallback;
 
@@ -4822,8 +4887,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
       if (depth > 2 || allEntries.length >= _maxFilesScan) return;
       try {
+        int counter = 0;
         await for (final entity in dir.list(followLinks: false)) {
           if (allEntries.length >= _maxFilesScan) break;
+          counter++;
+          if (counter % 200 == 0) {
+            await Future<void>.delayed(Duration.zero);
+          }
           final path = entity.path;
           if (visitedPaths.contains(path)) continue;
           visitedPaths.add(path);
@@ -4833,10 +4903,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             if (baseName.startsWith('.')) continue;
             await scanDir(entity, depth: depth + 1);
           } else if (entity is File && _isPhotoFile(path)) {
+            DateTime mod = DateTime.now();
+            try {
+              final stat = await entity.stat();
+              mod = stat.modified;
+            } catch (_) {}
             allEntries.add(
               _MediaEntry(
                 file: entity,
-                modified: DateTime.now(),
+                modified: mod,
               ),
             );
           }
@@ -4982,154 +5057,148 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (_entries.length < 6) return const SizedBox.shrink();
 
     return Positioned.fill(
-      child: LayoutBuilder(
-        builder: (context, box) {
-          const double thumbHeight = 62.0;
-          const double thumbWidth = 32.0;
-          final double trackHeight = max(80.0, box.maxHeight - 24.0);
-          final double usableHeight = max(1.0, trackHeight - thumbHeight);
+      child: IgnorePointer(
+        ignoring: false,
+        child: LayoutBuilder(
+          builder: (context, box) {
+            const double thumbHeight = 62.0;
+            const double thumbWidth = 34.0;
+            final double trackHeight = max(80.0, box.maxHeight - 24.0);
+            final double usableHeight = max(1.0, trackHeight - thumbHeight);
 
-          return Stack(
-            children: [
-              ValueListenableBuilder<bool>(
-                valueListenable: _scrubDraggingNotifier,
-                builder: (context, isDragging, _) {
-                  if (!isDragging) return const SizedBox.shrink();
-                  return ValueListenableBuilder<String?>(
-                    valueListenable: _scrubDatePillNotifier,
-                    builder: (context, pillText, _) {
-                      if (pillText == null) return const SizedBox.shrink();
-                      return Positioned(
-                        top: 16,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF282C36),
-                              borderRadius: BorderRadius.circular(24),
-                              border: Border.all(
-                                color: const Color(0xFFFFD000),
-                                width: 1.2,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.55),
-                                  blurRadius: 10,
+            return Stack(
+              children: [
+                ValueListenableBuilder<bool>(
+                  valueListenable: _scrubDraggingNotifier,
+                  builder: (context, isDragging, _) {
+                    if (!isDragging) return const SizedBox.shrink();
+                    return ValueListenableBuilder<String?>(
+                      valueListenable: _scrubDatePillNotifier,
+                      builder: (context, pillText, _) {
+                        if (pillText == null) return const SizedBox.shrink();
+                        return Positioned(
+                          top: 16,
+                          left: 0,
+                          right: 0,
+                          child: IgnorePointer(
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 18,
+                                  vertical: 8,
                                 ),
-                              ],
-                            ),
-                            child: Text(
-                              pillText,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF282C36),
+                                  borderRadius: BorderRadius.circular(24),
+                                  border: Border.all(
+                                    color: const Color(0xFFFFD000),
+                                    width: 1.2,
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.55),
+                                      blurRadius: 10,
+                                    ),
+                                  ],
+                                ),
+                                child: Text(
+                                  pillText,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    },
-                  );
-                },
-              ),
-              Positioned(
-                right: 0,
-                top: 12,
-                height: trackHeight,
-                width: 52,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onVerticalDragStart: (details) {
-                    final frac =
-                        (details.localPosition.dy / trackHeight).clamp(0.0, 1.0);
-                    _previewScrubAtFraction(frac);
+                        );
+                      },
+                    );
                   },
-                  onVerticalDragUpdate: (details) {
-                    final frac =
-                        (details.localPosition.dy / trackHeight).clamp(0.0, 1.0);
-                    _previewScrubAtFraction(frac);
-                  },
-                  onVerticalDragEnd: (_) => _commitScrubJump(),
-                  onVerticalDragCancel: () => _commitScrubJump(),
-                  onTapDown: (details) {
-                    final frac =
-                        (details.localPosition.dy / trackHeight).clamp(0.0, 1.0);
-                    _previewScrubAtFraction(frac);
-                    _commitScrubJump();
-                  },
-                  child: ValueListenableBuilder<double>(
-                    valueListenable: _scrubFractionNotifier,
-                    builder: (context, frac, _) {
-                      final double thumbTop =
-                          (frac * usableHeight).clamp(0.0, usableHeight);
-                      return ValueListenableBuilder<bool>(
-                        valueListenable: _scrubDraggingNotifier,
-                        builder: (context, isDragging, __) {
-                          return Stack(
-                            children: [
-                              Positioned(
-                                right: 8,
-                                top: thumbTop,
-                                child: Container(
-                                  width: thumbWidth,
-                                  height: thumbHeight,
-                                  decoration: BoxDecoration(
-                                    color: isDragging
-                                        ? const Color(0xFFFFD000)
-                                        : const Color(0xFF2E3440),
-                                    borderRadius: BorderRadius.circular(16),
-                                    border: Border.all(
-                                      color: isDragging
-                                          ? Colors.white
-                                          : Colors.white38,
-                                      width: 1.2,
-                                    ),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color:
-                                            Colors.black.withValues(alpha: 0.5),
-                                        blurRadius: 6,
-                                      ),
-                                    ],
-                                  ),
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(
-                                        Icons.arrow_drop_up,
-                                        size: 18,
-                                        color: isDragging
-                                            ? Colors.black
-                                            : Colors.white,
-                                      ),
-                                      Icon(
-                                        Icons.arrow_drop_down,
-                                        size: 18,
-                                        color: isDragging
-                                            ? Colors.black
-                                            : Colors.white,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  ),
                 ),
-              ),
-            ],
-          );
-        },
+                ValueListenableBuilder<double>(
+                  valueListenable: _scrubFractionNotifier,
+                  builder: (context, frac, _) {
+                    final double thumbTop =
+                        12.0 + (frac * usableHeight).clamp(0.0, usableHeight);
+                    return Positioned(
+                      right: 6,
+                      top: thumbTop,
+                      width: thumbWidth,
+                      height: thumbHeight,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (details) {
+                          final double currentTop = thumbTop - 12.0;
+                          final double startFrac =
+                              (currentTop / usableHeight).clamp(0.0, 1.0);
+                          _previewScrubAtFraction(startFrac);
+                        },
+                        onPanUpdate: (details) {
+                          final double curFrac =
+                              (_scrubTargetFraction ?? _scrubFractionNotifier.value)
+                                  .clamp(0.0, 1.0);
+                          final double deltaFrac =
+                              details.delta.dy / usableHeight;
+                          _previewScrubAtFraction(curFrac + deltaFrac);
+                        },
+                        onPanEnd: (_) => _commitScrubJump(),
+                        onPanCancel: () => _commitScrubJump(),
+                        child: ValueListenableBuilder<bool>(
+                          valueListenable: _scrubDraggingNotifier,
+                          builder: (context, isDragging, __) {
+                            return Container(
+                              width: thumbWidth,
+                              height: thumbHeight,
+                              decoration: BoxDecoration(
+                                color: isDragging
+                                    ? const Color(0xFFFFD000)
+                                    : const Color(0xFF2E3440),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: isDragging
+                                      ? Colors.white
+                                      : Colors.white38,
+                                  width: 1.2,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color:
+                                        Colors.black.withValues(alpha: 0.5),
+                                    blurRadius: 6,
+                                  ),
+                                ],
+                              ),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.arrow_drop_up,
+                                    size: 18,
+                                    color:
+                                        isDragging ? Colors.black : Colors.white,
+                                  ),
+                                  Icon(
+                                    Icons.arrow_drop_down,
+                                    size: 18,
+                                    color:
+                                        isDragging ? Colors.black : Colors.white,
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -5166,9 +5235,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
               ),
             ),
             IconButton(
-              onPressed: _isDeleting ? null : _deleteSelectedToTrash,
-              icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
-              tooltip: 'Pindahkan ke Sampah',
+              onPressed: _isDeleting ? null : _deleteSelectedPermanently,
+              icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
+              tooltip: 'Hapus Permanen',
             ),
             const SizedBox(width: 6),
             FilledButton(
@@ -5207,11 +5276,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
   @override
   void dispose() {
-    _hideScrubberTimer?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _scrubFractionNotifier.dispose();
-    _scrubVisibleNotifier.dispose();
     _scrubDraggingNotifier.dispose();
     _scrubDatePillNotifier.dispose();
     super.dispose();
@@ -5732,9 +5799,9 @@ class _CollageStagePreviewScreenState
   }
 
   int _targetHdCanvasWidth(int count) {
-    if (count <= 3) return 1600;
-    if (count <= 5) return 1800;
-    return 2048;
+    if (count <= 3) return 1440;
+    if (count <= 5) return 1600;
+    return 1800;
   }
 
   Future<Uint8List?> _loadCroppedSlotBytesAsync({
@@ -6236,6 +6303,7 @@ class _GalleryWatermarkEditorScreenState
   bool _isClosingEmpty = false;
   bool _isClosingScreen = false;
   final Map<String, double> _aspectRatioCache = {};
+  final Set<String> _resolvingPaths = {};
 
   @override
   void initState() {
@@ -6248,7 +6316,7 @@ class _GalleryWatermarkEditorScreenState
     _pageController = PageController(initialPage: _currentIndex);
     _stampVisible = false;
     if (_files.isNotEmpty) {
-      unawaited(_resolvePhotoAspectRatio(_files[_currentIndex]));
+      _prefetchAroundIndex(_currentIndex);
     }
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
@@ -6256,6 +6324,15 @@ class _GalleryWatermarkEditorScreenState
         setState(() => _nowClock = DateTime.now());
       }
     });
+  }
+
+  void _prefetchAroundIndex(int idx) {
+    if (_files.isEmpty) return;
+    final int start = max(0, idx - 1);
+    final int end = min(_files.length - 1, idx + 1);
+    for (int i = start; i <= end; i++) {
+      unawaited(_resolvePhotoAspectRatio(_files[i]));
+    }
   }
 
   void _safeCloseEditor(bool changed) {
@@ -6273,83 +6350,28 @@ class _GalleryWatermarkEditorScreenState
   }
 
   Future<void> _resolvePhotoAspectRatio(File file) async {
-    if (_aspectRatioCache.containsKey(file.path)) return;
+    final String path = file.path;
+    if (_aspectRatioCache.containsKey(path) || _resolvingPaths.contains(path)) {
+      return;
+    }
+    _resolvingPaths.add(path);
     try {
       if (!await file.exists()) return;
-      final size = await _readImageDimensionsFast(file);
-      if (size == null || size.width <= 0 || size.height <= 0) return;
+      final Uint8List bytes = await file.readAsBytes();
+      if (bytes.length < 24) return;
+      final _ImageAspectInfo? info =
+          await compute(_inspectAspectFromBytesIsolate, bytes);
+      if (info == null || info.aspectRatio <= 0.1 || info.aspectRatio > 10.0) {
+        return;
+      }
       if (!mounted) return;
       setState(() {
-        _aspectRatioCache[file.path] = size.width / size.height;
+        _aspectRatioCache[path] = info.aspectRatio;
       });
-    } catch (_) {}
-  }
-
-  Future<Size?> _readImageDimensionsFast(File file) async {
-    try {
-      final raf = await file.open(mode: FileMode.read);
-      try {
-        final len = await raf.length();
-        final int readLen = min(len, 65536);
-        final Uint8List head = await raf.read(readLen);
-
-        if (head.length >= 24 &&
-            head[0] == 0x89 &&
-            head[1] == 0x50 &&
-            head[2] == 0x4E &&
-            head[3] == 0x47) {
-          final int w = (head[16] << 24) |
-              (head[17] << 16) |
-              (head[18] << 8) |
-              (head[19]);
-          final int h = (head[20] << 24) |
-              (head[21] << 16) |
-              (head[22] << 8) |
-              (head[23]);
-          if (w > 0 && h > 0) {
-            return Size(w.toDouble(), h.toDouble());
-          }
-        }
-
-        if (head.length >= 4 && head[0] == 0xFF && head[1] == 0xD8) {
-          int i = 2;
-          while (i + 9 < head.length) {
-            if (head[i] != 0xFF) {
-              i++;
-              continue;
-            }
-            final int marker = head[i + 1];
-            if (marker == 0xD9 || marker == 0xDA) break;
-            if (marker == 0xC0 ||
-                marker == 0xC1 ||
-                marker == 0xC2 ||
-                marker == 0xC3 ||
-                marker == 0xC5 ||
-                marker == 0xC6 ||
-                marker == 0xC7 ||
-                marker == 0xC9 ||
-                marker == 0xCA ||
-                marker == 0xCB ||
-                marker == 0xCD ||
-                marker == 0xCE ||
-                marker == 0xCF) {
-              final int h = (head[i + 5] << 8) | head[i + 6];
-              final int w = (head[i + 7] << 8) | head[i + 8];
-              if (w > 0 && h > 0) {
-                return Size(w.toDouble(), h.toDouble());
-              }
-            }
-            if (i + 3 >= head.length) break;
-            final int segLen = (head[i + 2] << 8) | head[i + 3];
-            if (segLen < 2) break;
-            i += 2 + segLen;
-          }
-        }
-      } finally {
-        await raf.close();
-      }
-    } catch (_) {}
-    return null;
+    } catch (_) {
+    } finally {
+      _resolvingPaths.remove(path);
+    }
   }
 
   @override
@@ -6570,25 +6592,27 @@ class _GalleryWatermarkEditorScreenState
     });
   }
 
-  Future<void> _deleteCurrentPhotoToTrash() async {
+  Future<void> _deleteCurrentPhotoPermanently() async {
     final File? target = _currentFile;
     if (target == null || _isSaving || _isClosingEmpty) return;
 
-    final bool confirmed = await _TrashService.confirmMoveToTrash(
+    final bool confirmed =
+        await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
       context,
       count: 1,
     );
     if (!confirmed || !mounted) return;
 
     setState(() => _isSaving = true);
-    final int moved = await _TrashService.moveFilesToTrash([target.path]);
+    final int deleted =
+        await _PermanentDeleteService.deleteFilesPermanently([target.path]);
     if (!mounted) return;
     setState(() => _isSaving = false);
 
-    if (moved <= 0) {
+    if (deleted <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Gagal memindahkan foto ke sampah'),
+          content: Text('Gagal menghapus foto secara permanen'),
           backgroundColor: Colors.red,
         ),
       );
@@ -6596,6 +6620,7 @@ class _GalleryWatermarkEditorScreenState
     }
 
     _anyChanged = true;
+    _aspectRatioCache.remove(target.path);
     _LatestPhotosGridScreen.invalidateCache();
 
     final int removedIdx = _currentIndex;
@@ -6625,12 +6650,12 @@ class _GalleryWatermarkEditorScreenState
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_pageController.hasClients) return;
       _pageController.jumpToPage(nextIdx);
-      unawaited(_resolvePhotoAspectRatio(nextFiles[nextIdx]));
+      _prefetchAroundIndex(nextIdx);
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Foto dipindahkan ke sampah'),
+        content: Text('Foto dihapus permanen'),
         backgroundColor: Colors.green,
       ),
     );
@@ -6903,11 +6928,6 @@ class _GalleryWatermarkEditorScreenState
 
   @override
   Widget build(BuildContext context) {
-    final double dpr = MediaQuery.of(context).devicePixelRatio;
-    final Size screenSize = MediaQuery.of(context).size;
-    final int decodeW = max(360, (screenSize.width * dpr).round());
-    final int decodeH = max(480, (screenSize.height * dpr).round());
-
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -6940,9 +6960,9 @@ class _GalleryWatermarkEditorScreenState
             IconButton(
               onPressed: (_isSaving || _isClosingScreen)
                   ? null
-                  : _deleteCurrentPhotoToTrash,
-              icon: const Icon(Icons.delete_outline, color: Color(0xFFFF5A5F)),
-              tooltip: 'Pindahkan ke Sampah',
+                  : _deleteCurrentPhotoPermanently,
+              icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
+              tooltip: 'Hapus Permanen',
             ),
             Padding(
               padding: const EdgeInsets.only(right: 10),
@@ -6986,25 +7006,74 @@ class _GalleryWatermarkEditorScreenState
                         controller: _pageController,
                         itemCount: _files.length,
                         onPageChanged: (idx) {
-                          _currentIndex = idx;
-                          unawaited(_resolvePhotoAspectRatio(_files[idx]));
+                          setState(() => _currentIndex = idx);
+                          _prefetchAroundIndex(idx);
                         },
                         itemBuilder: (context, idx) {
                           final File itemFile = _files[idx];
-                          final double ratio =
-                              _aspectRatioCache[itemFile.path] ?? (3.0 / 4.0);
+                          final double? resolvedRatio =
+                              _aspectRatioCache[itemFile.path];
+                          if (resolvedRatio == null) {
+                            unawaited(_resolvePhotoAspectRatio(itemFile));
+                          }
+
                           return Center(
                             child: LayoutBuilder(
                               builder: (context, outerBox) {
+                                final double availW =
+                                    max(1.0, outerBox.maxWidth);
+                                final double availH =
+                                    outerBox.maxHeight.isFinite
+                                        ? max(1.0, outerBox.maxHeight)
+                                        : availW * (4.0 / 3.0);
+
+                                if (resolvedRatio == null) {
+                                  return SizedBox(
+                                    width: availW,
+                                    height: availH,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        Image.file(
+                                          itemFile,
+                                          fit: BoxFit.contain,
+                                          gaplessPlayback: true,
+                                          errorBuilder: (_, __, ___) =>
+                                              const Center(
+                                            child: Text(
+                                              'Gagal memuat foto',
+                                              style: TextStyle(
+                                                color: Colors.white70,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        if (_stampVisible)
+                                          Positioned(
+                                            left: 0,
+                                            right: 0,
+                                            bottom: 0,
+                                            child: _buildStampOverlayWidget(
+                                              activeDt: _activeDateTime(),
+                                              cfg: _cfg,
+                                              boxWidth: availW,
+                                              boxHeight: availH,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                }
+
                                 final double safeRatio =
-                                    ratio > 0 ? ratio : (3.0 / 4.0);
-                                double boxW = outerBox.maxWidth;
+                                    resolvedRatio.clamp(0.15, 6.0);
+                                double boxW = availW;
                                 double boxH = boxW / safeRatio;
-                                if (outerBox.maxHeight.isFinite &&
-                                    boxH > outerBox.maxHeight) {
-                                  boxH = outerBox.maxHeight;
+                                if (boxH > availH) {
+                                  boxH = availH;
                                   boxW = boxH * safeRatio;
                                 }
+
                                 return SizedBox(
                                   width: boxW,
                                   height: boxH,
@@ -7013,11 +7082,7 @@ class _GalleryWatermarkEditorScreenState
                                     children: [
                                       Image.file(
                                         itemFile,
-                                        cacheWidth: decodeW,
-                                        cacheHeight: decodeH,
-                                        fit: BoxFit.contain,
-                                        width: boxW,
-                                        height: boxH,
+                                        fit: BoxFit.fill,
                                         gaplessPlayback: true,
                                         errorBuilder: (_, __, ___) =>
                                             const Center(

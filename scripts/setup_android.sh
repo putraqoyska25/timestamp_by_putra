@@ -230,206 +230,186 @@ class MainActivity : FlutterActivity() {
 
         val projection = arrayOf(
             MediaStore.Images.Media.DATA,
+            MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.DATE_MODIFIED,
         )
-        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
+        val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC, ${MediaStore.Images.Media.DATE_MODIFIED} DESC"
 
         try {
-            contentResolver.query(collection, projection, null, null, sortOrder)
-                ?.use { cursor ->
-                    val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-                    val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
-                    if (dataCol >= 0) {
-                        while (cursor.moveToNext()) {
-                            val path = cursor.getString(dataCol)?.trim() ?: ""
-                            if (path.isNotEmpty() && seen.add(path) && File(path).exists()) {
-                                val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
-                                val entry = HashMap<String, Any>()
-                                entry["path"] = path
-                                entry["dateModified"] = modSec
-                                list.add(entry)
-                            }
-                        }
+            contentResolver.query(
+                collection,
+                projection,
+                null,
+                null,
+                sortOrder,
+            )?.use { cursor ->
+                val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+
+                while (cursor.moveToNext() && list.size < 2500) {
+                    val path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
+                    if (path.isEmpty() || seen.contains(path)) continue
+                    val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
+                    val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
+                    val effectiveSec = when {
+                        takenMs > 0L -> takenMs / 1000L
+                        modSec > 0L -> modSec
+                        else -> System.currentTimeMillis() / 1000L
                     }
+                    seen.add(path)
+                    list.add(
+                        hashMapOf<String, Any>(
+                            "path" to path,
+                            "dateModified" to effectiveSec,
+                        )
+                    )
                 }
+            }
         } catch (_: Exception) {
         }
+
         return list
     }
 
-    private fun buildDeleteResponse(deletedCount: Int, unresolved: ArrayList<String>): HashMap<String, Any> {
-        val resMap = HashMap<String, Any>()
-        resMap["deletedCount"] = deletedCount
-        resMap["movedCount"] = deletedCount
-        resMap["unresolvedPaths"] = unresolved
-        return resMap
-    }
-
-    private fun deletePathsPermanently(paths: ArrayList<String>, result: MethodChannel.Result) {
-        if (paths.isEmpty()) {
-            result.success(buildDeleteResponse(0, arrayListOf<String>()))
-            return
-        }
-
-        if (pendingDeleteResult != null) {
-            result.error("IN_PROGRESS", "Proses penghapusan sedang berjalan", null)
-            return
-        }
-
-        var directDeleted = 0
-        val needsSystemDialogPaths = arrayListOf<String>()
-        val needsSystemDialogUris = arrayListOf<Uri>()
-        val seenUris = HashSet<String>()
-        val unresolved = arrayListOf<String>()
+    private fun resolveMediaUriForPath(path: String): Uri? {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         }
 
-        for (p in paths) {
-            val uri = findImageUriByPath(collection, p)
-            val file = File(p)
-            var deletedDirectly = false
+        try {
+            contentResolver.query(
+                collection,
+                arrayOf(MediaStore.Images.Media._ID),
+                "${MediaStore.Images.Media.DATA} = ?",
+                arrayOf(path),
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idCol = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+                    if (idCol >= 0) {
+                        val id = cursor.getLong(idCol)
+                        return ContentUris.withAppendedId(collection, id)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
 
-            if (file.exists()) {
+        return null
+    }
+
+    private fun deletePathsPermanently(
+        paths: List<String>,
+        result: MethodChannel.Result,
+    ) {
+        if (paths.isEmpty()) {
+            result.success(
+                hashMapOf<String, Any>(
+                    "deletedCount" to 0,
+                    "unresolvedPaths" to emptyList<String>(),
+                )
+            )
+            return
+        }
+
+        var directDeleted = 0
+        val urisToRequest = arrayListOf<Uri>()
+        val unresolvedPaths = arrayListOf<String>()
+        val scannedPaths = arrayListOf<String>()
+
+        for (rawPath in paths) {
+            val clean = rawPath.trim()
+            if (clean.isEmpty()) continue
+            scannedPaths.add(clean)
+
+            var removed = false
+            val f = File(clean)
+            if (f.exists()) {
                 try {
-                    if (file.delete()) {
-                        deletedDirectly = true
+                    if (f.delete()) {
+                        removed = true
+                    }
+                } catch (_: SecurityException) {
+                    removed = false
+                } catch (_: Exception) {
+                    removed = false
+                }
+            }
+
+            val uri = resolveMediaUriForPath(clean)
+            if (!removed && uri != null) {
+                try {
+                    val rows = contentResolver.delete(uri, null, null)
+                    if (rows > 0) {
+                        removed = true
+                    }
+                } catch (_: SecurityException) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                        !urisToRequest.contains(uri)
+                    ) {
+                        urisToRequest.add(uri)
                     }
                 } catch (_: Exception) {
                 }
             }
 
-            if (deletedDirectly) {
+            if (removed) {
                 directDeleted++
-                if (uri != null) {
-                    try {
-                        contentResolver.delete(uri, null, null)
-                    } catch (_: Exception) {
-                    }
-                }
-                MediaScannerConnection.scanFile(this, arrayOf(p), null, null)
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && uri != null) {
-                if (seenUris.add(uri.toString())) {
-                    needsSystemDialogUris.add(uri)
-                    needsSystemDialogPaths.add(p)
-                }
-            } else if (!file.exists()) {
-                if (uri != null) {
-                    try {
-                        contentResolver.delete(uri, null, null)
-                    } catch (_: Exception) {
-                    }
-                }
-                directDeleted++
-            } else {
-                unresolved.add(p)
+            } else if (uri == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                unresolvedPaths.add(clean)
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && needsSystemDialogUris.isNotEmpty()) {
+        if (scannedPaths.isNotEmpty()) {
+            try {
+                MediaScannerConnection.scanFile(
+                    this,
+                    scannedPaths.toTypedArray(),
+                    null,
+                    null,
+                )
+            } catch (_: Exception) {
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && urisToRequest.isNotEmpty()) {
+            if (pendingDeleteResult != null) {
+                result.error("IN_PROGRESS", "Penghapusan permanen sedang berjalan", null)
+                return
+            }
             try {
                 val pendingIntent = MediaStore.createDeleteRequest(
                     contentResolver,
-                    needsSystemDialogUris,
+                    urisToRequest,
                 )
                 pendingDeleteResult = result
-                pendingDeleteUriCount = needsSystemDialogUris.size
+                pendingDeleteUriCount = urisToRequest.size
                 pendingDirectDeletedCount = directDeleted
-                pendingDeletePaths = needsSystemDialogPaths
-                startIntentSenderForResult(
+                pendingDeletePaths = unresolvedPaths
+                ActivityCompat.startIntentSenderForResult(
+                    this,
                     pendingIntent.intentSender,
                     reqDeleteCode,
                     null,
                     0,
                     0,
                     0,
+                    null,
                 )
                 return
             } catch (_: Exception) {
-                unresolved.addAll(needsSystemDialogPaths)
-            }
-        } else {
-            unresolved.addAll(needsSystemDialogPaths)
-        }
-
-        result.success(buildDeleteResponse(directDeleted, unresolved))
-    }
-
-    private fun findImageUriByPath(
-        collection: Uri,
-        filePath: String,
-    ): Uri? {
-        val candidates = linkedSetOf(filePath)
-        if (filePath.startsWith("/storage/emulated/0/")) {
-            candidates.add("/sdcard/" + filePath.removePrefix("/storage/emulated/0/"))
-        } else if (filePath.startsWith("/sdcard/")) {
-            candidates.add("/storage/emulated/0/" + filePath.removePrefix("/sdcard/"))
-        }
-
-        val projection = arrayOf(MediaStore.Images.Media._ID)
-        for (candidate in candidates) {
-            try {
-                val selection = "${MediaStore.Images.Media.DATA} = ?"
-                val args = arrayOf(candidate)
-                contentResolver.query(collection, projection, selection, args, null)
-                    ?.use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            val id = cursor.getLong(
-                                cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                            )
-                            return ContentUris.withAppendedId(collection, id)
-                        }
-                    }
-            } catch (_: Exception) {
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val f = File(filePath)
-                val name = f.name
-                val parentPath = f.parent ?: ""
-                val relDir = when {
-                    parentPath.startsWith("/storage/emulated/0/") ->
-                        parentPath.removePrefix("/storage/emulated/0/").trimEnd('/') + "/"
-                    parentPath.startsWith("/sdcard/") ->
-                        parentPath.removePrefix("/sdcard/").trimEnd('/') + "/"
-                    else -> ""
-                }
-                if (name.isNotEmpty()) {
-                    if (relDir.isNotEmpty()) {
-                        val selection =
-                            "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} IN (?, ?)"
-                        val args = arrayOf(name, relDir, relDir.trimEnd('/'))
-                        contentResolver.query(collection, projection, selection, args, null)
-                            ?.use { cursor ->
-                                if (cursor.moveToFirst()) {
-                                    val id = cursor.getLong(
-                                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                                    )
-                                    return ContentUris.withAppendedId(collection, id)
-                                }
-                            }
-                    }
-                    val fallbackSelection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
-                    val fallbackArgs = arrayOf(name)
-                    contentResolver.query(collection, projection, fallbackSelection, fallbackArgs, null)
-                        ?.use { cursor ->
-                            if (cursor.moveToFirst()) {
-                                val id = cursor.getLong(
-                                    cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                                )
-                                return ContentUris.withAppendedId(collection, id)
-                            }
-                        }
-                }
-            } catch (_: Exception) {
-            }
-        }
-
-        return null
+        result.success(
+            hashMapOf<String, Any>(
+                "deletedCount" to directDeleted,
+                "unresolvedPaths" to unresolvedPaths,
+            )
+        )
     }
 
     override fun onRequestPermissionsResult(
@@ -439,10 +419,9 @@ class MainActivity : FlutterActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == reqMediaCode) {
-            val granted = grantResults.isNotEmpty() &&
-                grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            pendingPermResult?.success(granted)
+            val cb = pendingPermResult
             pendingPermResult = null
+            cb?.success(hasAllMediaPermissions())
         }
     }
 
@@ -453,31 +432,32 @@ class MainActivity : FlutterActivity() {
     ) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == reqDeleteCode) {
-            val res = pendingDeleteResult
+            val cb = pendingDeleteResult
             val uriCount = pendingDeleteUriCount
-            val directCount = pendingDirectDeletedCount
-            val rem = pendingDeletePaths
+            val directDeleted = pendingDirectDeletedCount
+            val unresolved = pendingDeletePaths
+
             pendingDeleteResult = null
             pendingDeleteUriCount = 0
             pendingDirectDeletedCount = 0
             pendingDeletePaths = arrayListOf()
-            if (res != null) {
-                if (resultCode == Activity.RESULT_OK) {
-                    res.success(buildDeleteResponse(directCount + uriCount, arrayListOf<String>()))
-                } else {
-                    res.success(buildDeleteResponse(directCount, rem))
-                }
-            }
+
+            val granted = resultCode == Activity.RESULT_OK
+            val totalDeleted = if (granted) directDeleted + uriCount else directDeleted
+            cb?.success(
+                hashMapOf<String, Any>(
+                    "deletedCount" to totalDeleted,
+                    "unresolvedPaths" to unresolved,
+                )
+            )
         }
     }
 }
 """.replace("__PKG__", pkg_name)
 
 kt_path.write_text(kotlin_code, encoding="utf-8")
-print(f"Berhasil menulis MainActivity.kt ({kt_path}) dengan package {pkg_name}")
+print(f"Berhasil memperbarui {kt_path}")
 PY
-else
-  echo "PERINGATAN: MainActivity.kt tidak ditemukan di android/app/src/main"
 fi
 
-echo "=== Selesai setup Android ==="
+echo "=== Setup Android selesai ==="

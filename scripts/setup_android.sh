@@ -198,8 +198,8 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun queryAllImagePaths(): ArrayList> {
-        val list = arrayListOf>()
+    private fun queryAllImagePaths(): ArrayList<Any> {
+        val list = arrayListOf<Any>()
         if (!hasAllMediaPermissions()) return list
 
         val seen = HashSet<String>()

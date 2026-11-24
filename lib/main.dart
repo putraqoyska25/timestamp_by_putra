@@ -164,12 +164,13 @@ Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
       cropped,
       width: outW,
       height: outH,
-      interpolation: img.Interpolation.linear,
+      interpolation: img.Interpolation.cubic,
     );
   }
 
+  final img.Image cleanRgb = cropped.convert(numChannels: 3, alpha: 255);
   final Uint8List encoded =
-      Uint8List.fromList(img.encodeJpg(cropped, quality: 92));
+      Uint8List.fromList(img.encodeJpg(cleanRgb, quality: 94));
   if (encoded.isEmpty) {
     throw Exception('Hasil encoding JPG kosong');
   }
@@ -226,11 +227,12 @@ Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
     cropped,
     width: max(1, req.dstW),
     height: max(1, req.dstH),
-    interpolation: img.Interpolation.linear,
+    interpolation: img.Interpolation.cubic,
   );
 
+  final img.Image cleanRgb = resized.convert(numChannels: 3, alpha: 255);
   final Uint8List out =
-      Uint8List.fromList(img.encodeJpg(resized, quality: 92));
+      Uint8List.fromList(img.encodeJpg(cleanRgb, quality: 94));
   return out.isEmpty ? null : out;
 }
 
@@ -244,21 +246,19 @@ Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
   }
 
   final img.Image oriented = img.bakeOrientation(decoded);
-  final img.Image baseImg = oriented.numChannels == 4
-      ? oriented
-      : oriented.convert(numChannels: 4, alpha: 255);
+  final img.Image baseImg = oriented.convert(numChannels: 4, alpha: 255);
 
   final Uint8List? overlayBytes = req.overlayRgbaBytes;
   if (overlayBytes != null && overlayBytes.isNotEmpty) {
-    final int expectedLen = req.targetW * req.targetH * 4;
+    final int expectedLen = baseImg.width * baseImg.height * 4;
     if (req.targetW == baseImg.width &&
         req.targetH == baseImg.height &&
         overlayBytes.lengthInBytes >= expectedLen) {
       final Uint8List exactCopy = Uint8List(expectedLen)
         ..setRange(0, expectedLen, overlayBytes);
       final img.Image overlayImg = img.Image.fromBytes(
-        width: req.targetW,
-        height: req.targetH,
+        width: baseImg.width,
+        height: baseImg.height,
         bytes: exactCopy.buffer,
         numChannels: 4,
         order: img.ChannelOrder.rgba,
@@ -268,12 +268,14 @@ Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
         overlayImg,
         dstX: 0,
         dstY: 0,
+        blend: img.BlendMode.alpha,
       );
     }
   }
 
+  final img.Image finalRgb = baseImg.convert(numChannels: 3, alpha: 255);
   final Uint8List result =
-      Uint8List.fromList(img.encodeJpg(baseImg, quality: 92));
+      Uint8List.fromList(img.encodeJpg(finalRgb, quality: 94));
   if (result.isEmpty) {
     throw Exception('Gagal meng-encode gambar hasil watermark');
   }
@@ -1495,6 +1497,14 @@ class _StampRenderer {
     return lines;
   }
 
+  static bool hasActiveContent(_WatermarkConfig cfg) {
+    final bool hasLogo = cfg.showLogo &&
+        cfg.logoFilePath != null &&
+        cfg.logoFilePath!.isNotEmpty &&
+        File(cfg.logoFilePath!).existsSync();
+    return cfg.showTime || hasLogo || buildExtraDetailLines(cfg).isNotEmpty;
+  }
+
   static Future<ui.Image> renderOverlayImage({
     required int targetW,
     required int targetH,
@@ -1716,6 +1726,10 @@ class _StampRenderer {
   }) async {
     if (baseJpgBytes.isEmpty) {
       throw Exception('Byte gambar dasar kosong');
+    }
+
+    if (!hasActiveContent(cfg)) {
+      return baseJpgBytes;
     }
 
     final img.Image? probe = img.decodeImage(baseJpgBytes);
@@ -3249,11 +3263,14 @@ class _CameraScreenState extends State<CameraScreen>
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      final Uint8List stampedJpgBytes = await _StampRenderer.buildStampedJpgBytes(
-        baseJpgBytes: cleanRawJpgBytes,
-        activeDt: activeDt,
-        cfg: _currentWatermarkConfig(),
-      );
+      final _WatermarkConfig cfg = _currentWatermarkConfig();
+      final Uint8List stampedJpgBytes = _StampRenderer.hasActiveContent(cfg)
+          ? await _StampRenderer.buildStampedJpgBytes(
+              baseJpgBytes: cleanRawJpgBytes,
+              activeDt: activeDt,
+              cfg: cfg,
+            )
+          : cleanRawJpgBytes;
 
       final Directory tempDir = await getTemporaryDirectory();
       tempRawPath =
@@ -4435,7 +4452,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       }
       _scheduleScrubberHide();
 
-      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 400) {
+      if (_visibleCount < total && pos.pixels >= pos.maxScrollExtent - 500) {
         setState(() {
           _visibleCount = min(total, _visibleCount + _pageBatchSize);
         });
@@ -4536,29 +4553,39 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   Future<List<_MediaEntry>> _queryMediaStoreNative() async {
     if (!Platform.isAndroid) return const [];
     try {
-      final List<dynamic>? rawList =
-          await _mediaStoreChannel.invokeMethod<List<dynamic>>(
+      final dynamic rawRes = await _mediaStoreChannel.invokeMethod(
         'getAllImages',
       ).timeout(const Duration(seconds: 6));
-      if (rawList == null || rawList.isEmpty) return const [];
+      if (rawRes == null) return const [];
 
       final List<_MediaEntry> results = [];
       final Set<String> seen = {};
-      for (final item in rawList) {
-        if (results.length >= _maxFilesScan) break;
-        final String path = item?.toString().trim() ?? '';
-        if (path.isEmpty || !_isPhotoFile(path) || seen.contains(path)) {
-          continue;
-        }
-        seen.add(path);
+      final DateTime nowFallback = DateTime.now();
 
-        final File f = File(path);
-        results.add(
-          _MediaEntry(
-            file: f,
-            modified: DateTime.fromMillisecondsSinceEpoch(0),
-          ),
-        );
+      if (rawRes is List) {
+        for (final item in rawRes) {
+          if (results.length >= _maxFilesScan) break;
+          String path = '';
+          DateTime mod = nowFallback;
+
+          if (item is Map) {
+            path = item['path']?.toString().trim() ?? '';
+            final num? sec = item['dateModified'] as num?;
+            if (sec != null && sec > 0) {
+              mod = DateTime.fromMillisecondsSinceEpoch(
+                sec > 10000000000 ? sec.toInt() : (sec.toInt() * 1000),
+              );
+            }
+          } else {
+            path = item?.toString().trim() ?? '';
+          }
+
+          if (path.isEmpty || !_isPhotoFile(path) || seen.contains(path)) {
+            continue;
+          }
+          seen.add(path);
+          results.add(_MediaEntry(file: File(path), modified: mod));
+        }
       }
       return results;
     } catch (e) {
@@ -4601,7 +4628,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             allEntries.add(
               _MediaEntry(
                 file: entity,
-                modified: DateTime.fromMillisecondsSinceEpoch(0),
+                modified: DateTime.now(),
               ),
             );
           }
@@ -4613,24 +4640,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       await scanDir(d);
     }
     return allEntries;
-  }
-
-  Future<void> _hydrateModifiedDates(List<_MediaEntry> rawList) async {
-    const int chunkSize = 40;
-    for (int i = 0; i < rawList.length; i += chunkSize) {
-      if (!mounted) return;
-      final int end = min(rawList.length, i + chunkSize);
-      for (int j = i; j < end; j++) {
-        try {
-          final st = await rawList[j].file.stat();
-          rawList[j] = _MediaEntry(
-            file: rawList[j].file,
-            modified: st.modified,
-          );
-        } catch (_) {}
-      }
-      await Future<void>.delayed(Duration.zero);
-    }
   }
 
   Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
@@ -4658,8 +4667,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       collected = await _scanDirectoriesFallback();
     }
 
-    await _hydrateModifiedDates(collected);
-    collected.sort((a, b) => b.modified.compareTo(a.modified));
     _LatestPhotosGridScreen._cachedEntries = collected;
 
     if (!mounted) return;
@@ -5080,7 +5087,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 360,
+                        cacheExtent: 240,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(
@@ -5617,8 +5624,9 @@ class _CollageStagePreviewScreenState
         await Future<void>.delayed(Duration.zero);
       }
 
+      final img.Image finalRgb = canvasImg.convert(numChannels: 3, alpha: 255);
       final Uint8List jpgBytes =
-          Uint8List.fromList(img.encodeJpg(canvasImg, quality: 92));
+          Uint8List.fromList(img.encodeJpg(finalRgb, quality: 94));
 
       final Directory tempDir = await getTemporaryDirectory();
       final String stampId =
@@ -6131,25 +6139,7 @@ class _GalleryWatermarkEditorScreenState
         await raf.close();
       }
     } catch (_) {}
-
-    try {
-      final bytes = await file.readAsBytes();
-      final decoded = await compute(_decodeDimensionsIsolate, bytes);
-      if (decoded != null && decoded.width > 0 && decoded.height > 0) {
-        return decoded;
-      }
-    } catch (_) {}
     return null;
-  }
-
-  static Size? _decodeDimensionsIsolate(Uint8List bytes) {
-    if (bytes.isEmpty) return null;
-    final img.Image? decoded = img.decodeImage(bytes);
-    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
-      return null;
-    }
-    final img.Image oriented = img.bakeOrientation(decoded);
-    return Size(oriented.width.toDouble(), oriented.height.toDouble());
   }
 
   @override
@@ -6450,13 +6440,14 @@ class _GalleryWatermarkEditorScreenState
       if (rawBytes.isEmpty) {
         throw Exception('Byte file foto kosong');
       }
-      final Uint8List outputBytes = _stampVisible
-          ? await _StampRenderer.buildStampedJpgBytes(
-              baseJpgBytes: rawBytes,
-              activeDt: _activeDateTime(),
-              cfg: _cfg,
-            )
-          : rawBytes;
+      final Uint8List outputBytes =
+          (_stampVisible && _StampRenderer.hasActiveContent(_cfg))
+              ? await _StampRenderer.buildStampedJpgBytes(
+                  baseJpgBytes: rawBytes,
+                  activeDt: _activeDateTime(),
+                  cfg: _cfg,
+                )
+              : rawBytes;
 
       final Directory tempDir = await getTemporaryDirectory();
       tempOutPath =
@@ -6780,7 +6771,7 @@ class _GalleryWatermarkEditorScreenState
                         controller: _pageController,
                         itemCount: _files.length,
                         onPageChanged: (idx) {
-                          setState(() => _currentIndex = idx);
+                          _currentIndex = idx;
                           unawaited(_resolvePhotoAspectRatio(_files[idx]));
                         },
                         itemBuilder: (context, idx) {
@@ -6807,7 +6798,7 @@ class _GalleryWatermarkEditorScreenState
                                     children: [
                                       Image.file(
                                         itemFile,
-                                        fit: BoxFit.fill,
+                                        fit: BoxFit.contain,
                                         width: boxW,
                                         height: boxH,
                                         errorBuilder: (_, __, ___) =>

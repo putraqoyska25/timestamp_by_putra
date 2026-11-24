@@ -2205,7 +2205,6 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
                   ),
                   trailing: Switch(
                     value: _shutterSound,
-                    activeThumbColor: Colors.black,
                     activeTrackColor: const Color(0xFFFFD000),
                     onChanged: (val) {
                       setState(() => _shutterSound = val);
@@ -2232,7 +2231,6 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
                   ),
                   trailing: Switch(
                     value: _gridOn,
-                    activeThumbColor: Colors.black,
                     activeTrackColor: const Color(0xFFFFD000),
                     onChanged: (val) {
                       setState(() => _gridOn = val);

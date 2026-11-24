@@ -40,7 +40,6 @@ class TimestampByPutraApp extends StatelessWidget {
       locale: const Locale('id', 'ID'),
       supportedLocales: const [
         Locale('id', 'ID'),
-        Locale('id'),
         Locale('en', 'US'),
       ],
       localizationsDelegates: const [
@@ -119,6 +118,18 @@ class _CompositeDecodedRequest {
   });
 }
 
+class _ImageAspectInfo {
+  final double aspectRatio;
+  final int width;
+  final int height;
+
+  const _ImageAspectInfo({
+    required this.aspectRatio,
+    required this.width,
+    required this.height,
+  });
+}
+
 Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 92}) {
   if (image.width <= 4 || image.height <= 4) {
     throw Exception('Dimensi gambar tidak valid (${image.width}x${image.height})');
@@ -152,6 +163,21 @@ Uint8List _verifyEncodedJpgBytes(
     );
   }
   return jpgBytes;
+}
+
+_ImageAspectInfo? _inspectAspectFromBytesIsolate(Uint8List bytes) {
+  if (bytes.length < 24) return null;
+  final img.Image? decoded = img.decodeImage(bytes);
+  if (decoded == null || decoded.width <= 1 || decoded.height <= 1) {
+    return null;
+  }
+  final img.Image oriented = img.bakeOrientation(decoded);
+  if (oriented.width <= 1 || oriented.height <= 1) return null;
+  return _ImageAspectInfo(
+    aspectRatio: oriented.width / oriented.height,
+    width: oriented.width,
+    height: oriented.height,
+  );
 }
 
 img.Image _decodeAndCropResizeCore(_CropResizeRequest req) {
@@ -1473,6 +1499,26 @@ class _StampRenderer {
 
   static const double baseLogoSize = 64.0;
 
+  static Size computeFittedLogoSize({
+    required double imageWidth,
+    required double imageHeight,
+    required double maxSide,
+  }) {
+    if (imageWidth <= 0 || imageHeight <= 0 || maxSide <= 0) {
+      return Size(maxSide, maxSide);
+    }
+    final double ratio = imageWidth / imageHeight;
+    if (ratio >= 1.0) {
+      final double w = maxSide;
+      final double h = max(1.0, w / ratio);
+      return Size(w, h);
+    } else {
+      final double h = maxSide;
+      final double w = max(1.0, h * ratio);
+      return Size(w, h);
+    }
+  }
+
   static Color resolveTextColor(StampTextColor color) {
     switch (color) {
       case StampTextColor.white:
@@ -1623,6 +1669,7 @@ class _StampRenderer {
     final List<Shadow> textShadows = resolveShadows(cfg.textColor);
 
     ui.Image? logoImg;
+    Size renderedLogoSize = Size.zero;
     if (cfg.showLogo &&
         cfg.logoFilePath != null &&
         cfg.logoFilePath!.isNotEmpty) {
@@ -1634,19 +1681,19 @@ class _StampRenderer {
             final logoCodec = await ui.instantiateImageCodec(logoBytes);
             final logoFrame = await logoCodec.getNextFrame();
             logoImg = logoFrame.image;
+            renderedLogoSize = computeFittedLogoSize(
+              imageWidth: logoImg.width.toDouble(),
+              imageHeight: logoImg.height.toDouble(),
+              maxSide: baseLogoSize * s,
+            );
           } catch (_) {
             logoImg = null;
+            renderedLogoSize = Size.zero;
           }
         }
       }
     }
 
-    final double logoMaxHeight = logoImg != null ? (baseLogoSize * s) : 0.0;
-    final double logoAspectRatio = (logoImg != null && logoImg.height > 0)
-        ? (logoImg.width / logoImg.height).clamp(0.4, 3.0)
-        : 1.0;
-    final double logoRenderHeight = logoMaxHeight;
-    final double logoRenderWidth = logoMaxHeight * logoAspectRatio;
     final double logoBottomGap = logoImg != null ? (7.0 * s) : 0.0;
 
     TextPainter? jamPainter;
@@ -1716,7 +1763,8 @@ class _StampRenderer {
     }
 
     final double topBlockHeight =
-        (logoImg != null ? logoRenderHeight + logoBottomGap : 0.0) + timeRowHeight;
+        (logoImg != null ? renderedLogoSize.height + logoBottomGap : 0.0) +
+            timeRowHeight;
 
     final List<String> extraLines = buildExtraDetailLines(cfg);
     final String detailsCombined = extraLines.join('\n');
@@ -1766,11 +1814,16 @@ class _StampRenderer {
       canvas.drawImageRect(
         logoImg,
         Rect.fromLTWH(0, 0, logoImg.width.toDouble(), logoImg.height.toDouble()),
-        Rect.fromLTWH(padLeft, currentY, logoRenderWidth, logoRenderHeight),
+        Rect.fromLTWH(
+          padLeft,
+          currentY,
+          renderedLogoSize.width,
+          renderedLogoSize.height,
+        ),
         Paint()..filterQuality = FilterQuality.high,
       );
       logoImg.dispose();
-      currentY += logoRenderHeight + logoBottomGap;
+      currentY += renderedLogoSize.height + logoBottomGap;
     }
 
     if (cfg.showTime &&
@@ -1961,16 +2014,18 @@ Widget _buildStampOverlayWidget({
         mainAxisSize: MainAxisSize.min,
         children: [
           if (hasLogo) ...[
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: _StampRenderer.baseLogoSize * s,
-                maxWidth: _StampRenderer.baseLogoSize * s * 2.5,
-              ),
-              child: Image.file(
-                File(cfg.logoFilePath!),
-                height: _StampRenderer.baseLogoSize * s,
-                fit: BoxFit.contain,
-                filterQuality: FilterQuality.high,
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6 * s),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: _StampRenderer.baseLogoSize * s,
+                  maxHeight: _StampRenderer.baseLogoSize * s,
+                ),
+                child: Image.file(
+                  File(cfg.logoFilePath!),
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                ),
               ),
             ),
             SizedBox(height: 7 * s),
@@ -2512,9 +2567,7 @@ class _CameraScreenState extends State<CameraScreen>
       final bool wasPaused = _isPausedBackground;
       _isPausedBackground = false;
       unawaited(_NativeBrightnessService.setKeepScreenOn(true));
-      if (wasPaused) {
-        _LatestPhotosGridScreen.invalidateCache();
-      }
+      _LatestPhotosGridScreen.invalidateCache();
       if (_isSaving || _queuedCaptureTasks > 0) {
         _isCoolingDown = true;
         unawaited(_waitPostCaptureCooldown(milliseconds: 650));
@@ -2932,22 +2985,16 @@ class _CameraScreenState extends State<CameraScreen>
 
     final DateTime? pickedDate = await showDatePicker(
       context: context,
+      locale: const Locale('id', 'ID'),
       initialDate: base,
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
-      locale: const Locale('id', 'ID'),
-      helpText: 'Pilih Tanggal',
-      cancelText: 'Batal',
-      confirmText: 'Pilih',
     );
     if (pickedDate == null || !mounted) return;
 
     final TimeOfDay? pickedTime = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(base),
-      helpText: 'Pilih Waktu',
-      cancelText: 'Batal',
-      confirmText: 'Pilih',
     );
     if (pickedTime == null || !mounted) return;
 
@@ -4419,11 +4466,9 @@ class _LatestPhotosGridScreen extends StatefulWidget {
   });
 
   static List<_MediaEntry>? _cachedEntries;
-  static DateTime? _cachedAt;
 
   static void invalidateCache() {
     _cachedEntries = null;
-    _cachedAt = null;
   }
 
   @override
@@ -4508,19 +4553,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     _config = widget.initialConfig;
     _scrollController = ScrollController()..addListener(_onScroll);
     final cached = _LatestPhotosGridScreen._cachedEntries;
-    final cachedAt = _LatestPhotosGridScreen._cachedAt;
-    final bool cacheFresh = cached != null &&
-        cached.isNotEmpty &&
-        cachedAt != null &&
-        DateTime.now().difference(cachedAt) < const Duration(minutes: 2);
-    if (cacheFresh) {
+    if (cached != null && cached.isNotEmpty) {
       _entries = cached;
       _fullSections = _buildMonthlySections(_entries);
       _visibleCount = min(_initialVisibleCount, _entries.length);
       _isLoading = false;
     } else {
-      _LatestPhotosGridScreen.invalidateCache();
-      unawaited(_loadAllPhotos(forceRefresh: true));
+      unawaited(_loadAllPhotos());
     }
   }
 
@@ -4960,16 +4999,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       collected = await _scanDirectoriesFallback();
     }
 
-    if (collected.length > 1) {
-      collected.sort((a, b) {
-        final int cmp = b.modified.compareTo(a.modified);
-        if (cmp != 0) return cmp;
-        return b.file.path.compareTo(a.file.path);
-      });
-    }
-
     _LatestPhotosGridScreen._cachedEntries = collected;
-    _LatestPhotosGridScreen._cachedAt = DateTime.now();
 
     if (!mounted) return;
     setState(() {
@@ -4977,17 +5007,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _fullSections = _buildMonthlySections(collected);
       _visibleCount = min(_initialVisibleCount, _entries.length);
       _isLoading = false;
-      _scrubFractionNotifier.value = 0.0;
     });
-    if (_scrollController.hasClients) {
-      _isProgrammaticJumping = true;
-      try {
-        _scrollController.jumpTo(0.0);
-      } catch (_) {}
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _isProgrammaticJumping = false;
-      });
-    }
   }
 
   List<_MonthlyPhotoSection> _buildMonthlySections(List<_MediaEntry> source) {
@@ -5626,26 +5646,27 @@ class _CollageStagePreviewScreenState
 
   Future<void> _cacheImageDimensions(File file) async {
     if (_photoDimsCache.containsKey(file.path)) return;
-    ui.ImmutableBuffer? buffer;
-    ui.ImageDescriptor? descriptor;
     try {
       if (!await file.exists()) return;
-      buffer = await ui.ImmutableBuffer.fromFilePath(file.path);
-      descriptor = await ui.ImageDescriptor.encoded(buffer);
-      if (descriptor.width <= 0 || descriptor.height <= 0 || !mounted) {
+      final Uint8List bytes = await file.readAsBytes();
+      final Size? dims = await compute(_decodeDimensionsIsolate, bytes);
+      if (dims == null || dims.width <= 0 || dims.height <= 0 || !mounted) {
         return;
       }
       setState(() {
-        _photoDimsCache[file.path] = Size(
-          descriptor!.width.toDouble(),
-          descriptor.height.toDouble(),
-        );
+        _photoDimsCache[file.path] = dims;
       });
-    } catch (_) {
-    } finally {
-      descriptor?.dispose();
-      buffer?.dispose();
+    } catch (_) {}
+  }
+
+  static Size? _decodeDimensionsIsolate(Uint8List bytes) {
+    if (bytes.length < 64) return null;
+    final img.Image? decoded = img.decodeImage(bytes);
+    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+      return null;
     }
+    final img.Image oriented = img.bakeOrientation(decoded);
+    return Size(oriented.width.toDouble(), oriented.height.toDouble());
   }
 
   Offset _panForSlot(int index) {
@@ -6383,25 +6404,21 @@ class _GalleryWatermarkEditorScreenState
       return;
     }
     _resolvingPaths.add(path);
-    ui.ImmutableBuffer? buffer;
-    ui.ImageDescriptor? descriptor;
     try {
       if (!await file.exists()) return;
-      buffer = await ui.ImmutableBuffer.fromFilePath(path);
-      descriptor = await ui.ImageDescriptor.encoded(buffer);
-      final int w = descriptor.width;
-      final int h = descriptor.height;
-      if (w <= 0 || h <= 0) return;
-      final double ratio = w / h;
-      if (ratio <= 0.1 || ratio > 10.0) return;
+      final Uint8List bytes = await file.readAsBytes();
+      if (bytes.length < 24) return;
+      final _ImageAspectInfo? info =
+          await compute(_inspectAspectFromBytesIsolate, bytes);
+      if (info == null || info.aspectRatio <= 0.1 || info.aspectRatio > 10.0) {
+        return;
+      }
       if (!mounted) return;
       setState(() {
-        _aspectRatioCache[path] = ratio;
+        _aspectRatioCache[path] = info.aspectRatio;
       });
     } catch (_) {
     } finally {
-      descriptor?.dispose();
-      buffer?.dispose();
       _resolvingPaths.remove(path);
     }
   }
@@ -6462,22 +6479,16 @@ class _GalleryWatermarkEditorScreenState
 
     final DateTime? pickedDate = await showDatePicker(
       context: context,
+      locale: const Locale('id', 'ID'),
       initialDate: base,
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
-      locale: const Locale('id', 'ID'),
-      helpText: 'Pilih Tanggal',
-      cancelText: 'Batal',
-      confirmText: 'Pilih',
     );
     if (pickedDate == null || !mounted) return;
 
     final TimeOfDay? pickedTime = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(base),
-      helpText: 'Pilih Waktu',
-      cancelText: 'Batal',
-      confirmText: 'Pilih',
     );
     if (pickedTime == null || !mounted) return;
 

@@ -2452,9 +2452,14 @@ class _CameraScreenState extends State<CameraScreen>
       _isPausedBackground = false;
       unawaited(_NativeBrightnessService.setKeepScreenOn(true));
       _LatestPhotosGridScreen.invalidateCache();
+      if (_isSaving || _queuedCaptureTasks > 0) {
+        _isCoolingDown = true;
+        unawaited(_waitPostCaptureCooldown(milliseconds: 650));
+      }
       if (!wasPaused &&
           _controller != null &&
           _controller!.value.isInitialized) {
+        if (mounted) setState(() {});
         return;
       }
       _screenFlashActive = false;
@@ -2555,7 +2560,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _waitPostCaptureCooldown({int milliseconds = 600}) async {
+  Future<void> _waitPostCaptureCooldown({int milliseconds = 650}) async {
     _cooldownTimer?.cancel();
     if (milliseconds <= 0) {
       _isCoolingDown = false;
@@ -2814,7 +2819,7 @@ class _CameraScreenState extends State<CameraScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Menunggu proses foto & stempel selesai 100% sebelum membuka album...',
+            'Menunggu proses foto asli & stempel selesai 100% sebelum membuka album...',
           ),
           duration: Duration(milliseconds: 1200),
         ),
@@ -2822,7 +2827,7 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
     try {
-      await _captureQueue;
+      await _captureQueue.timeout(const Duration(seconds: 25));
     } catch (_) {}
     if (!mounted || _isDisposed || _isAlbumBlocked) return;
 
@@ -3321,7 +3326,7 @@ class _CameraScreenState extends State<CameraScreen>
         cfg: cfg,
       );
     } catch (_) {
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      await Future<void>.delayed(const Duration(milliseconds: 140));
       return _StampRenderer.buildStampedJpgFromDecodedImage(
         baseImage: baseImage,
         activeDt: activeDt,
@@ -3459,6 +3464,22 @@ class _CameraScreenState extends State<CameraScreen>
         expectedHeight: croppedBaseImg.height,
       );
 
+      final Directory tempDir = await getTemporaryDirectory();
+      tempRawPath =
+          '${tempDir.path}/${_buildTempFileName('clean_raw', uniqueId, 'jpg')}';
+      final File rawOutFile = File(tempRawPath);
+      await rawOutFile.writeAsBytes(cleanRawJpgBytes, flush: true);
+
+      // Langkah 1: Simpan foto asli terlebih dahulu sampai selesai
+      if (await rawOutFile.exists() && await rawOutFile.length() > 64) {
+        await Gal.putImage(rawOutFile.path);
+        savedCount++;
+      }
+
+      // Beri jeda agar MediaStore/galeri mencatat foto asli sebelum foto stamp disimpan
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+
+      // Langkah 2: Proses, verifikasi, dan simpan foto stamp setelah foto asli selesai
       final Uint8List stampedJpgBytes = stampActive
           ? await _buildStampedWithRetry(
               baseImage: croppedBaseImg,
@@ -3467,24 +3488,10 @@ class _CameraScreenState extends State<CameraScreen>
             )
           : cleanRawJpgBytes;
 
-      final Directory tempDir = await getTemporaryDirectory();
-      tempRawPath =
-          '${tempDir.path}/${_buildTempFileName('clean_raw', uniqueId, 'jpg')}';
       tempStampedPath =
           '${tempDir.path}/${_buildTempFileName('with_stamp', uniqueId, 'jpg')}';
-
-      final File rawOutFile = File(tempRawPath);
       final File stampedOutFile = File(tempStampedPath);
-
-      await rawOutFile.writeAsBytes(cleanRawJpgBytes, flush: true);
       await stampedOutFile.writeAsBytes(stampedJpgBytes, flush: true);
-
-      if (await rawOutFile.exists() && await rawOutFile.length() > 64) {
-        await Gal.putImage(rawOutFile.path);
-        savedCount++;
-      }
-
-      await Future<void>.delayed(const Duration(milliseconds: 120));
 
       if (await stampedOutFile.exists() && await stampedOutFile.length() > 64) {
         await Gal.putImage(stampedOutFile.path);
@@ -3500,7 +3507,7 @@ class _CameraScreenState extends State<CameraScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Mode $timerText: $savedCount foto JPG terverifikasi & tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+              'Mode $timerText: $savedCount foto JPG (asli & stempel) terverifikasi & tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
             ),
             backgroundColor: Colors.green,
           ),
@@ -3532,7 +3539,7 @@ class _CameraScreenState extends State<CameraScreen>
           _screenFlashActive = false;
         });
       }
-      await _waitPostCaptureCooldown(milliseconds: 600);
+      await _waitPostCaptureCooldown(milliseconds: 650);
     }
   }
 

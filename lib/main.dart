@@ -107,9 +107,22 @@ class _CompositeBaseRequest {
   });
 }
 
+Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 93}) {
+  if (image.width <= 4 || image.height <= 4) {
+    throw Exception('Dimensi gambar tidak valid (${image.width}x${image.height})');
+  }
+  final img.Image cleanRgb = image.convert(numChannels: 3, alpha: 255);
+  final Uint8List encoded =
+      Uint8List.fromList(img.encodeJpg(cleanRgb, quality: quality));
+  if (encoded.length < 64) {
+    throw Exception('Hasil encoding JPG tidak valid atau terpotong');
+  }
+  return encoded;
+}
+
 Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
-  if (req.bytes.isEmpty) {
-    throw Exception('Data byte gambar kosong');
+  if (req.bytes.length < 64) {
+    throw Exception('Data byte gambar kosong atau tidak lengkap');
   }
   final img.Image? decoded = img.decodeImage(req.bytes);
   if (decoded == null || decoded.width <= 16 || decoded.height <= 16) {
@@ -164,21 +177,15 @@ Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
       cropped,
       width: outW,
       height: outH,
-      interpolation: img.Interpolation.cubic,
+      interpolation: img.Interpolation.linear,
     );
   }
 
-  final img.Image cleanRgb = cropped.convert(numChannels: 3, alpha: 255);
-  final Uint8List encoded =
-      Uint8List.fromList(img.encodeJpg(cleanRgb, quality: 94));
-  if (encoded.isEmpty) {
-    throw Exception('Hasil encoding JPG kosong');
-  }
-  return encoded;
+  return _encodeCleanJpgOrThrow(cropped, quality: 93);
 }
 
 Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
-  if (req.bytes.isEmpty || req.dstW <= 0 || req.dstH <= 0) return null;
+  if (req.bytes.length < 64 || req.dstW <= 0 || req.dstH <= 0) return null;
   final img.Image? decoded = img.decodeImage(req.bytes);
   if (decoded == null || decoded.width <= 1 || decoded.height <= 1) {
     return null;
@@ -227,18 +234,19 @@ Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
     cropped,
     width: max(1, req.dstW),
     height: max(1, req.dstH),
-    interpolation: img.Interpolation.cubic,
+    interpolation: img.Interpolation.linear,
   );
 
-  final img.Image cleanRgb = resized.convert(numChannels: 3, alpha: 255);
-  final Uint8List out =
-      Uint8List.fromList(img.encodeJpg(cleanRgb, quality: 94));
-  return out.isEmpty ? null : out;
+  try {
+    return _encodeCleanJpgOrThrow(resized, quality: 93);
+  } catch (_) {
+    return null;
+  }
 }
 
 Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
-  if (req.baseJpgBytes.isEmpty) {
-    throw Exception('Data gambar dasar kosong');
+  if (req.baseJpgBytes.length < 64) {
+    throw Exception('Data gambar dasar kosong atau tidak lengkap');
   }
   final img.Image? decoded = img.decodeImage(req.baseJpgBytes);
   if (decoded == null || decoded.width <= 4 || decoded.height <= 4) {
@@ -253,9 +261,8 @@ Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
     final int expectedLen = baseImg.width * baseImg.height * 4;
     if (req.targetW == baseImg.width &&
         req.targetH == baseImg.height &&
-        overlayBytes.lengthInBytes >= expectedLen) {
-      final Uint8List exactCopy = Uint8List(expectedLen)
-        ..setRange(0, expectedLen, overlayBytes);
+        overlayBytes.lengthInBytes == expectedLen) {
+      final Uint8List exactCopy = Uint8List.fromList(overlayBytes);
       final img.Image overlayImg = img.Image.fromBytes(
         width: baseImg.width,
         height: baseImg.height,
@@ -273,13 +280,7 @@ Uint8List _processCompositeIsolate(_CompositeBaseRequest req) {
     }
   }
 
-  final img.Image finalRgb = baseImg.convert(numChannels: 3, alpha: 255);
-  final Uint8List result =
-      Uint8List.fromList(img.encodeJpg(finalRgb, quality: 94));
-  if (result.isEmpty) {
-    throw Exception('Gagal meng-encode gambar hasil watermark');
-  }
-  return result;
+  return _encodeCleanJpgOrThrow(baseImg, quality: 93);
 }
 
 class _CollageLayoutDef {
@@ -1724,8 +1725,8 @@ class _StampRenderer {
     required DateTime activeDt,
     required _WatermarkConfig cfg,
   }) async {
-    if (baseJpgBytes.isEmpty) {
-      throw Exception('Byte gambar dasar kosong');
+    if (baseJpgBytes.length < 64) {
+      throw Exception('Byte gambar dasar kosong atau tidak lengkap');
     }
 
     if (!hasActiveContent(cfg)) {
@@ -1751,9 +1752,12 @@ class _StampRenderer {
     try {
       final byteData =
           await overlayUi.toByteData(format: ui.ImageByteFormat.rawRgba);
-      if (byteData != null && byteData.lengthInBytes >= w * h * 4) {
-        overlayRgba = Uint8List(w * h * 4)
-          ..setRange(0, w * h * 4, byteData.buffer.asUint8List());
+      final int expectedLen = w * h * 4;
+      if (byteData != null && byteData.lengthInBytes == expectedLen) {
+        overlayRgba = Uint8List(expectedLen)
+          ..setRange(0, expectedLen, byteData.buffer.asUint8List());
+      } else {
+        throw Exception('Ukuran buffer overlay RGBA tidak sesuai dimensi gambar');
       }
     } finally {
       overlayUi.dispose();
@@ -2211,6 +2215,7 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isSaving = false;
   bool _isCoolingDown = false;
   Timer? _cooldownTimer;
+  Future<void> _captureQueue = Future<void>.value();
 
   bool _showLogo = false;
   String? _logoFilePath;
@@ -2460,7 +2465,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  void _startPostCaptureCooldown({int milliseconds = 600}) {
+  void _startPostCaptureCooldown({int milliseconds = 750}) {
     _cooldownTimer?.cancel();
     if (!mounted) return;
     setState(() => _isCoolingDown = true);
@@ -3159,11 +3164,11 @@ class _CameraScreenState extends State<CameraScreen>
     required int qualityHeight,
   }) async {
     final rawFile = File(rawPhotoPath);
-    if (!await rawFile.exists() || await rawFile.length() == 0) {
-      throw Exception('Berkas hasil kamera kosong');
+    if (!await rawFile.exists() || await rawFile.length() < 64) {
+      throw Exception('Berkas hasil kamera kosong atau belum siap');
     }
     final bytes = await rawFile.readAsBytes();
-    if (bytes.isEmpty) {
+    if (bytes.length < 64) {
       throw Exception('Byte hasil kamera kosong');
     }
     return compute(
@@ -3177,7 +3182,9 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _onShutterPressed() async {
-    if (_isSaving || _isCoolingDown || _isInitializingCamera) return;
+    if (_isSaving || _isCoolingDown || _isInitializingCamera || _isPausedBackground) {
+      return;
+    }
     if (_countdownRemaining != null) {
       _cancelCountdown();
       return;
@@ -3185,7 +3192,7 @@ class _CameraScreenState extends State<CameraScreen>
 
     final int activeTimer = _normalizeTimer(_timerSeconds);
     if (activeTimer == 0) {
-      await _executeTakePicture(usedTimer: 0);
+      _enqueueCapture(usedTimer: 0);
       return;
     }
 
@@ -3204,7 +3211,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (current <= 1) {
         timer.cancel();
         setState(() => _countdownRemaining = null);
-        unawaited(_executeTakePicture(usedTimer: activeTimer));
+        _enqueueCapture(usedTimer: activeTimer);
       } else {
         final int nextVal = current - 1;
         setState(() => _countdownRemaining = nextVal);
@@ -3212,16 +3219,25 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  Future<void> _executeTakePicture({required int usedTimer}) async {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized || _isSaving) {
-      return;
-    }
-
+  void _enqueueCapture({required int usedTimer}) {
+    if (_isSaving || _isCoolingDown) return;
     setState(() {
       _isSaving = true;
       _openDrawer = ActiveDrawer.none;
     });
+    _captureQueue = _captureQueue.then((_) async {
+      await _executeTakePicture(usedTimer: usedTimer);
+    });
+  }
+
+  Future<void> _executeTakePicture({required int usedTimer}) async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized || _isPausedBackground) {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+      return;
+    }
 
     final bool useAutoFlashOnShutter = _flashEnabled;
     final bool isFront = _currentLens == CameraLensDirection.front;
@@ -3233,6 +3249,7 @@ class _CameraScreenState extends State<CameraScreen>
 
     try {
       final DateTime activeDt = _getActiveDateTime();
+      final _WatermarkConfig cfg = _currentWatermarkConfig();
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
 
@@ -3263,7 +3280,6 @@ class _CameraScreenState extends State<CameraScreen>
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      final _WatermarkConfig cfg = _currentWatermarkConfig();
       final Uint8List stampedJpgBytes = _StampRenderer.hasActiveContent(cfg)
           ? await _StampRenderer.buildStampedJpgBytes(
               baseJpgBytes: cleanRawJpgBytes,
@@ -3284,14 +3300,14 @@ class _CameraScreenState extends State<CameraScreen>
       await rawOutFile.writeAsBytes(cleanRawJpgBytes, flush: true);
       await stampedOutFile.writeAsBytes(stampedJpgBytes, flush: true);
 
-      if (await rawOutFile.exists() && await rawOutFile.length() > 0) {
+      if (await rawOutFile.exists() && await rawOutFile.length() > 64) {
         await Gal.putImage(rawOutFile.path);
         savedCount++;
       }
 
-      await Future.delayed(const Duration(milliseconds: 120));
+      await Future.delayed(const Duration(milliseconds: 140));
 
-      if (await stampedOutFile.exists() && await stampedOutFile.length() > 0) {
+      if (await stampedOutFile.exists() && await stampedOutFile.length() > 64) {
         await Gal.putImage(stampedOutFile.path);
         savedCount++;
       }
@@ -3333,7 +3349,7 @@ class _CameraScreenState extends State<CameraScreen>
           _isSaving = false;
           _screenFlashActive = false;
         });
-        _startPostCaptureCooldown(milliseconds: 600);
+        _startPostCaptureCooldown(milliseconds: 750);
       }
     }
   }
@@ -5336,7 +5352,7 @@ class _CollageStagePreviewScreenState
   }
 
   static Size? _decodeDimensionsIsolate(Uint8List bytes) {
-    if (bytes.isEmpty) return null;
+    if (bytes.length < 64) return null;
     final img.Image? decoded = img.decodeImage(bytes);
     if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
       return null;
@@ -5537,7 +5553,7 @@ class _CollageStagePreviewScreenState
   }) async {
     if (!await file.exists()) return null;
     final Uint8List bytes = await file.readAsBytes();
-    if (bytes.isEmpty) return null;
+    if (bytes.length < 64) return null;
     return compute(
       _processSlotCropIsolate,
       _SlotCropRequest(
@@ -5624,9 +5640,7 @@ class _CollageStagePreviewScreenState
         await Future<void>.delayed(Duration.zero);
       }
 
-      final img.Image finalRgb = canvasImg.convert(numChannels: 3, alpha: 255);
-      final Uint8List jpgBytes =
-          Uint8List.fromList(img.encodeJpg(finalRgb, quality: 94));
+      final Uint8List jpgBytes = _encodeCleanJpgOrThrow(canvasImg, quality: 93);
 
       final Directory tempDir = await getTemporaryDirectory();
       final String stampId =
@@ -5635,7 +5649,7 @@ class _CollageStagePreviewScreenState
       final File outFile = File(tempOutPath);
       await outFile.writeAsBytes(jpgBytes, flush: true);
 
-      if (await outFile.exists() && await outFile.length() > 0) {
+      if (await outFile.exists() && await outFile.length() > 64) {
         await Gal.putImage(outFile.path);
       }
       _LatestPhotosGridScreen.invalidateCache();
@@ -6437,8 +6451,8 @@ class _GalleryWatermarkEditorScreenState
         throw Exception('File foto tidak ditemukan');
       }
       final Uint8List rawBytes = await activeFile.readAsBytes();
-      if (rawBytes.isEmpty) {
-        throw Exception('Byte file foto kosong');
+      if (rawBytes.length < 64) {
+        throw Exception('Byte file foto kosong atau tidak lengkap');
       }
       final Uint8List outputBytes =
           (_stampVisible && _StampRenderer.hasActiveContent(_cfg))
@@ -6455,7 +6469,7 @@ class _GalleryWatermarkEditorScreenState
       final File outFile = File(tempOutPath);
       await outFile.writeAsBytes(outputBytes, flush: true);
 
-      if (await outFile.exists() && await outFile.length() > 0) {
+      if (await outFile.exists() && await outFile.length() > 64) {
         await Gal.putImage(outFile.path);
       }
       _LatestPhotosGridScreen.invalidateCache();

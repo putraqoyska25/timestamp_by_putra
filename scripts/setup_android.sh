@@ -373,11 +373,24 @@ class MainActivity : FlutterActivity() {
                         parentPath.removePrefix("/sdcard/").trimEnd('/') + "/"
                     else -> ""
                 }
-                if (name.isNotEmpty() && relDir.isNotEmpty()) {
-                    val selection =
-                        "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} = ?"
-                    val args = arrayOf(name, relDir)
-                    contentResolver.query(collection, projection, selection, args, null)
+                if (name.isNotEmpty()) {
+                    if (relDir.isNotEmpty()) {
+                        val selection =
+                            "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} IN (?, ?)"
+                        val args = arrayOf(name, relDir, relDir.trimEnd('/'))
+                        contentResolver.query(collection, projection, selection, args, null)
+                            ?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    val id = cursor.getLong(
+                                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                                    )
+                                    return ContentUris.withAppendedId(collection, id)
+                                }
+                            }
+                    }
+                    val fallbackSelection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
+                    val fallbackArgs = arrayOf(name)
+                    contentResolver.query(collection, projection, fallbackSelection, fallbackArgs, null)
                         ?.use { cursor ->
                             if (cursor.moveToFirst()) {
                                 val id = cursor.getLong(

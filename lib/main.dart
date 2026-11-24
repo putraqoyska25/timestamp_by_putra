@@ -120,6 +120,28 @@ Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 92}) {
   return encoded;
 }
 
+Uint8List _verifyEncodedJpgBytes(
+  Uint8List jpgBytes, {
+  int? expectedWidth,
+  int? expectedHeight,
+}) {
+  if (jpgBytes.length < 64) {
+    throw Exception('Byte JPG terlalu pendek atau kosong');
+  }
+  final img.Image? checkImg = img.decodeImage(jpgBytes);
+  if (checkImg == null || checkImg.width <= 4 || checkImg.height <= 4) {
+    throw Exception('Hasil JPG gagal diverifikasi saat dekode ulang');
+  }
+  if (expectedWidth != null &&
+      expectedHeight != null &&
+      (checkImg.width != expectedWidth || checkImg.height != expectedHeight)) {
+    throw Exception(
+      'Dimensi JPG (${checkImg.width}x${checkImg.height}) tidak sesuai target (${expectedWidth}x$expectedHeight)',
+    );
+  }
+  return jpgBytes;
+}
+
 img.Image _decodeAndCropResizeCore(_CropResizeRequest req) {
   if (req.bytes.length < 64) {
     throw Exception('Data byte gambar kosong atau tidak lengkap');
@@ -189,7 +211,12 @@ img.Image _decodeAndCropResizeCore(_CropResizeRequest req) {
 
 Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
   final img.Image cropped = _decodeAndCropResizeCore(req);
-  return _encodeCleanJpgOrThrow(cropped, quality: 92);
+  final Uint8List encoded = _encodeCleanJpgOrThrow(cropped, quality: 92);
+  return _verifyEncodedJpgBytes(
+    encoded,
+    expectedWidth: cropped.width,
+    expectedHeight: cropped.height,
+  );
 }
 
 Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
@@ -246,7 +273,12 @@ Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
   );
 
   try {
-    return _encodeCleanJpgOrThrow(resized, quality: 92);
+    final Uint8List encoded = _encodeCleanJpgOrThrow(resized, quality: 92);
+    return _verifyEncodedJpgBytes(
+      encoded,
+      expectedWidth: resized.width,
+      expectedHeight: resized.height,
+    );
   } catch (_) {
     return null;
   }
@@ -290,7 +322,12 @@ Uint8List _processCompositeDecodedIsolate(_CompositeDecodedRequest req) {
     );
   }
 
-  return _encodeCleanJpgOrThrow(baseImg, quality: 92);
+  final Uint8List encoded = _encodeCleanJpgOrThrow(baseImg, quality: 92);
+  return _verifyEncodedJpgBytes(
+    encoded,
+    expectedWidth: req.width,
+    expectedHeight: req.height,
+  );
 }
 
 class _CollageLayoutDef {
@@ -1742,11 +1779,20 @@ class _StampRenderer {
     final img.Image rgbaBase = baseImage.convert(numChannels: 4, alpha: 255);
     final int w = rgbaBase.width;
     final int h = rgbaBase.height;
+    final int expectedLen = w * h * 4;
     final Uint8List baseRgbaBytes =
         rgbaBase.getBytes(order: img.ChannelOrder.rgba);
+    if (baseRgbaBytes.lengthInBytes != expectedLen) {
+      throw Exception('Ukuran buffer gambar dasar tidak sesuai dimensi');
+    }
 
     if (!hasActiveContent(cfg)) {
-      return _encodeCleanJpgOrThrow(rgbaBase, quality: 92);
+      final Uint8List clean = _encodeCleanJpgOrThrow(rgbaBase, quality: 92);
+      return _verifyEncodedJpgBytes(
+        clean,
+        expectedWidth: w,
+        expectedHeight: h,
+      );
     }
 
     await Future<void>.delayed(Duration.zero);
@@ -1762,7 +1808,6 @@ class _StampRenderer {
     try {
       final byteData =
           await overlayUi.toByteData(format: ui.ImageByteFormat.rawRgba);
-      final int expectedLen = w * h * 4;
       if (byteData != null && byteData.lengthInBytes == expectedLen) {
         overlayRgba = Uint8List(expectedLen)
           ..setRange(0, expectedLen, byteData.buffer.asUint8List());
@@ -1775,7 +1820,7 @@ class _StampRenderer {
 
     await Future<void>.delayed(Duration.zero);
 
-    return compute(
+    final Uint8List composited = await compute(
       _processCompositeDecodedIsolate,
       _CompositeDecodedRequest(
         baseRgbaBytes: baseRgbaBytes,
@@ -1783,6 +1828,12 @@ class _StampRenderer {
         height: h,
         overlayRgbaBytes: overlayRgba,
       ),
+    );
+
+    return _verifyEncodedJpgBytes(
+      composited,
+      expectedWidth: w,
+      expectedHeight: h,
     );
   }
 
@@ -1796,7 +1847,7 @@ class _StampRenderer {
     }
 
     if (!hasActiveContent(cfg)) {
-      return baseJpgBytes;
+      return _verifyEncodedJpgBytes(baseJpgBytes);
     }
 
     final img.Image? decoded = img.decodeImage(baseJpgBytes);
@@ -2504,7 +2555,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _waitPostCaptureCooldown({int milliseconds = 250}) async {
+  Future<void> _waitPostCaptureCooldown({int milliseconds = 600}) async {
     _cooldownTimer?.cancel();
     if (milliseconds <= 0) {
       _isCoolingDown = false;
@@ -2763,9 +2814,9 @@ class _CameraScreenState extends State<CameraScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Menunggu proses foto & stempel selesai sebelum membuka album...',
+            'Menunggu proses foto & stempel selesai 100% sebelum membuka album...',
           ),
-          duration: Duration(milliseconds: 1000),
+          duration: Duration(milliseconds: 1200),
         ),
       );
       return;
@@ -3270,7 +3321,7 @@ class _CameraScreenState extends State<CameraScreen>
         cfg: cfg,
       );
     } catch (_) {
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await Future<void>.delayed(const Duration(milliseconds: 120));
       return _StampRenderer.buildStampedJpgFromDecodedImage(
         baseImage: baseImage,
         activeDt: activeDt,
@@ -3402,16 +3453,19 @@ class _CameraScreenState extends State<CameraScreen>
         qualityHeight: _getQualityHeightPixels(),
       );
 
+      final Uint8List cleanRawJpgBytes = _verifyEncodedJpgBytes(
+        _encodeCleanJpgOrThrow(croppedBaseImg, quality: 92),
+        expectedWidth: croppedBaseImg.width,
+        expectedHeight: croppedBaseImg.height,
+      );
+
       final Uint8List stampedJpgBytes = stampActive
           ? await _buildStampedWithRetry(
               baseImage: croppedBaseImg,
               activeDt: activeDt,
               cfg: cfg,
             )
-          : _encodeCleanJpgOrThrow(croppedBaseImg, quality: 92);
-
-      final Uint8List cleanRawJpgBytes =
-          _encodeCleanJpgOrThrow(croppedBaseImg, quality: 92);
+          : cleanRawJpgBytes;
 
       final Directory tempDir = await getTemporaryDirectory();
       tempRawPath =
@@ -3430,7 +3484,7 @@ class _CameraScreenState extends State<CameraScreen>
         savedCount++;
       }
 
-      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await Future<void>.delayed(const Duration(milliseconds: 120));
 
       if (await stampedOutFile.exists() && await stampedOutFile.length() > 64) {
         await Gal.putImage(stampedOutFile.path);
@@ -3446,7 +3500,7 @@ class _CameraScreenState extends State<CameraScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Mode $timerText: $savedCount foto JPG tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
+              'Mode $timerText: $savedCount foto JPG terverifikasi & tersimpan (${_getAspectRatioLabel()} • ${_getQualityLabel()})',
             ),
             backgroundColor: Colors.green,
           ),
@@ -3461,7 +3515,7 @@ class _CameraScreenState extends State<CameraScreen>
             content: Text(
               savedCount > 0
                   ? '$savedCount dari 2 foto tersimpan. Detail error: $e'
-                  : 'Gagal menyimpan foto: $e',
+                  : 'Gagal memproses/menyimpan foto: $e',
             ),
             backgroundColor: Colors.red,
           ),
@@ -3478,7 +3532,7 @@ class _CameraScreenState extends State<CameraScreen>
           _screenFlashActive = false;
         });
       }
-      await _waitPostCaptureCooldown(milliseconds: 250);
+      await _waitPostCaptureCooldown(milliseconds: 600);
     }
   }
 
@@ -5771,7 +5825,11 @@ class _CollageStagePreviewScreenState
         await Future<void>.delayed(Duration.zero);
       }
 
-      final Uint8List jpgBytes = _encodeCleanJpgOrThrow(canvasImg, quality: 92);
+      final Uint8List jpgBytes = _verifyEncodedJpgBytes(
+        _encodeCleanJpgOrThrow(canvasImg, quality: 92),
+        expectedWidth: canvasW,
+        expectedHeight: canvasH,
+      );
 
       final Directory tempDir = await getTemporaryDirectory();
       final String stampId =
@@ -6592,7 +6650,7 @@ class _GalleryWatermarkEditorScreenState
                   activeDt: _activeDateTime(),
                   cfg: _cfg,
                 )
-              : rawBytes;
+              : _verifyEncodedJpgBytes(rawBytes);
 
       final Directory tempDir = await getTemporaryDirectory();
       tempOutPath =
@@ -6610,8 +6668,8 @@ class _GalleryWatermarkEditorScreenState
         SnackBar(
           content: Text(
             _stampVisible
-                ? 'Foto bertanda air berhasil disimpan ke galeri'
-                : 'Foto berhasil disimpan ke galeri',
+                ? 'Foto bertanda air terverifikasi & tersimpan ke galeri'
+                : 'Foto terverifikasi & tersimpan ke galeri',
           ),
           backgroundColor: Colors.green,
         ),

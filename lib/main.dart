@@ -2551,6 +2551,7 @@ class _CameraScreenState extends State<CameraScreen>
       _shutterBlinkActive = false;
       _showFocusRing = false;
       _isDraggingExposure = false;
+      _LatestPhotosGridScreen.resetSessionQuota();
       unawaited(_NativeBrightnessService.setKeepScreenOn(false));
       unawaited(_NativeBrightnessService.restoreNormal());
       if (mounted &&
@@ -2574,7 +2575,7 @@ class _CameraScreenState extends State<CameraScreen>
       _isCoolingDown = false;
       _queuedCaptureTasks = 0;
       unawaited(_NativeBrightnessService.setKeepScreenOn(true));
-      _LatestPhotosGridScreen.invalidateCache();
+      _LatestPhotosGridScreen.resetSessionQuota();
       _screenFlashActive = false;
       unawaited(_NativeBrightnessService.restoreNormal());
       if (mounted) {
@@ -2942,7 +2943,7 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    _LatestPhotosGridScreen.invalidateCache();
+    _LatestPhotosGridScreen.resetSessionQuota();
     setState(() => _openDrawer = ActiveDrawer.none);
 
     await Navigator.of(context).push(
@@ -2953,6 +2954,7 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       ),
     );
+    _LatestPhotosGridScreen.resetSessionQuota();
   }
 
   Future<void> _pickLogoImage() async {
@@ -4369,6 +4371,7 @@ class _CameraScreenState extends State<CameraScreen>
     _cooldownTimer?.cancel();
     _shutterBlinkTimer?.cancel();
     _focusRingTimer?.cancel();
+    _LatestPhotosGridScreen.resetSessionQuota();
     unawaited(_NativeBrightnessService.setKeepScreenOn(false));
     unawaited(_NativeBrightnessService.restoreNormal());
     final ctrl = _controller;
@@ -4460,9 +4463,19 @@ class _LatestPhotosGridScreen extends StatefulWidget {
     required this.onConfigChanged,
   });
 
+  static const int _quotaStep = 2500;
+  static int _sessionQuotaLimit = _quotaStep;
+  static int? _cachedQuotaLimit;
   static List<_MediaEntry>? _cachedEntries;
 
+  static void resetSessionQuota() {
+    _sessionQuotaLimit = _quotaStep;
+    _cachedQuotaLimit = null;
+    _cachedEntries = null;
+  }
+
   static void invalidateCache() {
+    _cachedQuotaLimit = null;
     _cachedEntries = null;
   }
 
@@ -4471,7 +4484,6 @@ class _LatestPhotosGridScreen extends StatefulWidget {
 }
 
 class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
-  static const int _maxFilesScan = 2500;
   static const int _initialVisibleCount = 24;
   static const int _pageBatchSize = 24;
   static const int _minCollagePhotos = 2;
@@ -4517,6 +4529,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   bool _isLoading = true;
   bool _isDeleting = false;
   bool _isLoadingMore = false;
+  bool _isExpandingQuota = false;
+  bool _hasMoreBeyondQuota = true;
   List<_MediaEntry> _entries = [];
   List<_MonthlyPhotoSection> _fullSections = [];
   int _visibleCount = 0;
@@ -4546,6 +4560,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   @override
   void initState() {
     super.initState();
+    _LatestPhotosGridScreen._sessionQuotaLimit =
+        _LatestPhotosGridScreen._quotaStep;
     _config = widget.initialConfig;
     _scrollController = ScrollController()..addListener(_onScroll);
     unawaited(_loadAllPhotos(forceRefresh: true));
@@ -4742,6 +4758,33 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     return _formatDatePill(_entries[idx].modified);
   }
 
+  Future<void> _expandQuotaByStep() async {
+    if (_isExpandingQuota || _isLoading || !_hasMoreBeyondQuota) return;
+    _isExpandingQuota = true;
+    final int prevCount = _entries.length;
+    _LatestPhotosGridScreen._sessionQuotaLimit +=
+        _LatestPhotosGridScreen._quotaStep;
+    if (mounted) {
+      setState(() {});
+    }
+    try {
+      await _loadAllPhotos(forceRefresh: true);
+      if (mounted && _entries.length > prevCount) {
+        setState(() {
+          _visibleCount = min(
+            _entries.length,
+            max(_visibleCount, prevCount + _pageBatchSize),
+          );
+        });
+      }
+    } finally {
+      _isExpandingQuota = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
   void _onScroll() {
     if (!_scrollController.hasClients || _isProgrammaticJumping) return;
     final pos = _scrollController.position;
@@ -4762,17 +4805,22 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
       _scrubFractionNotifier.value = frac;
 
-      if (!_isLoadingMore &&
-          _visibleCount < total &&
-          pos.pixels >= pos.maxScrollExtent - 400) {
-        _isLoadingMore = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _isLoadingMore = false;
-          if (!mounted) return;
-          setState(() {
-            _visibleCount = min(total, _visibleCount + _pageBatchSize);
+      final bool nearBottom = pos.pixels >= pos.maxScrollExtent - 250;
+      if (nearBottom) {
+        if (!_isLoadingMore && _visibleCount < total) {
+          _isLoadingMore = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _isLoadingMore = false;
+            if (!mounted) return;
+            setState(() {
+              _visibleCount = min(total, _visibleCount + _pageBatchSize);
+            });
           });
-        });
+        } else if (_visibleCount >= total &&
+            _hasMoreBeyondQuota &&
+            !_isExpandingQuota) {
+          unawaited(_expandQuotaByStep());
+        }
       }
     }
   }
@@ -4864,12 +4912,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  Future<List<_MediaEntry>> _queryMediaStoreNative() async {
+  Future<List<_MediaEntry>> _queryMediaStoreNative({required int limit}) async {
     if (!Platform.isAndroid) return const [];
     try {
-      final dynamic rawRes = await _mediaStoreChannel
-          .invokeMethod('getAllImages')
-          .timeout(const Duration(seconds: 5));
+      final dynamic rawRes = await _mediaStoreChannel.invokeMethod(
+        'getAllImages',
+        {'limit': limit},
+      ).timeout(const Duration(seconds: 8));
       if (rawRes == null) return const [];
 
       final List<_MediaEntry> results = [];
@@ -4878,7 +4927,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
       if (rawRes is List) {
         for (int i = 0; i < rawRes.length; i++) {
-          if (results.length >= _maxFilesScan) break;
+          if (results.length >= limit) break;
           if (i > 0 && i % 500 == 0) {
             await Future<void>.delayed(Duration.zero);
           }
@@ -4912,7 +4961,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  Future<List<_MediaEntry>> _scanDirectoriesFallback() async {
+  Future<List<_MediaEntry>> _scanDirectoriesFallback({
+    required int limit,
+  }) async {
     final List<_MediaEntry> allEntries = [];
     final List<Directory> candidateDirs = [];
 
@@ -4930,11 +4981,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final DateTime nowFallback = DateTime.now();
 
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
-      if (depth > 2 || allEntries.length >= _maxFilesScan) return;
+      if (depth > 2 || allEntries.length >= limit) return;
       try {
         int counter = 0;
         await for (final entity in dir.list(followLinks: false)) {
-          if (allEntries.length >= _maxFilesScan) break;
+          if (allEntries.length >= limit) break;
           counter++;
           if (counter % 250 == 0) {
             await Future<void>.delayed(Duration.zero);
@@ -4966,8 +5017,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
+    final int activeQuota = _LatestPhotosGridScreen._sessionQuotaLimit;
     if (!forceRefresh &&
         _LatestPhotosGridScreen._cachedEntries != null &&
+        _LatestPhotosGridScreen._cachedQuotaLimit == activeQuota &&
         _LatestPhotosGridScreen._cachedEntries!.isNotEmpty) {
       if (mounted) {
         final cached = _LatestPhotosGridScreen._cachedEntries!;
@@ -4975,6 +5028,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
           _entries = cached;
           _fullSections = _buildMonthlySections(cached);
           _visibleCount = min(_initialVisibleCount, _entries.length);
+          _hasMoreBeyondQuota = cached.length >= activeQuota;
           _isLoading = false;
         });
       }
@@ -4985,11 +5039,13 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     await _ensureMediaPermissions();
 
-    List<_MediaEntry> collected = await _queryMediaStoreNative();
+    List<_MediaEntry> collected =
+        await _queryMediaStoreNative(limit: activeQuota);
     if (collected.isEmpty) {
-      collected = await _scanDirectoriesFallback();
+      collected = await _scanDirectoriesFallback(limit: activeQuota);
     }
 
+    _LatestPhotosGridScreen._cachedQuotaLimit = activeQuota;
     _LatestPhotosGridScreen._cachedEntries = collected;
 
     if (!mounted) return;
@@ -4997,6 +5053,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _entries = collected;
       _fullSections = _buildMonthlySections(collected);
       _visibleCount = min(_initialVisibleCount, _entries.length);
+      _hasMoreBeyondQuota = collected.length >= activeQuota;
       _isLoading = false;
     });
   }
@@ -5321,6 +5378,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     _scrubFractionNotifier.dispose();
     _scrubDraggingNotifier.dispose();
     _scrubDatePillNotifier.dispose();
+    _LatestPhotosGridScreen.resetSessionQuota();
     super.dispose();
   }
 
@@ -5331,7 +5389,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     final total = _entries.length;
     final sections = _buildVisibleSections(_visibleCount);
-    final hasMore = _visibleCount < total;
+    final hasMoreInBatch = _visibleCount < total;
+    final int activeQuota = _LatestPhotosGridScreen._sessionQuotaLimit;
     final int selectedCount = _selectedPaths.length;
 
     final String appBarTitle = _selectionMode
@@ -5551,7 +5610,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                             child: Padding(
                               padding: const EdgeInsets.symmetric(vertical: 16),
                               child: Center(
-                                child: hasMore
+                                child: hasMoreInBatch
                                     ? TextButton.icon(
                                         onPressed: () {
                                           setState(() {
@@ -5566,13 +5625,52 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                           'Muat lagi ($_visibleCount dari $total foto)',
                                         ),
                                       )
-                                    : Text(
-                                        'Semua foto dimuat ($total foto)',
-                                        style: const TextStyle(
-                                          color: Colors.white54,
-                                          fontSize: 12,
-                                        ),
-                                      ),
+                                    : (_hasMoreBeyondQuota
+                                        ? (_isExpandingQuota
+                                            ? const Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  SizedBox(
+                                                    width: 20,
+                                                    height: 20,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      color: Color(0xFFFFD000),
+                                                    ),
+                                                  ),
+                                                  SizedBox(height: 6),
+                                                  Text(
+                                                    'Membuka 2500 foto berikutnya...',
+                                                    style: TextStyle(
+                                                      color: Colors.white70,
+                                                      fontSize: 12,
+                                                    ),
+                                                  ),
+                                                ],
+                                              )
+                                            : TextButton.icon(
+                                                onPressed: () =>
+                                                    unawaited(_expandQuotaByStep()),
+                                                icon: const Icon(
+                                                  Icons.lock_open_outlined,
+                                                  color: Color(0xFFFFD000),
+                                                ),
+                                                label: Text(
+                                                  'Batas $activeQuota tercapai • Buka +2500 foto lagi',
+                                                  style: const TextStyle(
+                                                    color: Color(0xFFFFD000),
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              ))
+                                        : Text(
+                                            'Semua foto dimuat ($total foto)',
+                                            style: const TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 12,
+                                            ),
+                                          )),
                               ),
                             ),
                           ),
@@ -6941,7 +7039,7 @@ class _GalleryWatermarkEditorScreenState
                     ),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
@@ -6952,7 +7050,8 @@ class _GalleryWatermarkEditorScreenState
                         borderRadius: BorderRadius.circular(10),
                       ),
                     ),
-                    onPressed: () => setState(() => _editorDrawerOpen = false),
+                    onPressed: () =>
+                        setState(() => _editorDrawerOpen = false),
                     child: const Text(
                       'Selesai',
                       style: TextStyle(fontWeight: FontWeight.w600),
@@ -6967,8 +7066,87 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
+  Widget _buildSinglePhotoStage(File file, BoxConstraints outerBox) {
+    final double? knownRatio = _aspectRatioCache[file.path];
+    if (knownRatio == null) {
+      unawaited(_resolvePhotoAspectRatio(file));
+    }
+
+    final double safeRatio =
+        (knownRatio != null && knownRatio > 0.1 && knownRatio <= 10.0)
+            ? knownRatio
+            : (3.0 / 4.0);
+
+    final double maxW = max(120.0, outerBox.maxWidth - 16.0);
+    final double maxH = max(160.0, outerBox.maxHeight - 16.0);
+
+    double boxW = maxW;
+    double boxH = boxW / safeRatio;
+    if (boxH > maxH) {
+      boxH = maxH;
+      boxW = boxH * safeRatio;
+    }
+
+    return Center(
+      child: SizedBox(
+        width: boxW,
+        height: boxH,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.file(
+              file,
+              fit: BoxFit.fill,
+              filterQuality: FilterQuality.medium,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => const Center(
+                child: Icon(
+                  Icons.broken_image_outlined,
+                  color: Colors.white54,
+                  size: 48,
+                ),
+              ),
+            ),
+            if (_stampVisible)
+              Positioned(
+                left: 0,
+                bottom: 0,
+                right: 0,
+                child: _buildStampOverlayWidget(
+                  activeDt: _activeDateTime(),
+                  cfg: _cfg,
+                  boxWidth: boxW,
+                  boxHeight: boxH,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_files.isEmpty) {
+      if (!_isClosingEmpty && !_isClosingScreen) {
+        _isClosingEmpty = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _safeCloseEditor(_anyChanged);
+        });
+      }
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: CircularProgressIndicator(
+            strokeWidth: 2.5,
+            color: Color(0xFFFFD000),
+          ),
+        ),
+      );
+    }
+
+    final int safeIndex = _currentIndex.clamp(0, _files.length - 1);
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -6979,61 +7157,19 @@ class _GalleryWatermarkEditorScreenState
         backgroundColor: Colors.black,
         appBar: AppBar(
           backgroundColor: Colors.black,
-          automaticallyImplyLeading: false,
-          leading: TextButton(
-            onPressed: (_isSaving || _isClosingScreen)
-                ? null
-                : () => _safeCloseEditor(_anyChanged),
-            child: const Text(
-              'Batal',
-              style: TextStyle(color: Colors.white, fontSize: 15),
-            ),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back, color: Colors.white),
+            onPressed: () => _safeCloseEditor(_anyChanged),
           ),
-          leadingWidth: 74,
-          centerTitle: true,
           title: Text(
-            _files.isEmpty
-                ? 'Tanda air foto'
-                : '${_currentIndex + 1} / ${_files.length}',
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            'Foto ${safeIndex + 1} / ${_files.length}',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           actions: [
             IconButton(
-              onPressed: (_isSaving || _isClosingScreen)
-                  ? null
-                  : _deleteCurrentPhotoPermanently,
+              onPressed: _isSaving ? null : _deleteCurrentPhotoPermanently,
               icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
               tooltip: 'Hapus Permanen',
-            ),
-            Padding(
-              padding: const EdgeInsets.only(right: 10),
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF1E6BFF),
-                  foregroundColor: Colors.white,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                onPressed: (_isSaving || _isClosingScreen)
-                    ? null
-                    : _saveStampedPhotoToGallery,
-                child: _isSaving
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Text(
-                        'Selesai',
-                        style: TextStyle(fontWeight: FontWeight.w600),
-                      ),
-              ),
             ),
           ],
         ),
@@ -7041,215 +7177,60 @@ class _GalleryWatermarkEditorScreenState
           child: Column(
             children: [
               Expanded(
-                child: _files.isEmpty
-                    ? const SizedBox.shrink()
-                    : PageView.builder(
-                        controller: _pageController,
-                        itemCount: _files.length,
-                        onPageChanged: (idx) {
-                          setState(() => _currentIndex = idx);
-                          _prefetchAroundIndex(idx);
-                        },
-                        itemBuilder: (context, idx) {
-                          final File itemFile = _files[idx];
-                          final double? resolvedRatio =
-                              _aspectRatioCache[itemFile.path];
-
-                          return Center(
-                            child: LayoutBuilder(
-                              builder: (context, outerBox) {
-                                final double availW =
-                                    max(1.0, outerBox.maxWidth);
-                                final double availH =
-                                    outerBox.maxHeight.isFinite
-                                        ? max(1.0, outerBox.maxHeight)
-                                        : availW * (4.0 / 3.0);
-
-                                if (resolvedRatio == null) {
-                                  return SizedBox(
-                                    width: availW,
-                                    height: availH,
-                                    child: Stack(
-                                      fit: StackFit.expand,
-                                      children: [
-                                        Image.file(
-                                          itemFile,
-                                          fit: BoxFit.contain,
-                                          gaplessPlayback: true,
-                                          errorBuilder: (_, __, ___) =>
-                                              const Center(
-                                            child: Text(
-                                              'Gagal memuat foto',
-                                              style: TextStyle(
-                                                color: Colors.white70,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        if (_stampVisible)
-                                          Positioned(
-                                            left: 0,
-                                            right: 0,
-                                            bottom: 0,
-                                            child: _buildStampOverlayWidget(
-                                              activeDt: _activeDateTime(),
-                                              cfg: _cfg,
-                                              boxWidth: availW,
-                                              boxHeight: availH,
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                  );
-                                }
-
-                                final double safeRatio =
-                                    resolvedRatio.clamp(0.15, 6.0);
-                                double boxW = availW;
-                                double boxH = boxW / safeRatio;
-                                if (boxH > availH) {
-                                  boxH = availH;
-                                  boxW = boxH * safeRatio;
-                                }
-
-                                return SizedBox(
-                                  width: boxW,
-                                  height: boxH,
-                                  child: Stack(
-                                    fit: StackFit.expand,
-                                    children: [
-                                      Image.file(
-                                        itemFile,
-                                        fit: BoxFit.fill,
-                                        gaplessPlayback: true,
-                                        errorBuilder: (_, __, ___) =>
-                                            const Center(
-                                          child: Text(
-                                            'Gagal memuat foto',
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      if (_stampVisible)
-                                        Positioned(
-                                          left: 0,
-                                          right: 0,
-                                          bottom: 0,
-                                          child: _buildStampOverlayWidget(
-                                            activeDt: _activeDateTime(),
-                                            cfg: _cfg,
-                                            boxWidth: boxW,
-                                            boxHeight: boxH,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                          );
-                        },
-                      ),
+                child: LayoutBuilder(
+                  builder: (context, outerBox) {
+                    return PageView.builder(
+                      controller: _pageController,
+                      itemCount: _files.length,
+                      onPageChanged: (idx) {
+                        if (!mounted) return;
+                        setState(() {
+                          _currentIndex = idx;
+                          _stampVisible = false;
+                        });
+                        _prefetchAroundIndex(idx);
+                      },
+                      itemBuilder: (context, idx) {
+                        return _buildSinglePhotoStage(_files[idx], outerBox);
+                      },
+                    );
+                  },
+                ),
               ),
               _buildEditDrawer(),
               Container(
                 color: Colors.black,
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor:
-                              _stampVisible ? Colors.black : Colors.white,
-                          backgroundColor: _stampVisible
-                              ? const Color(0xFFFFD000)
-                              : Colors.transparent,
-                          side: BorderSide(
-                            color: _stampVisible
-                                ? const Color(0xFFFFD000)
-                                : Colors.white24,
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                        onPressed:
-                            _isSaving ? null : _toggleStampFromTemplateButton,
-                        icon: Icon(
-                          _stampVisible
-                              ? Icons.check_circle_outline
-                              : Icons.dashboard_customize_outlined,
-                          size: 18,
-                        ),
-                        label: const Text('Templat'),
+                    _BottomActionIcon(
+                      icon: Icons.auto_awesome_mosaic_outlined,
+                      label: _stampVisible ? 'Sembunyi' : 'Template',
+                      active: _stampVisible,
+                      onTap: _toggleStampFromTemplateButton,
+                    ),
+                    _BottomActionIcon(
+                      icon: Icons.edit_outlined,
+                      label: 'Sunting',
+                      active: _editorDrawerOpen,
+                      onTap: () => setState(
+                        () => _editorDrawerOpen = !_editorDrawerOpen,
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF252932),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                        onPressed: _isSaving
-                            ? null
-                            : () => setState(
-                                  () => _editorDrawerOpen = !_editorDrawerOpen,
-                                ),
-                        icon: const Icon(Icons.edit_outlined, size: 18),
-                        label: const Text('Sunting tanda air'),
-                      ),
+                    _BottomActionIcon(
+                      icon: _isSaving
+                          ? Icons.hourglass_top
+                          : Icons.save_alt_outlined,
+                      label: _isSaving ? 'Menyimpan...' : 'Simpan',
+                      active: false,
+                      onTap: _isSaving ? () {} : _saveStampedPhotoToGallery,
                     ),
                   ],
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MiniChipButton extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _MiniChipButton({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 7),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: selected ? const Color(0xFFFFD000) : const Color(0xFF252932),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: selected ? Colors.black : Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
           ),
         ),
       ),
@@ -7277,51 +7258,86 @@ class _WatermarkRowTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          Icon(icon, size: 22, color: const Color(0xFF4EA8FF)),
+          Icon(icon, color: Colors.white70, size: 22),
           const SizedBox(width: 12),
           Expanded(
             child: InkWell(
               onTap: onTapContent,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 1),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.white60,
+                    const SizedBox(height: 1),
+                    Text(
+                      subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 12,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
           Switch(
             value: value,
+            activeTrackColor: const Color(0xFFFFD000),
             onChanged: onChanged,
           ),
-          InkWell(
-            onTap: onTapContent,
-            child: const Padding(
-              padding: EdgeInsets.only(left: 4),
-              child: Icon(Icons.chevron_right, size: 18, color: Colors.white54),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniChipButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MiniChipButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFFFD000) : const Color(0xFF222630),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -7344,25 +7360,25 @@ class _BottomActionIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color fg = disabled
+    final Color color = disabled
         ? Colors.white30
         : (active ? const Color(0xFFFFD000) : Colors.white);
-    return InkWell(
+    return GestureDetector(
       onTap: disabled ? null : onTap,
-      borderRadius: BorderRadius.circular(8),
+      behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: fg, size: 24),
+            Icon(icon, color: color, size: 22),
             const SizedBox(height: 3),
             Text(
               label,
               style: TextStyle(
-                color: fg,
+                color: color,
                 fontSize: 11,
-                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
           ],

@@ -68,6 +68,74 @@ else
   exit 1
 fi
 
+ICON_SRC="assets/icon/app_icon.png"
+if [ -f "$ICON_SRC" ]; then
+  python3 - "$ICON_SRC" << 'PY'
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+res_root = Path("android/app/src/main/res")
+sizes = {
+    "mipmap-mdpi": 48,
+    "mipmap-hdpi": 72,
+    "mipmap-xhdpi": 96,
+    "mipmap-xxhdpi": 144,
+    "mipmap-xxxhdpi": 192,
+}
+
+pil_ok = False
+try:
+    from PIL import Image, ImageOps
+    pil_ok = True
+except ImportError:
+    pil_ok = False
+
+if pil_ok:
+    with Image.open(src) as im:
+        rgb_im = im.convert("RGB")
+        # Beri margin 8% agar ikon tidak terpotong di launcher adaptif/bulat
+        padded = ImageOps.expand(rgb_im, border=max(1, int(min(rgb_im.size) * 0.08)), fill=(255, 255, 255))
+        for folder, px in sizes.items():
+            out_dir = res_root / folder
+            out_dir.mkdir(parents=True, exist_ok=True)
+            resized = padded.resize((px, px), Image.Resampling.LANCZOS)
+            for fname in ("ic_launcher.png", "ic_launcher_round.png"):
+                target = out_dir / fname
+                if (out_dir / fname).parent.exists():
+                    resized.save(target, format="PNG")
+    print("Berhasil memasang app_icon.png ke seluruh folder mipmap-* via Pillow")
+elif shutil.which("ffmpeg"):
+    for folder, px in sizes.items():
+        out_dir = res_root / folder
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for fname in ("ic_launcher.png", "ic_launcher_round.png"):
+            target = out_dir / fname
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", str(src),
+                    "-vf", f"scale={px}:{px}:flags=lanczos",
+                    str(target),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    print("Berhasil memasang app_icon.png ke seluruh folder mipmap-* via ffmpeg")
+else:
+    for folder in sizes:
+        out_dir = res_root / folder
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for fname in ("ic_launcher.png", "ic_launcher_round.png"):
+            shutil.copyfile(src, out_dir / fname)
+    print("Pillow & ffmpeg tidak tersedia; menyalin app_icon.png langsung ke mipmap-*")
+PY
+else
+  echo "PERINGATAN: $ICON_SRC tidak ditemukan, melewati pemasangan ikon kustom."
+fi
+
 MAIN_DART_PATH="lib/main.dart"
 if [ -f "$MAIN_DART_PATH" ]; then
   python3 - "$MAIN_DART_PATH" << 'PY'

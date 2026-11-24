@@ -10,18 +10,46 @@ if [ ! -f "$MANIFEST_PATH" ]; then
 fi
 
 if [ -f "$MANIFEST_PATH" ]; then
-  python3 - <<'PY'
+  python3 - << 'PY'
 from pathlib import Path
+import re
 
 path = Path("android/app/src/main/AndroidManifest.xml")
 content = path.read_text(encoding="utf-8")
+
+if "xmlns:tools=" not in content and "<manifest" in content:
+    content = content.replace(
+        "<manifest",
+        '<manifest xmlns:tools="http://schemas.android.com/tools"',
+        1,
+    )
+
+content = re.sub(
+    r'[ \t]*<uses-permission\b[^>]*android\.permission\.WRITE_EXTERNAL_STORAGE[^>]*/>\s*\n?',
+    '',
+    content,
+    flags=re.DOTALL,
+)
+
+content = re.sub(
+    r'(android:name="android\.permission\.WRITE_EXTERNAL_STORAGE"[^>]*android:maxSdkVersion=")29(")',
+    r'\g<1>28\g<2>',
+    content,
+)
+
+write_perm = (
+    '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" '
+    'android:maxSdkVersion="28" tools:replace="android:maxSdkVersion" />'
+)
+
+if "</manifest>" in content:
+    content = content.replace("</manifest>", f"    {write_perm}\n</manifest>", 1)
 
 required_perms = [
     '<uses-permission android:name="android.permission.CAMERA" />',
     '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
     '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />',
     '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
-    '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
     '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
     '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
     '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
@@ -31,10 +59,9 @@ missing = [p for p in required_perms if p.split('"')[1] not in content]
 if missing and "</manifest>" in content:
     injection = "".join(f"    {p}\n" for p in missing)
     content = content.replace("</manifest>", f"{injection}</manifest>", 1)
-    path.write_text(content, encoding="utf-8")
-    print(f"Berhasil menyuntikkan {len(missing)} izin ke AndroidManifest.xml")
-else:
-    print("Semua izin di AndroidManifest.xml sudah lengkap")
+
+path.write_text(content, encoding="utf-8")
+print("Berhasil menormalkan WRITE_EXTERNAL_STORAGE (maxSdkVersion=28 + tools:replace) dan izin AndroidManifest.xml")
 PY
 else
   echo "ERROR: $MANIFEST_PATH tidak ditemukan!"
@@ -43,7 +70,7 @@ fi
 
 MAIN_ACTIVITY_KT="$(find android/app/src/main -name 'MainActivity.kt' 2>/dev/null | head -n 1 || true)"
 if [ -n "$MAIN_ACTIVITY_KT" ] && [ -f "$MAIN_ACTIVITY_KT" ]; then
-  python3 - "$MAIN_ACTIVITY_KT" <<'PY'
+  python3 - "$MAIN_ACTIVITY_KT" << 'PY'
 import sys
 from pathlib import Path
 
@@ -72,12 +99,12 @@ class MainActivity : FlutterActivity() {
     private val channelName = "timestamp_by_putra/media_store"
     private val brightnessChannelName = "timestamp_by_putra/screen_brightness"
     private val reqMediaCode = 7001
-    private val reqPermanentDeleteCode = 7003
+    private val reqTrashCode = 7002
 
     private var pendingPermResult: MethodChannel.Result? = null
-    private var pendingDeleteResult: MethodChannel.Result? = null
-    private var pendingDeleteUriCount: Int = 0
-    private var pendingDeletePaths: List<String> = emptyList()
+    private var pendingTrashResult: MethodChannel.Result? = null
+    private var pendingTrashUriCount: Int = 0
+    private var pendingTrashPaths: List<String> = emptyList()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -121,13 +148,13 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "requestMediaPermissions" -> requestMediaPermissions(result)
                     "getAllImages" -> result.success(queryAllImagePaths())
-                    "deletePermanently" -> {
+                    "moveToTrash" -> {
                         val rawPaths = call.argument<List<*>>("paths")
                         val paths = rawPaths
                             ?.mapNotNull { it?.toString()?.trim() }
                             ?.filter { it.isNotEmpty() }
                             ?: emptyList()
-                        deletePathsPermanently(paths, result)
+                        movePathsToTrash(paths, result)
                     }
                     else -> result.notImplemented()
                 }
@@ -208,31 +235,21 @@ class MainActivity : FlutterActivity() {
         return list
     }
 
-    private fun deletePathsPermanently(paths: List<String>, result: MethodChannel.Result) {
+    private fun movePathsToTrash(paths: List<String>, result: MethodChannel.Result) {
         if (paths.isEmpty()) {
             result.success(
                 mapOf(
-                    "deletedCount" to 0,
+                    "movedCount" to 0,
                     "unresolvedPaths" to emptyList<String>(),
                 )
             )
             return
         }
 
-        if (pendingDeleteResult != null) {
-            result.error("IN_PROGRESS", "Penghapusan permanen sedang berjalan", null)
-            return
-        }
-
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val uris = mutableListOf<Uri>()
             val unresolved = mutableListOf<String>()
+            val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
 
             for (p in paths) {
                 val uri = findImageUriByPath(collection, p)
@@ -245,17 +262,18 @@ class MainActivity : FlutterActivity() {
 
             if (uris.isNotEmpty()) {
                 try {
-                    val pendingIntent = MediaStore.createDeleteRequest(
+                    val pendingIntent = MediaStore.createTrashRequest(
                         contentResolver,
                         uris,
+                        true,
                     )
-                    pendingDeleteResult = result
-                    pendingDeleteUriCount = uris.size
-                    pendingDeletePaths = unresolved
+                    pendingTrashResult = result
+                    pendingTrashUriCount = uris.size
+                    pendingTrashPaths = unresolved
                     ActivityCompat.startIntentSenderForResult(
                         this,
                         pendingIntent.intentSender,
-                        reqPermanentDeleteCode,
+                        reqTrashCode,
                         null,
                         0,
                         0,
@@ -268,60 +286,44 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        var deleted = 0
+        var moved = 0
         val remaining = mutableListOf<String>()
         for (p in paths) {
-            var removed = false
-            try {
-                val uri = findImageUriByPath(collection, p)
-                if (uri != null) {
-                    val rows = contentResolver.delete(uri, null, null)
-                    if (rows > 0) removed = true
-                }
-            } catch (_: Exception) {
-            }
             try {
                 val f = File(p)
-                if (f.exists()) {
-                    if (f.delete()) {
-                        removed = true
-                    }
+                if (f.exists() && f.delete()) {
+                    moved++
                 } else {
-                    removed = true
+                    remaining.add(p)
                 }
             } catch (_: Exception) {
-            }
-            if (removed) {
-                deleted++
-            } else {
                 remaining.add(p)
             }
         }
-
         result.success(
             mapOf(
-                "deletedCount" to deleted,
+                "movedCount" to moved,
                 "unresolvedPaths" to remaining,
             )
         )
     }
 
-    private fun findImageUriByPath(collection: Uri, path: String): Uri? {
-        try {
-            contentResolver.query(
-                collection,
-                arrayOf(MediaStore.Images.Media._ID),
-                "${MediaStore.Images.Media.DATA} = ?",
-                arrayOf(path),
-                null,
-            )?.use { cursor ->
+    private fun findImageUriByPath(
+        collection: Uri,
+        filePath: String,
+    ): Uri? {
+        val projection = arrayOf(MediaStore.Images.Media._ID)
+        val selection = "${MediaStore.Images.Media.DATA} = ?"
+        val args = arrayOf(filePath)
+        contentResolver.query(collection, projection, selection, args, null)
+            ?.use { cursor ->
                 if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(0)
+                    val id = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    )
                     return ContentUris.withAppendedId(collection, id)
                 }
             }
-        } catch (_: Exception) {
-        }
         return null
     }
 
@@ -345,33 +347,40 @@ class MainActivity : FlutterActivity() {
         data: Intent?,
     ) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == reqPermanentDeleteCode) {
-            val granted = resultCode == Activity.RESULT_OK
-            val deletedFromMedia = if (granted) pendingDeleteUriCount else 0
-            val stillPending = if (granted) {
-                pendingDeletePaths
-            } else {
-                pendingDeletePaths
+        if (requestCode == reqTrashCode) {
+            val res = pendingTrashResult
+            val uriCount = pendingTrashUriCount
+            val rem = pendingTrashPaths
+            pendingTrashResult = null
+            pendingTrashUriCount = 0
+            pendingTrashPaths = emptyList()
+            if (res != null) {
+                if (resultCode == Activity.RESULT_OK) {
+                    res.success(
+                        mapOf(
+                            "movedCount" to uriCount,
+                            "unresolvedPaths" to emptyList<String>(),
+                        )
+                    )
+                } else {
+                    res.success(
+                        mapOf(
+                            "movedCount" to 0,
+                            "unresolvedPaths" to rem,
+                        )
+                    )
+                }
             }
-            pendingDeleteResult?.success(
-                mapOf(
-                    "deletedCount" to deletedFromMedia,
-                    "unresolvedPaths" to stillPending,
-                )
-            )
-            pendingDeleteResult = null
-            pendingDeleteUriCount = 0
-            pendingDeletePaths = emptyList()
         }
     }
 }
 """.replace("__PKG__", pkg_name)
 
 kt_path.write_text(kotlin_code, encoding="utf-8")
-print(f"Berhasil mengupdate {kt_path}")
+print(f"Berhasil menulis MainActivity.kt ({kt_path}) dengan package {pkg_name}")
 PY
 else
-  echo "WARNING: MainActivity.kt tidak ditemukan."
+  echo "PERINGATAN: MainActivity.kt tidak ditemukan di android/app/src/main"
 fi
 
-echo "=== Setup Android selesai ==="
+echo "=== Selesai setup Android ==="

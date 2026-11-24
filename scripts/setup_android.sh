@@ -232,7 +232,11 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "requestMediaPermissions" -> requestMediaPermissions(result)
-                    "getAllImages" -> result.success(queryAllImagePaths())
+                    "getAllImages" -> {
+                        val requestedLimit = call.argument<Int>("limit") ?: 2500
+                        val safeLimit = requestedLimit.coerceIn(1, 200000)
+                        result.success(queryAllImagePaths(safeLimit))
+                    }
                     "deletePermanently", "moveToTrash" -> {
                         val rawPaths = call.argument<List<*>>("paths")
                         val paths = arrayListOf<String>()
@@ -283,7 +287,7 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun queryAllImagePaths(): ArrayList<Any> {
+    private fun queryAllImagePaths(limit: Int = 2500): ArrayList<Any> {
         val list = arrayListOf<Any>()
         if (!hasAllMediaPermissions()) return list
 
@@ -314,7 +318,7 @@ class MainActivity : FlutterActivity() {
                 val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
                 val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
 
-                while (cursor.moveToNext() && list.size < 2500) {
+                while (cursor.moveToNext() && list.size < limit) {
                     val path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
                     if (path.isEmpty() || seen.contains(path)) continue
                     val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L

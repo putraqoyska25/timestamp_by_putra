@@ -68,6 +68,23 @@ else
   exit 1
 fi
 
+MAIN_DART_PATH="lib/main.dart"
+if [ -f "$MAIN_DART_PATH" ]; then
+  python3 - "$MAIN_DART_PATH" << 'PY'
+import sys
+from pathlib import Path
+
+dart_path = Path(sys.argv[1])
+src = dart_path.read_text(encoding="utf-8")
+fixed = src.replace("const SizedBox.height(12)", "const SizedBox(height: 12)")
+if fixed != src:
+    dart_path.write_text(fixed, encoding="utf-8")
+    print("Berhasil memperbaiki 'const SizedBox.height(12)' menjadi 'const SizedBox(height: 12)' di lib/main.dart")
+else:
+    print("lib/main.dart sudah menggunakan 'const SizedBox(height: 12)'")
+PY
+fi
+
 MAIN_ACTIVITY_KT="$(find android/app/src/main -name 'MainActivity.kt' 2>/dev/null | head -n 1 || true)"
 if [ -n "$MAIN_ACTIVITY_KT" ] && [ -f "$MAIN_ACTIVITY_KT" ]; then
   python3 - "$MAIN_ACTIVITY_KT" << 'PY'
@@ -150,7 +167,7 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "requestMediaPermissions" -> requestMediaPermissions(result)
                     "getAllImages" -> result.success(queryAllImagePaths())
-                    "moveToTrash" -> {
+                    "deletePermanently", "moveToTrash" -> {
                         val rawPaths = call.argument<List<*>>("paths")
                         val paths = arrayListOf<String>()
                         if (rawPaths != null) {
@@ -240,18 +257,29 @@ class MainActivity : FlutterActivity() {
         return list
     }
 
+    private fun buildDeleteResponse(deletedCount: Int, unresolved: ArrayList<String>): HashMap<String, Any> {
+        val resMap = HashMap<String, Any>()
+        resMap["deletedCount"] = deletedCount
+        resMap["movedCount"] = deletedCount
+        resMap["unresolvedPaths"] = unresolved
+        return resMap
+    }
+
     private fun deletePathsPermanently(paths: ArrayList<String>, result: MethodChannel.Result) {
         if (paths.isEmpty()) {
-            val resMap = HashMap<String, Any>()
-            resMap["movedCount"] = 0
-            resMap["unresolvedPaths"] = arrayListOf<String>()
-            result.success(resMap)
+            result.success(buildDeleteResponse(0, arrayListOf<String>()))
+            return
+        }
+
+        if (pendingDeleteResult != null) {
+            result.error("IN_PROGRESS", "Proses penghapusan sedang berjalan", null)
             return
         }
 
         var directDeleted = 0
         val needsSystemDialogPaths = arrayListOf<String>()
         val needsSystemDialogUris = arrayListOf<Uri>()
+        val seenUris = HashSet<String>()
         val unresolved = arrayListOf<String>()
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -283,8 +311,10 @@ class MainActivity : FlutterActivity() {
                 }
                 MediaScannerConnection.scanFile(this, arrayOf(p), null, null)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && uri != null) {
-                needsSystemDialogUris.add(uri)
-                needsSystemDialogPaths.add(p)
+                if (seenUris.add(uri.toString())) {
+                    needsSystemDialogUris.add(uri)
+                    needsSystemDialogPaths.add(p)
+                }
             } else if (!file.exists()) {
                 if (uri != null) {
                     try {
@@ -308,15 +338,13 @@ class MainActivity : FlutterActivity() {
                 pendingDeleteUriCount = needsSystemDialogUris.size
                 pendingDirectDeletedCount = directDeleted
                 pendingDeletePaths = needsSystemDialogPaths
-                ActivityCompat.startIntentSenderForResult(
-                    this,
+                startIntentSenderForResult(
                     pendingIntent.intentSender,
                     reqDeleteCode,
                     null,
                     0,
                     0,
                     0,
-                    null,
                 )
                 return
             } catch (_: Exception) {
@@ -326,10 +354,7 @@ class MainActivity : FlutterActivity() {
             unresolved.addAll(needsSystemDialogPaths)
         }
 
-        val resMap = HashMap<String, Any>()
-        resMap["movedCount"] = directDeleted
-        resMap["unresolvedPaths"] = unresolved
-        result.success(resMap)
+        result.success(buildDeleteResponse(directDeleted, unresolved))
     }
 
     private fun findImageUriByPath(
@@ -437,15 +462,11 @@ class MainActivity : FlutterActivity() {
             pendingDirectDeletedCount = 0
             pendingDeletePaths = arrayListOf()
             if (res != null) {
-                val resMap = HashMap<String, Any>()
                 if (resultCode == Activity.RESULT_OK) {
-                    resMap["movedCount"] = directCount + uriCount
-                    resMap["unresolvedPaths"] = arrayListOf<String>()
+                    res.success(buildDeleteResponse(directCount + uriCount, arrayListOf<String>()))
                 } else {
-                    resMap["movedCount"] = directCount
-                    resMap["unresolvedPaths"] = rem
+                    res.success(buildDeleteResponse(directCount, rem))
                 }
-                res.success(resMap)
             }
         }
     }

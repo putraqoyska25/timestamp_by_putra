@@ -84,6 +84,7 @@ import android.app.Activity
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -99,12 +100,13 @@ class MainActivity : FlutterActivity() {
     private val channelName = "timestamp_by_putra/media_store"
     private val brightnessChannelName = "timestamp_by_putra/screen_brightness"
     private val reqMediaCode = 7001
-    private val reqTrashCode = 7002
+    private val reqDeleteCode = 7002
 
     private var pendingPermResult: MethodChannel.Result? = null
-    private var pendingTrashResult: MethodChannel.Result? = null
-    private var pendingTrashUriCount: Int = 0
-    private var pendingTrashPaths: ArrayList<String> = arrayListOf()
+    private var pendingDeleteResult: MethodChannel.Result? = null
+    private var pendingDeleteUriCount: Int = 0
+    private var pendingDirectDeletedCount: Int = 0
+    private var pendingDeletePaths: ArrayList<String> = arrayListOf()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -159,7 +161,7 @@ class MainActivity : FlutterActivity() {
                                 }
                             }
                         }
-                        movePathsToTrash(paths, result)
+                        deletePathsPermanently(paths, result)
                     }
                     else -> result.notImplemented()
                 }
@@ -238,7 +240,7 @@ class MainActivity : FlutterActivity() {
         return list
     }
 
-    private fun movePathsToTrash(paths: ArrayList<String>, result: MethodChannel.Result) {
+    private fun deletePathsPermanently(paths: ArrayList<String>, result: MethodChannel.Result) {
         if (paths.isEmpty()) {
             val resMap = HashMap<String, Any>()
             resMap["movedCount"] = 0
@@ -247,63 +249,86 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val uris = arrayListOf<Uri>()
-            val unresolved = arrayListOf<String>()
-            val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        var directDeleted = 0
+        val needsSystemDialogPaths = arrayListOf<String>()
+        val needsSystemDialogUris = arrayListOf<Uri>()
+        val unresolved = arrayListOf<String>()
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
 
-            for (p in paths) {
-                val uri = findImageUriByPath(collection, p)
-                if (uri != null) {
-                    uris.add(uri)
-                } else {
-                    unresolved.add(p)
-                }
-            }
+        for (p in paths) {
+            val uri = findImageUriByPath(collection, p)
+            val file = File(p)
+            var deletedDirectly = false
 
-            if (uris.isNotEmpty()) {
+            if (file.exists()) {
                 try {
-                    val pendingIntent = MediaStore.createTrashRequest(
-                        contentResolver,
-                        uris,
-                        true,
-                    )
-                    pendingTrashResult = result
-                    pendingTrashUriCount = uris.size
-                    pendingTrashPaths = unresolved
-                    ActivityCompat.startIntentSenderForResult(
-                        this,
-                        pendingIntent.intentSender,
-                        reqTrashCode,
-                        null,
-                        0,
-                        0,
-                        0,
-                        null,
-                    )
-                    return
+                    if (file.delete()) {
+                        deletedDirectly = true
+                    }
                 } catch (_: Exception) {
                 }
             }
-        }
 
-        var moved = 0
-        val remaining = arrayListOf<String>()
-        for (p in paths) {
-            try {
-                val f = File(p)
-                if (f.exists() && f.delete()) {
-                    moved++
-                } else {
-                    remaining.add(p)
+            if (deletedDirectly) {
+                directDeleted++
+                if (uri != null) {
+                    try {
+                        contentResolver.delete(uri, null, null)
+                    } catch (_: Exception) {
+                    }
                 }
-            } catch (_: Exception) {
-                remaining.add(p)
+                MediaScannerConnection.scanFile(this, arrayOf(p), null, null)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && uri != null) {
+                needsSystemDialogUris.add(uri)
+                needsSystemDialogPaths.add(p)
+            } else if (!file.exists()) {
+                if (uri != null) {
+                    try {
+                        contentResolver.delete(uri, null, null)
+                    } catch (_: Exception) {
+                    }
+                }
+                directDeleted++
+            } else {
+                unresolved.add(p)
             }
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && needsSystemDialogUris.isNotEmpty()) {
+            try {
+                val pendingIntent = MediaStore.createDeleteRequest(
+                    contentResolver,
+                    needsSystemDialogUris,
+                )
+                pendingDeleteResult = result
+                pendingDeleteUriCount = needsSystemDialogUris.size
+                pendingDirectDeletedCount = directDeleted
+                pendingDeletePaths = needsSystemDialogPaths
+                ActivityCompat.startIntentSenderForResult(
+                    this,
+                    pendingIntent.intentSender,
+                    reqDeleteCode,
+                    null,
+                    0,
+                    0,
+                    0,
+                    null,
+                )
+                return
+            } catch (_: Exception) {
+                unresolved.addAll(needsSystemDialogPaths)
+            }
+        } else {
+            unresolved.addAll(needsSystemDialogPaths)
+        }
+
         val resMap = HashMap<String, Any>()
-        resMap["movedCount"] = moved
-        resMap["unresolvedPaths"] = remaining
+        resMap["movedCount"] = directDeleted
+        resMap["unresolvedPaths"] = unresolved
         result.success(resMap)
     }
 
@@ -311,18 +336,61 @@ class MainActivity : FlutterActivity() {
         collection: Uri,
         filePath: String,
     ): Uri? {
+        val candidates = linkedSetOf(filePath)
+        if (filePath.startsWith("/storage/emulated/0/")) {
+            candidates.add("/sdcard/" + filePath.removePrefix("/storage/emulated/0/"))
+        } else if (filePath.startsWith("/sdcard/")) {
+            candidates.add("/storage/emulated/0/" + filePath.removePrefix("/sdcard/"))
+        }
+
         val projection = arrayOf(MediaStore.Images.Media._ID)
-        val selection = "${MediaStore.Images.Media.DATA} = ?"
-        val args = arrayOf(filePath)
-        contentResolver.query(collection, projection, selection, args, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(
-                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    )
-                    return ContentUris.withAppendedId(collection, id)
-                }
+        for (candidate in candidates) {
+            try {
+                val selection = "${MediaStore.Images.Media.DATA} = ?"
+                val args = arrayOf(candidate)
+                contentResolver.query(collection, projection, selection, args, null)
+                    ?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val id = cursor.getLong(
+                                cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                            )
+                            return ContentUris.withAppendedId(collection, id)
+                        }
+                    }
+            } catch (_: Exception) {
             }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val f = File(filePath)
+                val name = f.name
+                val parentPath = f.parent ?: ""
+                val relDir = when {
+                    parentPath.startsWith("/storage/emulated/0/") ->
+                        parentPath.removePrefix("/storage/emulated/0/").trimEnd('/') + "/"
+                    parentPath.startsWith("/sdcard/") ->
+                        parentPath.removePrefix("/sdcard/").trimEnd('/') + "/"
+                    else -> ""
+                }
+                if (name.isNotEmpty() && relDir.isNotEmpty()) {
+                    val selection =
+                        "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} = ?"
+                    val args = arrayOf(name, relDir)
+                    contentResolver.query(collection, projection, selection, args, null)
+                        ?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val id = cursor.getLong(
+                                    cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                                )
+                                return ContentUris.withAppendedId(collection, id)
+                            }
+                        }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
         return null
     }
 
@@ -346,20 +414,22 @@ class MainActivity : FlutterActivity() {
         data: Intent?,
     ) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == reqTrashCode) {
-            val res = pendingTrashResult
-            val uriCount = pendingTrashUriCount
-            val rem = pendingTrashPaths
-            pendingTrashResult = null
-            pendingTrashUriCount = 0
-            pendingTrashPaths = arrayListOf()
+        if (requestCode == reqDeleteCode) {
+            val res = pendingDeleteResult
+            val uriCount = pendingDeleteUriCount
+            val directCount = pendingDirectDeletedCount
+            val rem = pendingDeletePaths
+            pendingDeleteResult = null
+            pendingDeleteUriCount = 0
+            pendingDirectDeletedCount = 0
+            pendingDeletePaths = arrayListOf()
             if (res != null) {
                 val resMap = HashMap<String, Any>()
                 if (resultCode == Activity.RESULT_OK) {
-                    resMap["movedCount"] = uriCount
+                    resMap["movedCount"] = directCount + uriCount
                     resMap["unresolvedPaths"] = arrayListOf<String>()
                 } else {
-                    resMap["movedCount"] = 0
+                    resMap["movedCount"] = directCount
                     resMap["unresolvedPaths"] = rem
                 }
                 res.success(resMap)

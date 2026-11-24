@@ -30,6 +30,10 @@ jobs:
           chmod +x scripts/setup_android.sh
           ./scripts/setup_android.sh
 
+      - name: Verify custom launcher icon assets exist
+        run: |
+          ls -la android/app/src/main/res/mipmap-*/ic_launcher.png
+
       - name: Ensure applicationId is com.putra.timestamp_by_putra
         run: |
           python3 - << 'PY'

@@ -107,7 +107,7 @@ class _CompositeDecodedRequest {
   });
 }
 
-Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 93}) {
+Uint8List _encodeCleanJpgOrThrow(img.Image image, {int quality = 92}) {
   if (image.width <= 4 || image.height <= 4) {
     throw Exception('Dimensi gambar tidak valid (${image.width}x${image.height})');
   }
@@ -189,7 +189,7 @@ img.Image _decodeAndCropResizeCore(_CropResizeRequest req) {
 
 Uint8List _processCropResizeIsolate(_CropResizeRequest req) {
   final img.Image cropped = _decodeAndCropResizeCore(req);
-  return _encodeCleanJpgOrThrow(cropped, quality: 93);
+  return _encodeCleanJpgOrThrow(cropped, quality: 92);
 }
 
 Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
@@ -246,7 +246,7 @@ Uint8List? _processSlotCropIsolate(_SlotCropRequest req) {
   );
 
   try {
-    return _encodeCleanJpgOrThrow(resized, quality: 93);
+    return _encodeCleanJpgOrThrow(resized, quality: 92);
   } catch (_) {
     return null;
   }
@@ -290,7 +290,7 @@ Uint8List _processCompositeDecodedIsolate(_CompositeDecodedRequest req) {
     );
   }
 
-  return _encodeCleanJpgOrThrow(baseImg, quality: 93);
+  return _encodeCleanJpgOrThrow(baseImg, quality: 92);
 }
 
 class _CollageLayoutDef {
@@ -1742,11 +1742,14 @@ class _StampRenderer {
     final img.Image rgbaBase = baseImage.convert(numChannels: 4, alpha: 255);
     final int w = rgbaBase.width;
     final int h = rgbaBase.height;
-    final Uint8List baseRgbaBytes = rgbaBase.getBytes(order: img.ChannelOrder.rgba);
+    final Uint8List baseRgbaBytes =
+        rgbaBase.getBytes(order: img.ChannelOrder.rgba);
 
     if (!hasActiveContent(cfg)) {
-      return _encodeCleanJpgOrThrow(rgbaBase, quality: 93);
+      return _encodeCleanJpgOrThrow(rgbaBase, quality: 92);
     }
+
+    await Future<void>.delayed(Duration.zero);
 
     final ui.Image overlayUi = await renderOverlayImage(
       targetW: w,
@@ -1769,6 +1772,8 @@ class _StampRenderer {
     } finally {
       overlayUi.dispose();
     }
+
+    await Future<void>.delayed(Duration.zero);
 
     return compute(
       _processCompositeDecodedIsolate,
@@ -2499,8 +2504,13 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _waitPostCaptureCooldown({int milliseconds = 750}) async {
+  Future<void> _waitPostCaptureCooldown({int milliseconds = 250}) async {
     _cooldownTimer?.cancel();
+    if (milliseconds <= 0) {
+      _isCoolingDown = false;
+      if (mounted && !_isDisposed) setState(() {});
+      return;
+    }
     if (mounted && !_isDisposed) {
       setState(() => _isCoolingDown = true);
     } else {
@@ -2755,7 +2765,7 @@ class _CameraScreenState extends State<CameraScreen>
           content: Text(
             'Menunggu proses foto & stempel selesai sebelum membuka album...',
           ),
-          duration: Duration(milliseconds: 1200),
+          duration: Duration(milliseconds: 1000),
         ),
       );
       return;
@@ -3248,6 +3258,27 @@ class _CameraScreenState extends State<CameraScreen>
     return img.bakeOrientation(decoded);
   }
 
+  Future<Uint8List> _buildStampedWithRetry({
+    required img.Image baseImage,
+    required DateTime activeDt,
+    required _WatermarkConfig cfg,
+  }) async {
+    try {
+      return await _StampRenderer.buildStampedJpgFromDecodedImage(
+        baseImage: baseImage,
+        activeDt: activeDt,
+        cfg: cfg,
+      );
+    } catch (_) {
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      return _StampRenderer.buildStampedJpgFromDecodedImage(
+        baseImage: baseImage,
+        activeDt: activeDt,
+        cfg: cfg,
+      );
+    }
+  }
+
   Future<void> _onShutterPressed() async {
     if (_isAlbumBlocked ||
         _isInitializingCamera ||
@@ -3338,6 +3369,7 @@ class _CameraScreenState extends State<CameraScreen>
     try {
       final DateTime activeDt = _getActiveDateTime();
       final _WatermarkConfig cfg = _currentWatermarkConfig();
+      final bool stampActive = _StampRenderer.hasActiveContent(cfg);
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
 
@@ -3351,7 +3383,7 @@ class _CameraScreenState extends State<CameraScreen>
 
       _triggerShutterBlink(milliseconds: 110);
       if (playSound) {
-        await _ShutterAudioService.playShutterSound();
+        unawaited(_ShutterAudioService.playShutterSound());
       }
       final XFile photo = await ctrl.takePicture();
       cameraRawPath = photo.path;
@@ -3362,22 +3394,24 @@ class _CameraScreenState extends State<CameraScreen>
         await _forceTorchOff(controllerOverride: ctrl);
       }
 
+      await Future<void>.delayed(Duration.zero);
+
       final img.Image croppedBaseImg = await _buildCroppedDecodedImage(
         rawPhotoPath: cameraRawPath,
         ratio: _aspectRatio,
         qualityHeight: _getQualityHeightPixels(),
       );
 
-      final Uint8List cleanRawJpgBytes =
-          _encodeCleanJpgOrThrow(croppedBaseImg, quality: 93);
-
-      final Uint8List stampedJpgBytes = _StampRenderer.hasActiveContent(cfg)
-          ? await _StampRenderer.buildStampedJpgFromDecodedImage(
+      final Uint8List stampedJpgBytes = stampActive
+          ? await _buildStampedWithRetry(
               baseImage: croppedBaseImg,
               activeDt: activeDt,
               cfg: cfg,
             )
-          : cleanRawJpgBytes;
+          : _encodeCleanJpgOrThrow(croppedBaseImg, quality: 92);
+
+      final Uint8List cleanRawJpgBytes =
+          _encodeCleanJpgOrThrow(croppedBaseImg, quality: 92);
 
       final Directory tempDir = await getTemporaryDirectory();
       tempRawPath =
@@ -3396,7 +3430,7 @@ class _CameraScreenState extends State<CameraScreen>
         savedCount++;
       }
 
-      await Future.delayed(const Duration(milliseconds: 140));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
 
       if (await stampedOutFile.exists() && await stampedOutFile.length() > 64) {
         await Gal.putImage(stampedOutFile.path);
@@ -3444,7 +3478,7 @@ class _CameraScreenState extends State<CameraScreen>
           _screenFlashActive = false;
         });
       }
-      await _waitPostCaptureCooldown(milliseconds: 750);
+      await _waitPostCaptureCooldown(milliseconds: 250);
     }
   }
 
@@ -4716,7 +4750,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       for (final p in [
         '/storage/emulated/0/DCIM',
         '/storage/emulated/0/Pictures',
-        '/storage/emulated/0/Download',
       ]) {
         final d = Directory(p);
         if (await d.exists()) candidateDirs.add(d);
@@ -4726,7 +4759,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final Set<String> visitedPaths = {};
 
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
-      if (depth > 3 || allEntries.length >= _maxFilesScan) return;
+      if (depth > 2 || allEntries.length >= _maxFilesScan) return;
       try {
         await for (final entity in dir.list(followLinks: false)) {
           if (allEntries.length >= _maxFilesScan) break;
@@ -5201,7 +5234,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 240,
+                        cacheExtent: 200,
                         slivers: [
                           for (final sec in sections) ...[
                             SliverToBoxAdapter(
@@ -5738,7 +5771,7 @@ class _CollageStagePreviewScreenState
         await Future<void>.delayed(Duration.zero);
       }
 
-      final Uint8List jpgBytes = _encodeCleanJpgOrThrow(canvasImg, quality: 93);
+      final Uint8List jpgBytes = _encodeCleanJpgOrThrow(canvasImg, quality: 92);
 
       final Directory tempDir = await getTemporaryDirectory();
       final String stampId =
@@ -6805,6 +6838,11 @@ class _GalleryWatermarkEditorScreenState
 
   @override
   Widget build(BuildContext context) {
+    final double dpr = MediaQuery.of(context).devicePixelRatio;
+    final Size screenSize = MediaQuery.of(context).size;
+    final int decodeW = max(360, (screenSize.width * dpr).round());
+    final int decodeH = max(480, (screenSize.height * dpr).round());
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -6910,9 +6948,12 @@ class _GalleryWatermarkEditorScreenState
                                     children: [
                                       Image.file(
                                         itemFile,
+                                        cacheWidth: decodeW,
+                                        cacheHeight: decodeH,
                                         fit: BoxFit.contain,
                                         width: boxW,
                                         height: boxH,
+                                        gaplessPlayback: true,
                                         errorBuilder: (_, __, ___) =>
                                             const Center(
                                           child: Text(

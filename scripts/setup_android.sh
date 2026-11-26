@@ -22,6 +22,8 @@ ET.register_namespace('tools', 'http://schemas.android.com/tools')
 
 ANDROID_NS = 'http://schemas.android.com/apk/res/android'
 TOOLS_NS = 'http://schemas.android.com/tools'
+NAME_ATTR = f"{{{ANDROID_NS}}}name"
+VALUE_ATTR = f"{{{ANDROID_NS}}}value"
 
 tree = ET.parse(path)
 root = tree.getroot()
@@ -43,17 +45,34 @@ desired_permissions = [
 
 existing_perms = {}
 for elem in list(root.findall("uses-permission")):
-    name = elem.attrib.get(f"{{{ANDROID_NS}}}name", "")
+    name = elem.attrib.get(NAME_ATTR, "")
     if name:
         existing_perms[name] = elem
 
 for perm_name, extra_attrs in desired_permissions:
     elem = existing_perms.get(perm_name)
     if elem is None:
-        elem = ET.Element("uses-permission", {f"{{{ANDROID_NS}}}name": perm_name})
+        elem = ET.Element("uses-permission", {NAME_ATTR: perm_name})
         root.insert(0, elem)
     for k, v in extra_attrs.items():
         elem.set(k, v)
+
+app_elem = root.find("application")
+if app_elem is not None:
+    embedding_nodes = []
+    for md in list(app_elem.findall("meta-data")):
+        if md.attrib.get(NAME_ATTR) == "flutterEmbedding":
+            embedding_nodes.append(md)
+    if embedding_nodes:
+        embedding_nodes[0].set(VALUE_ATTR, "2")
+        for extra_md in embedding_nodes[1:]:
+            app_elem.remove(extra_md)
+    else:
+        new_md = ET.Element("meta-data", {
+            NAME_ATTR: "flutterEmbedding",
+            VALUE_ATTR: "2",
+        })
+        app_elem.append(new_md)
 
 tree.write(path, encoding="utf-8", xml_declaration=True)
 PY
@@ -506,8 +525,6 @@ class MainActivity : FlutterActivity() {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
             val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-            val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
-            val addCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
             val bucketIdCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
             } else {

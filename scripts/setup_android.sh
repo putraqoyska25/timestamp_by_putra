@@ -170,6 +170,7 @@ import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -356,13 +357,25 @@ class MainActivity : FlutterActivity() {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         }
 
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DATA,
-            MediaStore.Images.Media.DATE_TAKEN,
-            MediaStore.Images.Media.DATE_MODIFIED,
-        )
+        val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.RELATIVE_PATH,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.DATE_TAKEN,
+                MediaStore.Images.Media.DATE_MODIFIED,
+            )
+        } else {
+            arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.DATE_TAKEN,
+                MediaStore.Images.Media.DATE_MODIFIED,
+            )
+        }
         val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
+        val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
 
         try {
             contentResolver.query(
@@ -373,11 +386,33 @@ class MainActivity : FlutterActivity() {
                 sortOrder,
             )?.use { cursor ->
                 val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+                } else {
+                    -1
+                }
+                val nameCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                } else {
+                    -1
+                }
                 val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
                 val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
 
                 while (cursor.moveToNext()) {
-                    val path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
+                    var path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
+                    if (path.isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && nameCol >= 0) {
+                        val dispName = (cursor.getString(nameCol) ?: "").trim()
+                        val relPath = if (relCol >= 0) (cursor.getString(relCol) ?: "").trim() else ""
+                        if (dispName.isNotEmpty()) {
+                            val cleanRel = relPath.trim('/')
+                            path = if (cleanRel.isNotEmpty()) {
+                                "$primaryRoot/$cleanRel/$dispName"
+                            } else {
+                                "$primaryRoot/$dispName"
+                            }
+                        }
+                    }
                     if (path.isEmpty() || !isSupportedPhotoPath(path) || seen.contains(path)) {
                         continue
                     }
@@ -410,11 +445,58 @@ class MainActivity : FlutterActivity() {
         )
     }
 
+    private fun extractScopedRelativeAndName(fullPath: String): Pair<String, String>? {
+        val normalized = fullPath.replace('\\', '/').trim()
+        val lastSlash = normalized.lastIndexOf('/')
+        if (lastSlash <= 0 || lastSlash >= normalized.length - 1) return null
+
+        val displayName = normalized.substring(lastSlash + 1)
+        val parentDir = normalized.substring(0, lastSlash)
+        val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.replace('\\', '/').trimEnd('/')
+
+        val relWithoutRoot = when {
+            parentDir.startsWith("$primaryRoot/") -> parentDir.removePrefix("$primaryRoot/")
+            parentDir == primaryRoot -> ""
+            parentDir.startsWith("/storage/emulated/0/") -> parentDir.removePrefix("/storage/emulated/0/")
+            else -> {
+                val match = Regex("^/storage/[^/]+/(.+)$").find(parentDir)
+                match?.groupValues?.getOrNull(1) ?: return null
+            }
+        }
+        val scopedRel = if (relWithoutRoot.isEmpty()) "" else "${relWithoutRoot.trimEnd('/')}/"
+        return Pair(scopedRel, displayName)
+    }
+
     private fun resolveMediaUriForPath(path: String): Uri? {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val scopedParts = extractScopedRelativeAndName(path)
+            if (scopedParts != null) {
+                val (relPath, dispName) = scopedParts
+                try {
+                    contentResolver.query(
+                        collection,
+                        arrayOf(MediaStore.Images.Media._ID),
+                        "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND ${MediaStore.Images.Media.DISPLAY_NAME} = ?",
+                        arrayOf(relPath, dispName),
+                        "${MediaStore.Images.Media._ID} DESC",
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val idCol = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+                            if (idCol >= 0) {
+                                val id = cursor.getLong(idCol)
+                                return ContentUris.withAppendedId(collection, id)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
         }
 
         try {

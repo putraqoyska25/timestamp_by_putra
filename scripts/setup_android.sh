@@ -160,7 +160,7 @@ from pathlib import Path
 kt_path = Path(sys.argv[1])
 pkg_name = "com.putra.timestamp_by_putra"
 
-kotlin_code = """package __PKG__
+kotlin_code = r"""package __PKG__
 
 import android.Manifest
 import android.app.Activity

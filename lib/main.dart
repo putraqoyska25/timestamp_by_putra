@@ -478,17 +478,355 @@ class _CollageLayoutCatalog {
     return all.first;
   }
 
+  static double _safeAspect(List<double> ratios, int index, double fallback) {
+    if (index < 0 || index >= ratios.length) return fallback;
+    final double r = ratios[index];
+    if (!r.isFinite || r <= 0.05 || r > 20.0) return fallback;
+    return r;
+  }
+
+  static List<List<int>>? _rowGroupsForLayout(CollageLayoutId layoutId) {
+    switch (layoutId) {
+      case CollageLayoutId.twoRows:
+        return const [
+          [0],
+          [1],
+        ];
+      case CollageLayoutId.twoCols:
+        return const [
+          [0, 1],
+        ];
+      case CollageLayoutId.threeTopOneBottomTwo:
+        return const [
+          [0],
+          [1, 2],
+        ];
+      case CollageLayoutId.threeRows:
+        return const [
+          [0],
+          [1],
+          [2],
+        ];
+      case CollageLayoutId.fourGrid2x2:
+        return const [
+          [0, 1],
+          [2, 3],
+        ];
+      case CollageLayoutId.fourRows121:
+        return const [
+          [0],
+          [1, 2],
+          [3],
+        ];
+      case CollageLayoutId.fiveRows212:
+        return const [
+          [0, 1],
+          [2],
+          [3, 4],
+        ];
+      case CollageLayoutId.sixGrid2x3:
+        return const [
+          [0, 1],
+          [2, 3],
+          [4, 5],
+        ];
+      case CollageLayoutId.sixHeroLeft2Right3Bottom:
+      case CollageLayoutId.sixHeroLeft3Right2Bottom:
+        return null;
+    }
+  }
+
+  static double computeAdaptiveCanvasAspectRatio({
+    required CollageLayoutId layoutId,
+    required List<double> slotAspectRatios,
+    required double canvasW,
+    required double gap,
+    required double outerPadding,
+  }) {
+    final _CollageLayoutDef def = findById(layoutId);
+    if (slotAspectRatios.isEmpty) return def.aspectRatio;
+
+    final double safeW = max(120.0, canvasW);
+    final double innerW = max(20.0, safeW - (outerPadding * 2.0));
+
+    final List<List<int>>? rowGroups = _rowGroupsForLayout(layoutId);
+    if (rowGroups != null) {
+      double totalInnerH = 0.0;
+      for (int rIdx = 0; rIdx < rowGroups.length; rIdx++) {
+        final List<int> row = rowGroups[rIdx];
+        final double rowGapTotal = gap * max(0, row.length - 1);
+        final double usableRowW = max(10.0, innerW - rowGapTotal);
+        double sumRatios = 0.0;
+        for (final slotIdx in row) {
+          sumRatios += _safeAspect(slotAspectRatios, slotIdx, 1.0);
+        }
+        final double rowH = max(12.0, usableRowW / max(0.1, sumRatios));
+        totalInnerH += rowH;
+        if (rIdx < rowGroups.length - 1) {
+          totalInnerH += gap;
+        }
+      }
+      final double totalH = totalInnerH + (outerPadding * 2.0);
+      return (safeW / max(20.0, totalH)).clamp(0.22, 4.5);
+    }
+
+    if (layoutId == CollageLayoutId.sixHeroLeft2Right3Bottom) {
+      final double a0 = _safeAspect(slotAspectRatios, 0, 0.75);
+      final double a1 = _safeAspect(slotAspectRatios, 1, 1.0);
+      final double a2 = _safeAspect(slotAspectRatios, 2, 1.0);
+      final double a3 = _safeAspect(slotAspectRatios, 3, 1.0);
+      final double a4 = _safeAspect(slotAspectRatios, 4, 1.0);
+      final double a5 = _safeAspect(slotAspectRatios, 5, 1.0);
+
+      final double rightAvg = (a1 + a2) / 2.0;
+      final double rightStackAspect = rightAvg / 2.0;
+      final double upperAspect = a0 + rightStackAspect;
+      final double upperH = max(12.0, (innerW - gap) / max(0.1, upperAspect));
+
+      final double botSumAspect = a3 + a4 + a5;
+      final double botH =
+          max(12.0, (innerW - (gap * 2.0)) / max(0.1, botSumAspect));
+
+      final double totalH = upperH + gap + botH + (outerPadding * 2.0);
+      return (safeW / max(20.0, totalH)).clamp(0.22, 4.5);
+    }
+
+    if (layoutId == CollageLayoutId.sixHeroLeft3Right2Bottom) {
+      final double a0 = _safeAspect(slotAspectRatios, 0, 0.75);
+      final double a1 = _safeAspect(slotAspectRatios, 1, 1.0);
+      final double a2 = _safeAspect(slotAspectRatios, 2, 1.0);
+      final double a3 = _safeAspect(slotAspectRatios, 3, 1.0);
+      final double a4 = _safeAspect(slotAspectRatios, 4, 1.0);
+      final double a5 = _safeAspect(slotAspectRatios, 5, 1.0);
+
+      final double rightAvg = (a1 + a2 + a3) / 3.0;
+      final double rightStackAspect = rightAvg / 3.0;
+      final double upperAspect = a0 + rightStackAspect;
+      final double upperH = max(12.0, (innerW - gap) / max(0.1, upperAspect));
+
+      final double botSumAspect = a4 + a5;
+      final double botH =
+          max(12.0, (innerW - gap) / max(0.1, botSumAspect));
+
+      final double totalH = upperH + gap + botH + (outerPadding * 2.0);
+      return (safeW / max(20.0, totalH)).clamp(0.22, 4.5);
+    }
+
+    return def.aspectRatio;
+  }
+
   static List<_CollageSlotRect> computeSlots({
     required CollageLayoutId layoutId,
     required double canvasW,
     required double canvasH,
     required double gap,
     required double outerPadding,
+    List<double> slotAspectRatios = const [],
   }) {
     final double innerW = max(10.0, canvasW - (outerPadding * 2.0));
     final double innerH = max(10.0, canvasH - (outerPadding * 2.0));
     final double left = outerPadding;
     final double top = outerPadding;
+
+    final List<List<int>>? rowGroups = _rowGroupsForLayout(layoutId);
+    if (rowGroups != null && slotAspectRatios.isNotEmpty) {
+      final List<double> rawRowHeights = [];
+      double rawSumH = 0.0;
+      for (final row in rowGroups) {
+        final double rowGapTotal = gap * max(0, row.length - 1);
+        final double usableRowW = max(4.0, innerW - rowGapTotal);
+        double sumRatios = 0.0;
+        for (final slotIdx in row) {
+          sumRatios += _safeAspect(slotAspectRatios, slotIdx, 1.0);
+        }
+        final double rh = max(4.0, usableRowW / max(0.1, sumRatios));
+        rawRowHeights.add(rh);
+        rawSumH += rh;
+      }
+
+      final double availableRowsH =
+          max(10.0, innerH - (gap * max(0, rowGroups.length - 1)));
+      final double scaleY = rawSumH > 0 ? (availableRowsH / rawSumH) : 1.0;
+
+      final List<_CollageSlotRect> rects = [];
+      double curY = top;
+      for (int rIdx = 0; rIdx < rowGroups.length; rIdx++) {
+        final List<int> row = rowGroups[rIdx];
+        final double rowH = max(4.0, rawRowHeights[rIdx] * scaleY);
+        final double rowGapTotal = gap * max(0, row.length - 1);
+        final double usableRowW = max(4.0, innerW - rowGapTotal);
+
+        double sumRatios = 0.0;
+        for (final slotIdx in row) {
+          sumRatios += _safeAspect(slotAspectRatios, slotIdx, 1.0);
+        }
+
+        double curX = left;
+        for (int cIdx = 0; cIdx < row.length; cIdx++) {
+          final int slotIdx = row[cIdx];
+          final double a = _safeAspect(slotAspectRatios, slotIdx, 1.0);
+          final double cellW = (cIdx == row.length - 1)
+              ? max(4.0, (left + innerW) - curX)
+              : max(4.0, usableRowW * (a / max(0.1, sumRatios)));
+          rects.add(
+            _CollageSlotRect(
+              index: slotIdx,
+              x: curX,
+              y: curY,
+              w: cellW,
+              h: rowH,
+            ),
+          );
+          curX += cellW + gap;
+        }
+        curY += rowH + gap;
+      }
+      rects.sort((a, b) => a.index.compareTo(b.index));
+      return rects;
+    }
+
+    if (layoutId == CollageLayoutId.sixHeroLeft2Right3Bottom &&
+        slotAspectRatios.isNotEmpty) {
+      final double a0 = _safeAspect(slotAspectRatios, 0, 0.75);
+      final double a1 = _safeAspect(slotAspectRatios, 1, 1.0);
+      final double a2 = _safeAspect(slotAspectRatios, 2, 1.0);
+      final double a3 = _safeAspect(slotAspectRatios, 3, 1.0);
+      final double a4 = _safeAspect(slotAspectRatios, 4, 1.0);
+      final double a5 = _safeAspect(slotAspectRatios, 5, 1.0);
+
+      final double rightAvg = (a1 + a2) / 2.0;
+      final double rightStackAspect = rightAvg / 2.0;
+      final double upperAspect = a0 + rightStackAspect;
+      final double rawUpperH =
+          max(4.0, (innerW - gap) / max(0.1, upperAspect));
+
+      final double botSumAspect = a3 + a4 + a5;
+      final double rawBotH =
+          max(4.0, (innerW - (gap * 2.0)) / max(0.1, botSumAspect));
+
+      final double availH = max(10.0, innerH - gap);
+      final double scaleY = availH / max(1.0, rawUpperH + rawBotH);
+      final double upperH = max(4.0, rawUpperH * scaleY);
+      final double botH = max(4.0, availH - upperH);
+
+      final double usableUpperW = max(4.0, innerW - gap);
+      final double leftHeroW =
+          max(4.0, usableUpperW * (a0 / max(0.1, upperAspect)));
+      final double rightColW = max(4.0, usableUpperW - leftHeroW);
+      final double rightItemH = max(4.0, (upperH - gap) / 2.0);
+
+      final double usableBotW = max(4.0, innerW - (gap * 2.0));
+      final List<double> botRatios = [a3, a4, a5];
+      final List<_CollageSlotRect> rects = [
+        _CollageSlotRect(
+          index: 0,
+          x: left,
+          y: top,
+          w: leftHeroW,
+          h: upperH,
+        ),
+        _CollageSlotRect(
+          index: 1,
+          x: left + leftHeroW + gap,
+          y: top,
+          w: rightColW,
+          h: rightItemH,
+        ),
+        _CollageSlotRect(
+          index: 2,
+          x: left + leftHeroW + gap,
+          y: top + rightItemH + gap,
+          w: rightColW,
+          h: rightItemH,
+        ),
+      ];
+
+      double curBotX = left;
+      for (int b = 0; b < 3; b++) {
+        final double bw = (b == 2)
+            ? max(4.0, (left + innerW) - curBotX)
+            : max(4.0, usableBotW * (botRatios[b] / max(0.1, botSumAspect)));
+        rects.add(
+          _CollageSlotRect(
+            index: 3 + b,
+            x: curBotX,
+            y: top + upperH + gap,
+            w: bw,
+            h: botH,
+          ),
+        );
+        curBotX += bw + gap;
+      }
+      return rects;
+    }
+
+    if (layoutId == CollageLayoutId.sixHeroLeft3Right2Bottom &&
+        slotAspectRatios.isNotEmpty) {
+      final double a0 = _safeAspect(slotAspectRatios, 0, 0.75);
+      final double a1 = _safeAspect(slotAspectRatios, 1, 1.0);
+      final double a2 = _safeAspect(slotAspectRatios, 2, 1.0);
+      final double a3 = _safeAspect(slotAspectRatios, 3, 1.0);
+      final double a4 = _safeAspect(slotAspectRatios, 4, 1.0);
+      final double a5 = _safeAspect(slotAspectRatios, 5, 1.0);
+
+      final double rightAvg = (a1 + a2 + a3) / 3.0;
+      final double rightStackAspect = rightAvg / 3.0;
+      final double upperAspect = a0 + rightStackAspect;
+      final double rawUpperH =
+          max(4.0, (innerW - gap) / max(0.1, upperAspect));
+
+      final double botSumAspect = a4 + a5;
+      final double rawBotH =
+          max(4.0, (innerW - gap) / max(0.1, botSumAspect));
+
+      final double availH = max(10.0, innerH - gap);
+      final double scaleY = availH / max(1.0, rawUpperH + rawBotH);
+      final double upperH = max(4.0, rawUpperH * scaleY);
+      final double botH = max(4.0, availH - upperH);
+
+      final double usableUpperW = max(4.0, innerW - gap);
+      final double leftHeroW =
+          max(4.0, usableUpperW * (a0 / max(0.1, upperAspect)));
+      final double rightColW = max(4.0, usableUpperW - leftHeroW);
+      final double rightItemH = max(4.0, (upperH - (gap * 2.0)) / 3.0);
+
+      final double usableBotW = max(4.0, innerW - gap);
+      final double botLeftW =
+          max(4.0, usableBotW * (a4 / max(0.1, botSumAspect)));
+      final double botRightW = max(4.0, usableBotW - botLeftW);
+
+      return [
+        _CollageSlotRect(
+          index: 0,
+          x: left,
+          y: top,
+          w: leftHeroW,
+          h: upperH,
+        ),
+        for (int r = 0; r < 3; r++)
+          _CollageSlotRect(
+            index: 1 + r,
+            x: left + leftHeroW + gap,
+            y: top + (r * (rightItemH + gap)),
+            w: rightColW,
+            h: rightItemH,
+          ),
+        _CollageSlotRect(
+          index: 4,
+          x: left,
+          y: top + upperH + gap,
+          w: botLeftW,
+          h: botH,
+        ),
+        _CollageSlotRect(
+          index: 5,
+          x: left + botLeftW + gap,
+          y: top + upperH + gap,
+          w: botRightW,
+          h: botH,
+        ),
+      ];
+    }
 
     switch (layoutId) {
       case CollageLayoutId.twoRows:
@@ -4393,8 +4731,8 @@ class _CameraScreenState extends State<CameraScreen>
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1E6BFF),
-                      foregroundColor: Colors.white,
+                      backgroundColor: const Color(0xFFFFD000),
+                      foregroundColor: Colors.black,
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(10),
@@ -4404,7 +4742,7 @@ class _CameraScreenState extends State<CameraScreen>
                         setState(() => _openDrawer = ActiveDrawer.none),
                     child: const Text(
                       'Selesai',
-                      style: TextStyle(fontWeight: FontWeight.w600),
+                      style: TextStyle(fontWeight: FontWeight.w700),
                     ),
                   ),
                 ),
@@ -5980,6 +6318,22 @@ class _CollageStagePreviewScreenState
     return Size(oriented.width.toDouble(), oriented.height.toDouble());
   }
 
+  List<double> _currentSlotAspectRatios({double fallback = 1.0}) {
+    final List<double> ratios = [];
+    for (int i = 0; i < _slotCount; i++) {
+      final File? f = i < _slots.length ? _slots[i] : null;
+      if (f != null) {
+        final Size? dims = _photoDimsCache[f.path];
+        if (dims != null && dims.width > 0 && dims.height > 0) {
+          ratios.add(dims.width / dims.height);
+          continue;
+        }
+      }
+      ratios.add(fallback);
+    }
+    return ratios;
+  }
+
   Offset _panForSlot(int index) {
     if (index < 0 || index >= _slotPanNorms.length) return Offset.zero;
     return _slotPanNorms[index];
@@ -6206,16 +6560,40 @@ class _CollageStagePreviewScreenState
     String? tempOutPath;
 
     try {
-      final _CollageLayoutDef layoutDef =
-          _CollageLayoutCatalog.findById(_layoutId);
-      final int canvasW = _targetHdCanvasWidth(_slotCount);
-      final int canvasH = max(
-        600,
-        (canvasW / layoutDef.aspectRatio).round(),
-      );
+      final List<double> slotRatios = [];
+      for (final f in activeFiles) {
+        Size? dims = _photoDimsCache[f.path];
+        if (dims == null && await f.exists()) {
+          final Uint8List raw = await f.readAsBytes();
+          dims = await compute(_decodeDimensionsIsolate, raw);
+          if (dims != null) {
+            _photoDimsCache[f.path] = dims;
+          }
+        }
+        if (dims != null && dims.width > 0 && dims.height > 0) {
+          slotRatios.add(dims.width / dims.height);
+        } else {
+          slotRatios.add(1.0);
+        }
+      }
 
+      final int canvasW = _targetHdCanvasWidth(_slotCount);
       final double hdPad = max(6.0, (canvasW * 0.01).roundToDouble());
       final double hdGap = max(6.0, (canvasW * 0.01).roundToDouble());
+
+      final double adaptiveRatio =
+          _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
+        layoutId: _layoutId,
+        slotAspectRatios: slotRatios,
+        canvasW: canvasW.toDouble(),
+        gap: hdGap,
+        outerPadding: hdPad,
+      );
+
+      final int canvasH = max(
+        400,
+        (canvasW / adaptiveRatio).round(),
+      );
 
       final List<_CollageSlotRect> rects = _CollageLayoutCatalog.computeSlots(
         layoutId: _layoutId,
@@ -6223,6 +6601,7 @@ class _CollageStagePreviewScreenState
         canvasH: canvasH.toDouble(),
         gap: hdGap,
         outerPadding: hdPad,
+        slotAspectRatios: slotRatios,
       );
 
       final img.Image canvasImg = img.Image(
@@ -6311,14 +6690,20 @@ class _CollageStagePreviewScreenState
   }
 
   Widget _buildCollageCanvasPreview() {
-    final _CollageLayoutDef layoutDef =
-        _CollageLayoutCatalog.findById(_layoutId);
+    final List<double> slotRatios = _currentSlotAspectRatios(fallback: 1.0);
 
     return LayoutBuilder(
       builder: (context, outerBox) {
         final double maxW = max(120.0, outerBox.maxWidth - 24.0);
         final double maxH = max(140.0, outerBox.maxHeight - 16.0);
-        final double targetRatio = layoutDef.aspectRatio;
+        final double targetRatio =
+            _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
+          layoutId: _layoutId,
+          slotAspectRatios: slotRatios,
+          canvasW: maxW,
+          gap: _previewGap,
+          outerPadding: _previewOuterPad,
+        );
 
         double boxW = maxW;
         double boxH = boxW / targetRatio;
@@ -6333,6 +6718,7 @@ class _CollageStagePreviewScreenState
           canvasH: boxH,
           gap: _previewGap,
           outerPadding: _previewOuterPad,
+          slotAspectRatios: slotRatios,
         );
 
         return Center(
@@ -6519,7 +6905,7 @@ class _CollageStagePreviewScreenState
             ),
             const SizedBox(height: 2),
             const Text(
-              'Seret gambar untuk mengatur posisi • Ketuk 2x untuk tengah',
+              'Rasio menyesuaikan gambar otomatis • Ketuk slot untuk ganti foto',
               style: TextStyle(
                 color: Colors.white54,
                 fontSize: 11,
@@ -7041,7 +7427,7 @@ class _GalleryWatermarkEditorScreenState
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Gagal menyimpan salinan stempel: $e'),
+            content: Text('Gagal menyimpan stempel: $e'),
             backgroundColor: Colors.red,
           ),
         );
@@ -7049,8 +7435,8 @@ class _GalleryWatermarkEditorScreenState
     } finally {
       if (tempOutPath != null) {
         try {
-          final f = File(tempOutPath);
-          if (await f.exists()) await f.delete();
+          final tempFile = File(tempOutPath);
+          if (await tempFile.exists()) await tempFile.delete();
         } catch (_) {}
       }
       if (mounted) {
@@ -7059,27 +7445,109 @@ class _GalleryWatermarkEditorScreenState
     }
   }
 
+  Widget _buildSinglePhotoPage(File file, int pageIndex) {
+    return LayoutBuilder(
+      builder: (context, outerBox) {
+        final double? resolvedRatio = _aspectRatioCache[file.path];
+        if (resolvedRatio == null) {
+          unawaited(_resolvePhotoAspectRatio(file));
+        }
+
+        final Widget imageWidget = Image.file(
+          file,
+          cacheWidth: 960,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.medium,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => const Center(
+            child: Text(
+              'Gambar tidak dapat dimuat',
+              style: TextStyle(color: Colors.white70),
+            ),
+          ),
+        );
+
+        if (!_stampVisible || resolvedRatio == null) {
+          return Center(
+            child: InteractiveViewer(
+              minScale: 1.0,
+              maxScale: 4.0,
+              child: imageWidget,
+            ),
+          );
+        }
+
+        double boxW = outerBox.maxWidth;
+        double boxH = boxW / resolvedRatio;
+        if (outerBox.maxHeight.isFinite && boxH > outerBox.maxHeight) {
+          boxH = outerBox.maxHeight;
+          boxW = boxH * resolvedRatio;
+        }
+
+        return Center(
+          child: InteractiveViewer(
+            minScale: 1.0,
+            maxScale: 4.0,
+            child: SizedBox(
+              width: boxW,
+              height: boxH,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.file(
+                    file,
+                    cacheWidth: 960,
+                    fit: BoxFit.fill,
+                    filterQuality: FilterQuality.medium,
+                    gaplessPlayback: true,
+                    errorBuilder: (_, __, ___) => const Center(
+                      child: Text(
+                        'Gambar tidak dapat dimuat',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _buildStampOverlayWidget(
+                      activeDt: _activeDateTime(),
+                      cfg: _cfg,
+                      boxWidth: boxW,
+                      boxHeight: boxH,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildEditorDrawer() {
     if (!_editorDrawerOpen) return const SizedBox.shrink();
 
     final DateTime activeDt = _activeDateTime();
-    final String timeSub = _cfg.isManualTime
+    final String timeSubLabel = _cfg.isManualTime
         ? '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)} (Manual)'
         : '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)}';
 
-    final bool hasLogo = _cfg.logoFilePath != null &&
+    final bool hasSavedLogo = _cfg.logoFilePath != null &&
         _cfg.logoFilePath!.isNotEmpty &&
         File(_cfg.logoFilePath!).existsSync();
 
     return Container(
-      constraints: const BoxConstraints(maxHeight: 370),
+      constraints: const BoxConstraints(maxHeight: 360),
       width: double.infinity,
       decoration: const BoxDecoration(
         color: Color(0xFF1A1D24),
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -7087,7 +7555,7 @@ class _GalleryWatermarkEditorScreenState
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
-                  'Sunting tanda air foto',
+                  'Sunting tanda air',
                   style: TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.w600,
@@ -7101,16 +7569,17 @@ class _GalleryWatermarkEditorScreenState
                 ),
               ],
             ),
-            const SizedBox(height: 6),
             _WatermarkRowTile(
               icon: Icons.image_outlined,
               title: 'Logo',
-              subtitle: hasLogo
-                  ? 'Logo aktif (ketuk untuk ganti)'
+              subtitle: hasSavedLogo
+                  ? (_cfg.showLogo
+                      ? 'Logo aktif (tersimpan permanen)'
+                      : 'Logo tersimpan (ketuk untuk ganti)')
                   : 'Ketuk untuk memilih logo',
               value: _cfg.showLogo,
               onChanged: (val) {
-                if (val && !hasLogo) {
+                if (val && !hasSavedLogo) {
                   _pickLogo();
                 } else {
                   _updateCfg(_cfg.copyWith(showLogo: val));
@@ -7122,10 +7591,15 @@ class _GalleryWatermarkEditorScreenState
             _WatermarkRowTile(
               icon: Icons.schedule_outlined,
               title: 'Waktu',
-              subtitle: timeSub,
+              subtitle: timeSubLabel,
               value: _cfg.showTime,
               onChanged: (val) {
-                _updateCfg(_cfg.copyWith(showTime: val));
+                _updateCfg(
+                  _cfg.copyWith(
+                    showTime: val,
+                    isManualTime: val ? _cfg.isManualTime : false,
+                  ),
+                );
                 if (val) setState(() => _stampVisible = true);
               },
               onTapContent: _pickManualDateTime,
@@ -7161,7 +7635,7 @@ class _GalleryWatermarkEditorScreenState
               },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Koordinat',
-                hint: 'Contoh: -3.655210°S, 128.190420°T',
+                hint: 'Masukkan koordinat GPS...',
                 initialValue: _cfg.gpsCoordsText,
                 applyText: (v) => _updateCfg(
                   _cfg.copyWith(gpsCoordsText: v, showCoords: true),
@@ -7208,7 +7682,7 @@ class _GalleryWatermarkEditorScreenState
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             Row(
               children: [
                 Expanded(
@@ -7232,8 +7706,8 @@ class _GalleryWatermarkEditorScreenState
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1E6BFF),
-                      foregroundColor: Colors.white,
+                      backgroundColor: const Color(0xFFFFD000),
+                      foregroundColor: Colors.black,
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(10),
@@ -7242,7 +7716,7 @@ class _GalleryWatermarkEditorScreenState
                     onPressed: () => setState(() => _editorDrawerOpen = false),
                     child: const Text(
                       'Selesai',
-                      style: TextStyle(fontWeight: FontWeight.w600),
+                      style: TextStyle(fontWeight: FontWeight.w700),
                     ),
                   ),
                 ),
@@ -7251,75 +7725,6 @@ class _GalleryWatermarkEditorScreenState
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildSinglePhotoStage(File file) {
-    final double? knownRatio = _aspectRatioCache[file.path];
-    if (knownRatio == null && !_resolvingPaths.contains(file.path)) {
-      unawaited(_resolvePhotoAspectRatio(file));
-    }
-
-    return LayoutBuilder(
-      builder: (context, box) {
-        if (knownRatio == null || knownRatio <= 0) {
-          return Center(
-            child: Image.file(
-              file,
-              fit: BoxFit.contain,
-              gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => const Icon(
-                Icons.broken_image_outlined,
-                size: 48,
-                color: Colors.white54,
-              ),
-            ),
-          );
-        }
-
-        double boxW = box.maxWidth;
-        double boxH = boxW / knownRatio;
-        if (box.maxHeight.isFinite && boxH > box.maxHeight) {
-          boxH = box.maxHeight;
-          boxW = boxH * knownRatio;
-        }
-
-        return Center(
-          child: SizedBox(
-            width: boxW,
-            height: boxH,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.file(
-                  file,
-                  fit: BoxFit.fill,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const Center(
-                    child: Icon(
-                      Icons.broken_image_outlined,
-                      size: 48,
-                      color: Colors.white54,
-                    ),
-                  ),
-                ),
-                if (_stampVisible)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: _buildStampOverlayWidget(
-                      activeDt: _activeDateTime(),
-                      cfg: _cfg,
-                      boxWidth: boxW,
-                      boxHeight: boxH,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 
@@ -7332,11 +7737,13 @@ class _GalleryWatermarkEditorScreenState
           _safeCloseEditor(_anyChanged);
         });
       }
-      return const Scaffold(backgroundColor: Colors.black);
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: SizedBox.shrink(),
+      );
     }
 
-    final int total = _files.length;
-    final int safeIndex = _currentIndex.clamp(0, total - 1);
+    final int safeIndex = _currentIndex.clamp(0, _files.length - 1);
 
     return PopScope(
       canPop: false,
@@ -7349,11 +7756,11 @@ class _GalleryWatermarkEditorScreenState
         appBar: AppBar(
           backgroundColor: Colors.black,
           leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
+            icon: const Icon(Icons.arrow_back, color: Colors.white),
             onPressed: () => _safeCloseEditor(_anyChanged),
           ),
           title: Text(
-            total > 1 ? 'Foto (${safeIndex + 1}/$total)' : 'Foto',
+            '${safeIndex + 1} / ${_files.length}',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           actions: [
@@ -7367,7 +7774,14 @@ class _GalleryWatermarkEditorScreenState
             ),
             IconButton(
               onPressed: () {
-                setState(() => _stampVisible = !_stampVisible);
+                setState(() {
+                  _stampVisible = !_stampVisible;
+                  if (_stampVisible) {
+                    _editorDrawerOpen = true;
+                  } else {
+                    _editorDrawerOpen = false;
+                  }
+                });
               },
               icon: Icon(
                 _stampVisible
@@ -7382,30 +7796,26 @@ class _GalleryWatermarkEditorScreenState
             if (_stampVisible)
               Padding(
                 padding: const EdgeInsets.only(right: 10),
-                child: FilledButton(
+                child: FilledButton.icon(
                   style: FilledButton.styleFrom(
                     backgroundColor: const Color(0xFFFFD000),
                     foregroundColor: Colors.black,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
                   ),
                   onPressed: _isSaving ? null : _saveStampedCopyToGallery,
-                  child: _isSaving
+                  icon: _isSaving
                       ? const SizedBox(
-                          width: 16,
-                          height: 16,
+                          width: 14,
+                          height: 14,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             color: Colors.black,
                           ),
                         )
-                      : const Text(
-                          'Simpan',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
+                      : const Icon(Icons.save_alt, size: 18),
+                  label: Text(
+                    _isSaving ? 'Menyimpan...' : 'Simpan',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                 ),
               ),
           ],
@@ -7416,16 +7826,15 @@ class _GalleryWatermarkEditorScreenState
               Expanded(
                 child: PageView.builder(
                   controller: _pageController,
-                  itemCount: total,
-                  onPageChanged: (newIndex) {
-                    if (!mounted) return;
+                  itemCount: _files.length,
+                  onPageChanged: (newIdx) {
                     setState(() {
-                      _currentIndex = newIndex;
+                      _currentIndex = newIdx;
                     });
-                    _prefetchAroundIndex(newIndex);
+                    _prefetchAroundIndex(newIdx);
                   },
-                  itemBuilder: (context, idx) {
-                    return _buildSinglePhotoStage(_files[idx]);
+                  itemBuilder: (ctx, idx) {
+                    return _buildSinglePhotoPage(_files[idx], idx);
                   },
                 ),
               ),
@@ -7433,18 +7842,22 @@ class _GalleryWatermarkEditorScreenState
               Container(
                 color: Colors.black,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     _BottomActionIcon(
                       icon: _stampVisible
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined,
-                      label: _stampVisible ? 'Sembunyikan' : 'Tampilkan Stempel',
+                          ? Icons.visibility_off_outlined
+                          : Icons.add_box_outlined,
+                      label: _stampVisible ? 'Sembunyikan' : 'Tambah Stempel',
                       active: _stampVisible,
-                      onTap: () =>
-                          setState(() => _stampVisible = !_stampVisible),
+                      onTap: () {
+                        setState(() {
+                          _stampVisible = !_stampVisible;
+                          _editorDrawerOpen = _stampVisible;
+                        });
+                      },
                     ),
                     _BottomActionIcon(
                       icon: Icons.edit_outlined,
@@ -7452,10 +7865,8 @@ class _GalleryWatermarkEditorScreenState
                       active: _editorDrawerOpen,
                       onTap: () {
                         setState(() {
+                          if (!_stampVisible) _stampVisible = true;
                           _editorDrawerOpen = !_editorDrawerOpen;
-                          if (_editorDrawerOpen) {
-                            _stampVisible = true;
-                          }
                         });
                       },
                     ),
@@ -7486,10 +7897,13 @@ class _MiniChipButton extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFFFFD000) : const Color(0xFF262A34),
+          color: selected ? const Color(0xFFFFD000) : const Color(0xFF222732),
           borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected ? const Color(0xFFFFD000) : Colors.white24,
+          ),
         ),
         child: Text(
           label,
@@ -7499,43 +7913,6 @@ class _MiniChipButton extends StatelessWidget {
             fontWeight: FontWeight.w600,
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _BottomActionIcon extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool active;
-  final bool disabled;
-  final VoidCallback onTap;
-
-  const _BottomActionIcon({
-    required this.icon,
-    required this.label,
-    required this.active,
-    this.disabled = false,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final Color color = disabled
-        ? Colors.white30
-        : (active ? const Color(0xFFFFD000) : Colors.white70);
-    return GestureDetector(
-      onTap: disabled ? null : onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: color, size: 22),
-          const SizedBox(height: 3),
-          Text(
-            label,
-            style: TextStyle(color: color, fontSize: 11),
-          ),
-        ],
       ),
     );
   }
@@ -7560,47 +7937,99 @@ class _WatermarkRowTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTapContent,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        child: Row(
-          children: [
-            Icon(icon, color: Colors.white70, size: 22),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: onTapContent,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                child: Row(
+                  children: [
+                    Icon(icon, color: Colors.white70, size: 22),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w500,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.white60,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white60,
-                      fontSize: 12,
+                    const Icon(
+                      Icons.chevron_right,
+                      color: Colors.white54,
+                      size: 20,
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-            const Icon(Icons.chevron_right, color: Colors.white54, size: 20),
-            const SizedBox(width: 4),
-            Switch(
-              value: value,
-              onChanged: onChanged,
-              activeTrackColor: const Color(0xFF1E6BFF),
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 6),
+          Switch(
+            value: value,
+            activeTrackColor: const Color(0xFFFFD000),
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BottomActionIcon extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  const _BottomActionIcon({
+    required this.icon,
+    required this.label,
+    required this.active,
+    this.disabled = false,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = disabled
+        ? Colors.white30
+        : (active ? const Color(0xFFFFD000) : Colors.white);
+    return GestureDetector(
+      onTap: disabled ? null : onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 26),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(color: color, fontSize: 12),
+          ),
+        ],
       ),
     );
   }

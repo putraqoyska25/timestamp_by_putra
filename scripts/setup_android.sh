@@ -171,6 +171,7 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -182,8 +183,12 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val channelName = "timestamp_by_putra/media_store"
     private val brightnessChannelName = "timestamp_by_putra/screen_brightness"
+    private val hardwareKeysChannelName = "timestamp_by_putra/hardware_keys"
     private val reqMediaCode = 7001
     private val reqDeleteCode = 7002
+
+    private var hardwareKeysChannel: MethodChannel? = null
+    private var volumeShutterInterceptActive: Boolean = false
 
     private var pendingPermResult: MethodChannel.Result? = null
     private var pendingDeleteResult: MethodChannel.Result? = null
@@ -193,6 +198,21 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        hardwareKeysChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            hardwareKeysChannelName
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setVolumeShutterEnabled" -> {
+                        volumeShutterInterceptActive = call.argument<Boolean>("enabled") ?: false
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, brightnessChannelName)
             .setMethodCallHandler { call, result ->
@@ -253,6 +273,28 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (volumeShutterInterceptActive &&
+            (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        ) {
+            if (event == null || event.repeatCount == 0) {
+                val keyName = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) "volume_up" else "volume_down"
+                hardwareKeysChannel?.invokeMethod("onVolumeShutterPressed", keyName)
+            }
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (volumeShutterInterceptActive &&
+            (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        ) {
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     private fun requiredMediaPermissions(): Array<String> {

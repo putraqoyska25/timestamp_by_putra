@@ -4574,6 +4574,16 @@ class _MediaEntry {
   });
 }
 
+class _MediaQueryBatchResult {
+  final List<_MediaEntry> entries;
+  final bool hasMore;
+
+  const _MediaQueryBatchResult({
+    required this.entries,
+    required this.hasMore,
+  });
+}
+
 class _MonthlyPhotoSection {
   final int year;
   final int month;
@@ -4605,16 +4615,19 @@ class _LatestPhotosGridScreen extends StatefulWidget {
   static int _sessionQuotaLimit = _quotaStep;
   static int? _cachedQuotaLimit;
   static List<_MediaEntry>? _cachedEntries;
+  static bool _cachedHasMore = false;
 
   static void resetSessionQuota() {
     _sessionQuotaLimit = _quotaStep;
     _cachedQuotaLimit = null;
     _cachedEntries = null;
+    _cachedHasMore = false;
   }
 
   static void invalidateCache() {
     _cachedQuotaLimit = null;
     _cachedEntries = null;
+    _cachedHasMore = false;
   }
 
   @override
@@ -4668,7 +4681,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   bool _isDeleting = false;
   bool _isLoadingMore = false;
   bool _isExpandingQuota = false;
-  bool _hasMoreBeyondQuota = true;
+  bool _hasMoreBeyondQuota = false;
   List<_MediaEntry> _entries = [];
   List<_MonthlyPhotoSection> _fullSections = [];
   int _visibleCount = 0;
@@ -4906,7 +4919,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       setState(() {});
     }
     try {
-      await _loadAllPhotos(forceRefresh: true);
+      await _loadAllPhotos(forceRefresh: true, showFullScreenLoader: false);
       if (mounted && _entries.length > prevCount) {
         setState(() {
           _visibleCount = min(
@@ -4944,21 +4957,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _scrubFractionNotifier.value = frac;
 
       final bool nearBottom = pos.pixels >= pos.maxScrollExtent - 250;
-      if (nearBottom) {
-        if (!_isLoadingMore && _visibleCount < total) {
-          _isLoadingMore = true;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            _isLoadingMore = false;
-            if (!mounted) return;
-            setState(() {
-              _visibleCount = min(total, _visibleCount + _pageBatchSize);
-            });
+      if (nearBottom && !_isLoadingMore && _visibleCount < total) {
+        _isLoadingMore = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _isLoadingMore = false;
+          if (!mounted) return;
+          setState(() {
+            _visibleCount = min(total, _visibleCount + _pageBatchSize);
           });
-        } else if (_visibleCount >= total &&
-            _hasMoreBeyondQuota &&
-            !_isExpandingQuota) {
-          unawaited(_expandQuotaByStep());
-        }
+        });
       }
     }
   }
@@ -5050,59 +5057,82 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
   }
 
-  Future<List<_MediaEntry>> _queryMediaStoreNative({required int limit}) async {
-    if (!Platform.isAndroid) return const [];
+  Future<_MediaQueryBatchResult> _queryMediaStoreNative({
+    required int limit,
+  }) async {
+    if (!Platform.isAndroid) {
+      return const _MediaQueryBatchResult(entries: [], hasMore: false);
+    }
     try {
       final dynamic rawRes = await _mediaStoreChannel.invokeMethod(
         'getAllImages',
         {'limit': limit},
-      ).timeout(const Duration(seconds: 8));
-      if (rawRes == null) return const [];
+      ).timeout(const Duration(seconds: 12));
+      if (rawRes == null) {
+        return const _MediaQueryBatchResult(entries: [], hasMore: false);
+      }
+
+      List<dynamic> rawItems = const [];
+      bool nativeHasMore = false;
+
+      if (rawRes is Map) {
+        final dynamic itemsObj = rawRes['items'];
+        if (itemsObj is List) {
+          rawItems = itemsObj;
+        }
+        nativeHasMore = rawRes['hasMore'] == true;
+      } else if (rawRes is List) {
+        rawItems = rawRes;
+        nativeHasMore = rawRes.length >= limit;
+      }
 
       final List<_MediaEntry> results = [];
       final Set<String> seen = {};
       final DateTime nowFallback = DateTime.now();
 
-      if (rawRes is List) {
-        for (int i = 0; i < rawRes.length; i++) {
-          if (results.length >= limit) break;
-          if (i > 0 && i % 500 == 0) {
-            await Future<void>.delayed(Duration.zero);
-          }
-          final item = rawRes[i];
-          String path = '';
-          DateTime mod = nowFallback;
-
-          if (item is Map) {
-            path = item['path']?.toString().trim() ?? '';
-            final num? sec = item['dateModified'] as num?;
-            if (sec != null && sec > 0) {
-              mod = DateTime.fromMillisecondsSinceEpoch(
-                sec > 10000000000 ? sec.toInt() : (sec.toInt() * 1000),
-              );
-            }
-          } else {
-            path = item?.toString().trim() ?? '';
-          }
-
-          if (path.isEmpty || !_isPhotoFile(path) || seen.contains(path)) {
-            continue;
-          }
-          seen.add(path);
-          results.add(_MediaEntry(file: File(path), modified: mod));
+      for (int i = 0; i < rawItems.length; i++) {
+        if (results.length >= limit) break;
+        if (i > 0 && i % 500 == 0) {
+          await Future<void>.delayed(Duration.zero);
         }
+        final item = rawItems[i];
+        String path = '';
+        DateTime mod = nowFallback;
+
+        if (item is Map) {
+          path = item['path']?.toString().trim() ?? '';
+          final num? sec = item['dateModified'] as num?;
+          if (sec != null && sec > 0) {
+            mod = DateTime.fromMillisecondsSinceEpoch(
+              sec > 10000000000 ? sec.toInt() : (sec.toInt() * 1000),
+            );
+          }
+        } else {
+          path = item?.toString().trim() ?? '';
+        }
+
+        if (path.isEmpty || !_isPhotoFile(path) || seen.contains(path)) {
+          continue;
+        }
+        seen.add(path);
+        results.add(_MediaEntry(file: File(path), modified: mod));
       }
-      return results;
+
+      return _MediaQueryBatchResult(
+        entries: results,
+        hasMore: nativeHasMore || results.length >= limit,
+      );
     } catch (e) {
       debugPrint('MediaStore native belum tersedia/aktif: $e');
-      return const [];
+      return const _MediaQueryBatchResult(entries: [], hasMore: false);
     }
   }
 
-  Future<List<_MediaEntry>> _scanDirectoriesFallback({
+  Future<_MediaQueryBatchResult> _scanDirectoriesFallback({
     required int limit,
   }) async {
     final List<_MediaEntry> allEntries = [];
+    bool hasMore = false;
     final List<Directory> candidateDirs = [];
 
     if (Platform.isAndroid) {
@@ -5119,11 +5149,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final DateTime nowFallback = DateTime.now();
 
     Future<void> scanDir(Directory dir, {int depth = 0}) async {
-      if (depth > 2 || allEntries.length >= limit) return;
+      if (depth > 2 || hasMore) return;
       try {
         int counter = 0;
         await for (final entity in dir.list(followLinks: false)) {
-          if (allEntries.length >= limit) break;
+          if (hasMore) break;
           counter++;
           if (counter % 250 == 0) {
             await Future<void>.delayed(Duration.zero);
@@ -5137,6 +5167,10 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             if (baseName.startsWith('.')) continue;
             await scanDir(entity, depth: depth + 1);
           } else if (entity is File && _isPhotoFile(path)) {
+            if (allEntries.length >= limit) {
+              hasMore = true;
+              break;
+            }
             allEntries.add(
               _MediaEntry(
                 file: entity,
@@ -5149,12 +5183,19 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     }
 
     for (final d in candidateDirs) {
+      if (hasMore) break;
       await scanDir(d);
     }
-    return allEntries;
+    return _MediaQueryBatchResult(
+      entries: allEntries,
+      hasMore: hasMore,
+    );
   }
 
-  Future<void> _loadAllPhotos({bool forceRefresh = false}) async {
+  Future<void> _loadAllPhotos({
+    bool forceRefresh = false,
+    bool showFullScreenLoader = true,
+  }) async {
     final int activeQuota = _LatestPhotosGridScreen._sessionQuotaLimit;
     if (!forceRefresh &&
         _LatestPhotosGridScreen._cachedEntries != null &&
@@ -5165,33 +5206,42 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         setState(() {
           _entries = cached;
           _fullSections = _buildMonthlySections(cached);
-          _visibleCount = min(_initialVisibleCount, _entries.length);
-          _hasMoreBeyondQuota = cached.length >= activeQuota;
+          _visibleCount = min(
+            _entries.length,
+            max(_visibleCount, _initialVisibleCount),
+          );
+          _hasMoreBeyondQuota = _LatestPhotosGridScreen._cachedHasMore;
           _isLoading = false;
         });
       }
       return;
     }
 
-    if (mounted) setState(() => _isLoading = true);
+    if (showFullScreenLoader && mounted) {
+      setState(() => _isLoading = true);
+    }
 
     await _ensureMediaPermissions();
 
-    List<_MediaEntry> collected =
+    _MediaQueryBatchResult batch =
         await _queryMediaStoreNative(limit: activeQuota);
-    if (collected.isEmpty) {
-      collected = await _scanDirectoriesFallback(limit: activeQuota);
+    if (batch.entries.isEmpty) {
+      batch = await _scanDirectoriesFallback(limit: activeQuota);
     }
 
     _LatestPhotosGridScreen._cachedQuotaLimit = activeQuota;
-    _LatestPhotosGridScreen._cachedEntries = collected;
+    _LatestPhotosGridScreen._cachedEntries = batch.entries;
+    _LatestPhotosGridScreen._cachedHasMore = batch.hasMore;
 
     if (!mounted) return;
     setState(() {
-      _entries = collected;
-      _fullSections = _buildMonthlySections(collected);
-      _visibleCount = min(_initialVisibleCount, _entries.length);
-      _hasMoreBeyondQuota = collected.length >= activeQuota;
+      _entries = batch.entries;
+      _fullSections = _buildMonthlySections(batch.entries);
+      _visibleCount = min(
+        _entries.length,
+        max(_visibleCount, _initialVisibleCount),
+      );
+      _hasMoreBeyondQuota = batch.hasMore;
       _isLoading = false;
     });
   }
@@ -5509,6 +5559,107 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     );
   }
 
+  Widget _buildBottomPaginationFooter(int total) {
+    final bool hasMoreInBatch = _visibleCount < total;
+    final int nextTargetTotal =
+        _LatestPhotosGridScreen._sessionQuotaLimit + _LatestPhotosGridScreen._quotaStep;
+
+    if (hasMoreInBatch) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: TextButton.icon(
+            onPressed: () {
+              setState(() {
+                _visibleCount = min(total, _visibleCount + _pageBatchSize);
+              });
+            },
+            icon: const Icon(Icons.expand_more),
+            label: Text('Muat lagi ($_visibleCount dari $total foto)'),
+          ),
+        ),
+      );
+    }
+
+    if (_hasMoreBeyondQuota) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 28),
+        child: Center(
+          child: _isExpandingQuota
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        color: Color(0xFFFFD000),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Memuat +2500 foto lama (target $nextTargetTotal foto)...',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Menampilkan $total foto terbaru',
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFFD000),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () => unawaited(_expandQuotaByStep()),
+                      icon: const Icon(Icons.history, size: 20),
+                      label: Text(
+                        'Muat +2500 Foto Lama Lagi (Jadi $nextTargetTotal)',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 18),
+      child: Center(
+        child: Text(
+          'Semua foto dimuat ($total foto)',
+          style: const TextStyle(
+            color: Colors.white54,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _scrollController.removeListener(_onScroll);
@@ -5527,8 +5678,6 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     final total = _entries.length;
     final sections = _buildVisibleSections(_visibleCount);
-    final hasMoreInBatch = _visibleCount < total;
-    final int activeQuota = _LatestPhotosGridScreen._sessionQuotaLimit;
     final int selectedCount = _selectedPaths.length;
 
     final String appBarTitle = _selectionMode
@@ -5745,72 +5894,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                             ),
                           ],
                           SliverToBoxAdapter(
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              child: Center(
-                                child: hasMoreInBatch
-                                    ? TextButton.icon(
-                                        onPressed: () {
-                                          setState(() {
-                                            _visibleCount = min(
-                                              total,
-                                              _visibleCount + _pageBatchSize,
-                                            );
-                                          });
-                                        },
-                                        icon: const Icon(Icons.expand_more),
-                                        label: Text(
-                                          'Muat lagi ($_visibleCount dari $total foto)',
-                                        ),
-                                      )
-                                    : (_hasMoreBeyondQuota
-                                        ? (_isExpandingQuota
-                                            ? const Column(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  SizedBox(
-                                                    width: 20,
-                                                    height: 20,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                      color: Color(0xFFFFD000),
-                                                    ),
-                                                  ),
-                                                  SizedBox(height: 6),
-                                                  Text(
-                                                    'Membuka 2500 foto berikutnya...',
-                                                    style: TextStyle(
-                                                      color: Colors.white70,
-                                                      fontSize: 12,
-                                                    ),
-                                                  ),
-                                                ],
-                                              )
-                                            : TextButton.icon(
-                                                onPressed: () =>
-                                                    unawaited(_expandQuotaByStep()),
-                                                icon: const Icon(
-                                                  Icons.lock_open_outlined,
-                                                  color: Color(0xFFFFD000),
-                                                ),
-                                                label: Text(
-                                                  'Batas $activeQuota tercapai • Buka +2500 foto lagi',
-                                                  style: const TextStyle(
-                                                    color: Color(0xFFFFD000),
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                              ))
-                                        : Text(
-                                            'Semua foto dimuat ($total foto)',
-                                            style: const TextStyle(
-                                              color: Colors.white54,
-                                              fontSize: 12,
-                                            ),
-                                          )),
-                              ),
-                            ),
+                            child: _buildBottomPaginationFooter(total),
                           ),
                         ],
                       ),
@@ -6863,113 +6947,81 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
-  void _toggleStampFromTemplateButton() {
-    setState(() {
-      _stampVisible = !_stampVisible;
-    });
-  }
-
   Future<void> _deleteCurrentPhotoPermanently() async {
-    final File? target = _currentFile;
-    if (target == null || _isSaving || _isClosingEmpty) return;
-
-    final bool confirmed =
+    final File? targetFile = _currentFile;
+    if (_isSaving || targetFile == null || _isClosingScreen) return;
+    final bool ok =
         await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
       context,
       count: 1,
     );
-    if (!confirmed || !mounted) return;
+    if (!ok || !mounted || _isClosingScreen) return;
 
     setState(() => _isSaving = true);
-    final int deleted =
-        await _PermanentDeleteService.deleteFilesPermanently([target.path]);
-    if (!mounted) return;
-    setState(() => _isSaving = false);
+    final int deleted = await _PermanentDeleteService.deleteFilesPermanently(
+      [targetFile.path],
+    );
 
-    if (deleted <= 0) {
+    if (!mounted) return;
+    setState(() {
+      _isSaving = false;
+      if (deleted > 0) {
+        _anyChanged = true;
+        _LatestPhotosGridScreen.invalidateCache();
+        _files.removeAt(_currentIndex);
+        if (_files.isNotEmpty) {
+          _currentIndex = _currentIndex.clamp(0, _files.length - 1);
+          _prefetchAroundIndex(_currentIndex);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted &&
+                !_isClosingScreen &&
+                _pageController.hasClients &&
+                _files.isNotEmpty) {
+              _pageController.jumpToPage(_currentIndex);
+            }
+          });
+        }
+      }
+    });
+
+    if (deleted > 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Gagal menghapus foto secara permanen'),
+          content: Text('Foto dihapus permanen'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      if (_files.isEmpty) {
+        _safeCloseEditor(true);
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Gagal menghapus foto permanen.'),
           backgroundColor: Colors.red,
         ),
       );
-      return;
     }
-
-    _anyChanged = true;
-    _aspectRatioCache.remove(target.path);
-    _LatestPhotosGridScreen.invalidateCache();
-
-    final int removedIdx = _currentIndex;
-    final List<File> nextFiles = List<File>.from(_files)..removeAt(removedIdx);
-
-    if (nextFiles.isEmpty) {
-      _isClosingEmpty = true;
-      setState(() {
-        _files = const [];
-        _currentIndex = 0;
-        _editorDrawerOpen = false;
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _safeCloseEditor(true);
-      });
-      return;
-    }
-
-    final int nextIdx =
-        removedIdx >= nextFiles.length ? nextFiles.length - 1 : removedIdx;
-
-    setState(() {
-      _files = nextFiles;
-      _currentIndex = nextIdx;
-    });
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_pageController.hasClients) return;
-      _pageController.jumpToPage(nextIdx);
-      _prefetchAroundIndex(nextIdx);
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Foto dihapus permanen'),
-        backgroundColor: Colors.green,
-      ),
-    );
   }
 
-  Future<void> _saveStampedPhotoToGallery() async {
-    final File? activeFile = _currentFile;
-    if (_isSaving || activeFile == null || _isClosingScreen) return;
+  Future<void> _saveStampedCopyToGallery() async {
+    final File? targetFile = _currentFile;
+    if (_isSaving || targetFile == null || _isClosingScreen) return;
     setState(() => _isSaving = true);
-
     String? tempOutPath;
     try {
-      if (!await activeFile.exists()) {
-        throw Exception('File foto tidak ditemukan');
-      }
-      final Uint8List rawBytes = await activeFile.readAsBytes();
-      if (rawBytes.length < 64) {
-        throw Exception('Byte file foto kosong atau tidak lengkap');
-      }
-      final Uint8List outputBytes = _stampVisible
-          ? await _StampRenderer.buildStampedJpgBytes(
-              baseJpgBytes: rawBytes,
-              activeDt: _activeDateTime(),
-              cfg: _cfg,
-            )
-          : _verifyEncodedJpgBytes(
-              _encodeCleanJpgOrThrow(
-                img.bakeOrientation(img.decodeImage(rawBytes)!),
-                quality: 92,
-              ),
-            );
+      final Uint8List originalBytes = await targetFile.readAsBytes();
+      final Uint8List stampedBytes = await _StampRenderer.buildStampedJpgBytes(
+        baseJpgBytes: originalBytes,
+        activeDt: _activeDateTime(),
+        cfg: _cfg,
+      );
 
       final Directory tempDir = await getTemporaryDirectory();
-      final String stampId = DateTime.now().millisecondsSinceEpoch.toString();
-      tempOutPath = '${tempDir.path}/album_stamp_$stampId.jpg';
+      tempOutPath =
+          '${tempDir.path}/album_stamp_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final File outFile = File(tempOutPath);
-      await outFile.writeAsBytes(outputBytes, flush: true);
+      await outFile.writeAsBytes(stampedBytes, flush: true);
 
       if (await outFile.exists() && await outFile.length() > 64) {
         await Gal.putImage(outFile.path);
@@ -6977,22 +7029,23 @@ class _GalleryWatermarkEditorScreenState
       _anyChanged = true;
       _LatestPhotosGridScreen.invalidateCache();
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Foto hasil tanda air tersimpan ke galeri'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      _safeCloseEditor(true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Salinan foto dengan stempel tersimpan ke galeri'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Gagal menyimpan foto: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Gagal menyimpan salinan stempel: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } finally {
       if (tempOutPath != null) {
         try {
@@ -7006,70 +7059,15 @@ class _GalleryWatermarkEditorScreenState
     }
   }
 
-  Widget _buildPhotoPageItem(File file) {
-    final double? cachedAr = _aspectRatioCache[file.path];
-    if (cachedAr == null) {
-      unawaited(_resolvePhotoAspectRatio(file));
-    }
-
-    return LayoutBuilder(
-      builder: (context, outerBox) {
-        final double ar = cachedAr ?? (3.0 / 4.0);
-        double boxW = outerBox.maxWidth;
-        double boxH = boxW / ar;
-        if (outerBox.maxHeight.isFinite && boxH > outerBox.maxHeight) {
-          boxH = outerBox.maxHeight;
-          boxW = boxH * ar;
-        }
-
-        return Center(
-          child: SizedBox(
-            width: boxW,
-            height: boxH,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.file(
-                  file,
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const Center(
-                    child: Icon(
-                      Icons.broken_image_outlined,
-                      size: 48,
-                      color: Colors.white54,
-                    ),
-                  ),
-                ),
-                if (_stampVisible)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: _buildStampOverlayWidget(
-                      activeDt: _activeDateTime(),
-                      cfg: _cfg,
-                      boxWidth: boxW,
-                      boxHeight: boxH,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildDrawerSheet() {
+  Widget _buildEditorDrawer() {
     if (!_editorDrawerOpen) return const SizedBox.shrink();
 
     final DateTime activeDt = _activeDateTime();
-    final String timeSubLabel = _cfg.isManualTime
+    final String timeSub = _cfg.isManualTime
         ? '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)} (Manual)'
         : '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)}';
 
-    final bool hasSavedLogo = _cfg.logoFilePath != null &&
+    final bool hasLogo = _cfg.logoFilePath != null &&
         _cfg.logoFilePath!.isNotEmpty &&
         File(_cfg.logoFilePath!).existsSync();
 
@@ -7089,7 +7087,7 @@ class _GalleryWatermarkEditorScreenState
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
-                  'Sunting tanda air',
+                  'Sunting tanda air foto',
                   style: TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.w600,
@@ -7107,14 +7105,12 @@ class _GalleryWatermarkEditorScreenState
             _WatermarkRowTile(
               icon: Icons.image_outlined,
               title: 'Logo',
-              subtitle: hasSavedLogo
-                  ? (_cfg.showLogo
-                      ? 'Logo aktif (tersimpan permanen)'
-                      : 'Logo tersimpan (ketuk untuk ganti)')
+              subtitle: hasLogo
+                  ? 'Logo aktif (ketuk untuk ganti)'
                   : 'Ketuk untuk memilih logo',
               value: _cfg.showLogo,
               onChanged: (val) {
-                if (val && !hasSavedLogo) {
+                if (val && !hasLogo) {
                   _pickLogo();
                 } else {
                   _updateCfg(_cfg.copyWith(showLogo: val));
@@ -7126,15 +7122,10 @@ class _GalleryWatermarkEditorScreenState
             _WatermarkRowTile(
               icon: Icons.schedule_outlined,
               title: 'Waktu',
-              subtitle: timeSubLabel,
+              subtitle: timeSub,
               value: _cfg.showTime,
               onChanged: (val) {
-                _updateCfg(
-                  _cfg.copyWith(
-                    showTime: val,
-                    isManualTime: val ? _cfg.isManualTime : false,
-                  ),
-                );
+                _updateCfg(_cfg.copyWith(showTime: val));
                 if (val) setState(() => _stampVisible = true);
               },
               onTapContent: _pickManualDateTime,
@@ -7154,8 +7145,8 @@ class _GalleryWatermarkEditorScreenState
                 title: 'Edit Alamat',
                 hint: 'Masukkan alamat lokasi...',
                 initialValue: _cfg.customAddress,
-                applyText: (txt) => _updateCfg(
-                  _cfg.copyWith(customAddress: txt, showAddress: true),
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(customAddress: v, showAddress: true),
                 ),
               ),
             ),
@@ -7170,10 +7161,10 @@ class _GalleryWatermarkEditorScreenState
               },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Koordinat',
-                hint: 'Masukkan koordinat GPS...',
+                hint: 'Contoh: -3.655210°S, 128.190420°T',
                 initialValue: _cfg.gpsCoordsText,
-                applyText: (txt) => _updateCfg(
-                  _cfg.copyWith(gpsCoordsText: txt, showCoords: true),
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(gpsCoordsText: v, showCoords: true),
                 ),
               ),
             ),
@@ -7192,8 +7183,8 @@ class _GalleryWatermarkEditorScreenState
                 title: 'Edit Perusahaan',
                 hint: 'Nama instansi / perusahaan...',
                 initialValue: _cfg.companyText,
-                applyText: (txt) => _updateCfg(
-                  _cfg.copyWith(companyText: txt, showCompany: true),
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(companyText: v, showCompany: true),
                 ),
               ),
             ),
@@ -7212,8 +7203,8 @@ class _GalleryWatermarkEditorScreenState
                 title: 'Edit Nama',
                 hint: 'Nama petugas / pengguna...',
                 initialValue: _cfg.personNameText,
-                applyText: (txt) => _updateCfg(
-                  _cfg.copyWith(personNameText: txt, showPersonName: true),
+                applyText: (v) => _updateCfg(
+                  _cfg.copyWith(personNameText: v, showPersonName: true),
                 ),
               ),
             ),
@@ -7263,11 +7254,89 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
+  Widget _buildSinglePhotoStage(File file) {
+    final double? knownRatio = _aspectRatioCache[file.path];
+    if (knownRatio == null && !_resolvingPaths.contains(file.path)) {
+      unawaited(_resolvePhotoAspectRatio(file));
+    }
+
+    return LayoutBuilder(
+      builder: (context, box) {
+        if (knownRatio == null || knownRatio <= 0) {
+          return Center(
+            child: Image.file(
+              file,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => const Icon(
+                Icons.broken_image_outlined,
+                size: 48,
+                color: Colors.white54,
+              ),
+            ),
+          );
+        }
+
+        double boxW = box.maxWidth;
+        double boxH = boxW / knownRatio;
+        if (box.maxHeight.isFinite && boxH > box.maxHeight) {
+          boxH = box.maxHeight;
+          boxW = boxH * knownRatio;
+        }
+
+        return Center(
+          child: SizedBox(
+            width: boxW,
+            height: boxH,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.file(
+                  file,
+                  fit: BoxFit.fill,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => const Center(
+                    child: Icon(
+                      Icons.broken_image_outlined,
+                      size: 48,
+                      color: Colors.white54,
+                    ),
+                  ),
+                ),
+                if (_stampVisible)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _buildStampOverlayWidget(
+                      activeDt: _activeDateTime(),
+                      cfg: _cfg,
+                      boxWidth: boxW,
+                      boxHeight: boxH,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final int totalCount = _files.length;
-    final String titleCounter =
-        totalCount > 0 ? '${_currentIndex + 1} / $totalCount' : 'Foto';
+    if (_files.isEmpty) {
+      if (!_isClosingEmpty) {
+        _isClosingEmpty = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _safeCloseEditor(_anyChanged);
+        });
+      }
+      return const Scaffold(backgroundColor: Colors.black);
+    }
+
+    final int total = _files.length;
+    final int safeIndex = _currentIndex.clamp(0, total - 1);
 
     return PopScope(
       canPop: false,
@@ -7280,93 +7349,111 @@ class _GalleryWatermarkEditorScreenState
         appBar: AppBar(
           backgroundColor: Colors.black,
           leading: IconButton(
-            icon: const Icon(Icons.arrow_back, color: Colors.white),
+            icon: const Icon(Icons.arrow_back),
             onPressed: () => _safeCloseEditor(_anyChanged),
           ),
           title: Text(
-            titleCounter,
+            total > 1 ? 'Foto (${safeIndex + 1}/$total)' : 'Foto',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           actions: [
             IconButton(
-              icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
-              tooltip: 'Hapus Permanen',
-              onPressed: (_isSaving || totalCount == 0 || _isClosingEmpty)
-                  ? null
-                  : _deleteCurrentPhotoPermanently,
-            ),
-            Padding(
-              padding: const EdgeInsets.only(right: 10),
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFFFFD000),
-                  foregroundColor: Colors.black,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                onPressed: (_isSaving || totalCount == 0 || _isClosingEmpty)
-                    ? null
-                    : _saveStampedPhotoToGallery,
-                child: _isSaving
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.black,
-                        ),
-                      )
-                    : const Text(
-                        'Simpan',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
+              onPressed: _isSaving ? null : _deleteCurrentPhotoPermanently,
+              icon: const Icon(
+                Icons.delete_forever,
+                color: Color(0xFFFF5A5F),
               ),
+              tooltip: 'Hapus Permanen',
             ),
+            IconButton(
+              onPressed: () {
+                setState(() => _stampVisible = !_stampVisible);
+              },
+              icon: Icon(
+                _stampVisible
+                    ? Icons.branding_watermark
+                    : Icons.branding_watermark_outlined,
+                color: _stampVisible ? const Color(0xFFFFD000) : Colors.white,
+              ),
+              tooltip: _stampVisible
+                  ? 'Sembunyikan Tanda Air'
+                  : 'Tampilkan Tanda Air',
+            ),
+            if (_stampVisible)
+              Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFFFD000),
+                    foregroundColor: Colors.black,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  onPressed: _isSaving ? null : _saveStampedCopyToGallery,
+                  child: _isSaving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.black,
+                          ),
+                        )
+                      : const Text(
+                          'Simpan',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                ),
+              ),
           ],
         ),
         body: SafeArea(
           child: Column(
             children: [
               Expanded(
-                child: totalCount == 0
-                    ? const SizedBox.shrink()
-                    : PageView.builder(
-                        controller: _pageController,
-                        itemCount: totalCount,
-                        onPageChanged: (newIdx) {
-                          if (_isClosingEmpty || _isClosingScreen) return;
-                          setState(() => _currentIndex = newIdx);
-                          _prefetchAroundIndex(newIdx);
-                        },
-                        itemBuilder: (ctx, idx) =>
-                            _buildPhotoPageItem(_files[idx]),
-                      ),
+                child: PageView.builder(
+                  controller: _pageController,
+                  itemCount: total,
+                  onPageChanged: (newIndex) {
+                    if (!mounted) return;
+                    setState(() {
+                      _currentIndex = newIndex;
+                    });
+                    _prefetchAroundIndex(newIndex);
+                  },
+                  itemBuilder: (context, idx) {
+                    return _buildSinglePhotoStage(_files[idx]);
+                  },
+                ),
               ),
-              _buildDrawerSheet(),
+              _buildEditorDrawer(),
               Container(
                 color: Colors.black,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     _BottomActionIcon(
-                      icon: Icons.branding_watermark_outlined,
-                      label: 'Templat',
+                      icon: _stampVisible
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      label: _stampVisible ? 'Sembunyikan' : 'Tampilkan Stempel',
                       active: _stampVisible,
-                      onTap: _toggleStampFromTemplateButton,
+                      onTap: () =>
+                          setState(() => _stampVisible = !_stampVisible),
                     ),
                     _BottomActionIcon(
                       icon: Icons.edit_outlined,
-                      label: 'Sunting',
+                      label: 'Sunting Tanda Air',
                       active: _editorDrawerOpen,
                       onTap: () {
                         setState(() {
                           _editorDrawerOpen = !_editorDrawerOpen;
-                          if (_editorDrawerOpen && !_stampVisible) {
+                          if (_editorDrawerOpen) {
                             _stampVisible = true;
                           }
                         });
@@ -7396,25 +7483,59 @@ class _MiniChipButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            color: selected ? const Color(0xFFFFD000) : const Color(0xFF222732),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: selected ? Colors.black : Colors.white70,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFFFD000) : const Color(0xFF262A34),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _BottomActionIcon extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  const _BottomActionIcon({
+    required this.icon,
+    required this.label,
+    required this.active,
+    this.disabled = false,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color = disabled
+        ? Colors.white30
+        : (active ? const Color(0xFFFFD000) : Colors.white70);
+    return GestureDetector(
+      onTap: disabled ? null : onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(height: 3),
+          Text(
+            label,
+            style: TextStyle(color: color, fontSize: 11),
+          ),
+        ],
       ),
     );
   }
@@ -7439,25 +7560,24 @@ class _WatermarkRowTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Icon(icon, color: Colors.white70, size: 22),
-          const SizedBox(width: 12),
-          Expanded(
-            child: GestureDetector(
-              onTap: onTapContent,
-              behavior: HitTestBehavior.opaque,
+    return InkWell(
+      onTap: onTapContent,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          children: [
+            Icon(icon, color: Colors.white70, size: 22),
+            const SizedBox(width: 12),
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     title,
                     style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
                       color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                   Text(
@@ -7465,62 +7585,19 @@ class _WatermarkRowTile extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
+                      color: Colors.white60,
                       fontSize: 12,
-                      color: Colors.white54,
                     ),
                   ),
                 ],
               ),
             ),
-          ),
-          Switch(
-            value: value,
-            activeTrackColor: const Color(0xFFFFD000),
-            onChanged: onChanged,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BottomActionIcon extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool active;
-  final bool disabled;
-  final VoidCallback onTap;
-
-  const _BottomActionIcon({
-    required this.icon,
-    required this.label,
-    required this.active,
-    this.disabled = false,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = disabled
-        ? Colors.white30
-        : (active ? const Color(0xFFFFD000) : Colors.white);
-    return GestureDetector(
-      onTap: disabled ? null : onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, color: color, size: 24),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 12,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-              ),
+            const Icon(Icons.chevron_right, color: Colors.white54, size: 20),
+            const SizedBox(width: 4),
+            Switch(
+              value: value,
+              onChanged: onChanged,
+              activeTrackColor: const Color(0xFF1E6BFF),
             ),
           ],
         ),

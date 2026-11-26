@@ -795,6 +795,47 @@ class _NativeBrightnessService {
   }
 }
 
+class _HardwareVolumeShutterService {
+  static const MethodChannel _channel =
+      MethodChannel('timestamp_by_putra/hardware_keys');
+  static VoidCallback? _onShutterTriggered;
+  static bool _handlerRegistered = false;
+  static bool _currentlyIntercepting = false;
+  static DateTime? _lastTriggerAt;
+
+  static void attachShutterCallback(VoidCallback? callback) {
+    _onShutterTriggered = callback;
+    if (!_handlerRegistered && Platform.isAndroid) {
+      _handlerRegistered = true;
+      _channel.setMethodCallHandler((call) async {
+        if (call.method == 'onVolumeShutterPressed') {
+          final now = DateTime.now();
+          final prev = _lastTriggerAt;
+          if (prev != null && now.difference(prev).inMilliseconds < 250) {
+            return;
+          }
+          _lastTriggerAt = now;
+          _onShutterTriggered?.call();
+        }
+      });
+    }
+  }
+
+  static Future<void> setInterceptActive(bool enabled) async {
+    if (!Platform.isAndroid) return;
+    if (_currentlyIntercepting == enabled) return;
+    _currentlyIntercepting = enabled;
+    try {
+      await _channel.invokeMethod(
+        'setVolumeShutterEnabled',
+        {'enabled': enabled},
+      ).timeout(const Duration(seconds: 2));
+    } catch (e) {
+      debugPrint('Gagal mengatur tombol volume rana: $e');
+    }
+  }
+}
+
 class _WatermarkConfig {
   final bool showLogo;
   final String? logoFilePath;
@@ -885,6 +926,7 @@ class _PersistentAppSettings {
   final ImageQualityPreset qualityPreset;
   final bool shutterSoundEnabled;
   final bool gridEnabled;
+  final bool volumeShutterEnabled;
 
   const _PersistentAppSettings({
     this.showLogo = false,
@@ -904,6 +946,7 @@ class _PersistentAppSettings {
     this.qualityPreset = ImageQualityPreset.p720,
     this.shutterSoundEnabled = true,
     this.gridEnabled = false,
+    this.volumeShutterEnabled = true,
   });
 
   Map<String, dynamic> toJson() {
@@ -924,6 +967,7 @@ class _PersistentAppSettings {
       'qualityPreset': qualityPreset.name,
       'shutterSoundEnabled': shutterSoundEnabled,
       'gridEnabled': gridEnabled,
+      'volumeShutterEnabled': volumeShutterEnabled,
     };
   }
 
@@ -983,6 +1027,9 @@ class _PersistentAppSettings {
           : true,
       gridEnabled:
           map['gridEnabled'] is bool ? map['gridEnabled'] as bool : false,
+      volumeShutterEnabled: map['volumeShutterEnabled'] is bool
+          ? map['volumeShutterEnabled'] as bool
+          : true,
     );
   }
 }
@@ -1050,6 +1097,7 @@ class _AppPrefsStore {
             qualityPreset: loaded.qualityPreset,
             shutterSoundEnabled: loaded.shutterSoundEnabled,
             gridEnabled: loaded.gridEnabled,
+            volumeShutterEnabled: loaded.volumeShutterEnabled,
           );
         }
         _current = loaded;
@@ -1097,6 +1145,7 @@ class _AppPrefsStore {
         qualityPreset: _current.qualityPreset,
         shutterSoundEnabled: _current.shutterSoundEnabled,
         gridEnabled: _current.gridEnabled,
+        volumeShutterEnabled: _current.volumeShutterEnabled,
       ),
     );
   }
@@ -2110,20 +2159,24 @@ Widget _buildStampOverlayWidget({
 class _CameraSettingsScreen extends StatefulWidget {
   final bool shutterSoundEnabled;
   final bool gridEnabled;
+  final bool volumeShutterEnabled;
   final PhotoAspectRatio aspectRatio;
   final ImageQualityPreset qualityPreset;
   final ValueChanged<bool> onShutterSoundChanged;
   final ValueChanged<bool> onGridChanged;
+  final ValueChanged<bool> onVolumeShutterChanged;
   final ValueChanged<PhotoAspectRatio> onAspectRatioChanged;
   final ValueChanged<ImageQualityPreset> onQualityPresetChanged;
 
   const _CameraSettingsScreen({
     required this.shutterSoundEnabled,
     required this.gridEnabled,
+    required this.volumeShutterEnabled,
     required this.aspectRatio,
     required this.qualityPreset,
     required this.onShutterSoundChanged,
     required this.onGridChanged,
+    required this.onVolumeShutterChanged,
     required this.onAspectRatioChanged,
     required this.onQualityPresetChanged,
   });
@@ -2135,6 +2188,7 @@ class _CameraSettingsScreen extends StatefulWidget {
 class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
   late bool _shutterSound;
   late bool _gridOn;
+  late bool _volumeShutter;
   late PhotoAspectRatio _aspect;
   late ImageQualityPreset _quality;
 
@@ -2143,6 +2197,7 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
     super.initState();
     _shutterSound = widget.shutterSoundEnabled;
     _gridOn = widget.gridEnabled;
+    _volumeShutter = widget.volumeShutterEnabled;
     _aspect = widget.aspectRatio;
     _quality = widget.qualityPreset;
   }
@@ -2235,6 +2290,39 @@ class _CameraSettingsScreenState extends State<_CameraSettingsScreen> {
                     onChanged: (val) {
                       setState(() => _gridOn = val);
                       widget.onGridChanged(val);
+                    },
+                  ),
+                ),
+                const Divider(height: 1, color: Colors.white12, indent: 56),
+                ListTile(
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  leading: const Icon(
+                    Icons.camera_alt_outlined,
+                    color: Colors.white70,
+                    size: 24,
+                  ),
+                  title: const Text(
+                    'Tombol volume sebagai rana',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white,
+                    ),
+                  ),
+                  subtitle: const Text(
+                    'Gunakan tombol Volume Atas/Bawah untuk memotret',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.white54,
+                    ),
+                  ),
+                  trailing: Switch(
+                    value: _volumeShutter,
+                    activeTrackColor: const Color(0xFFFFD000),
+                    onChanged: (val) {
+                      setState(() => _volumeShutter = val);
+                      widget.onVolumeShutterChanged(val);
                     },
                   ),
                 ),
@@ -2388,9 +2476,11 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isFetchingLocation = false;
   bool _isPausedBackground = false;
   bool _isDisposed = false;
+  bool _isSubScreenOpen = false;
 
   bool _shutterSoundEnabled = true;
   bool _gridEnabled = false;
+  bool _volumeShutterEnabled = true;
 
   Offset? _focusUiOffset;
   double _minExposureOffset = -2.0;
@@ -2443,13 +2533,32 @@ class _CameraScreenState extends State<CameraScreen>
   bool get _isAlbumBlocked =>
       _isSaving || _isCoolingDown || _queuedCaptureTasks > 0;
 
+  bool get _shouldInterceptVolumeShutter =>
+      _volumeShutterEnabled &&
+      !_isPausedBackground &&
+      !_isDisposed &&
+      !_isSubScreenOpen;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _HardwareVolumeShutterService.attachShutterCallback(_onVolumeShutterPressed);
+    unawaited(_syncVolumeShutterInterception());
     unawaited(_NativeBrightnessService.setKeepScreenOn(true));
     unawaited(_bootstrapStartupSequence());
     _startClockTimer();
+  }
+
+  Future<void> _syncVolumeShutterInterception() async {
+    await _HardwareVolumeShutterService.setInterceptActive(
+      _shouldInterceptVolumeShutter,
+    );
+  }
+
+  void _onVolumeShutterPressed() {
+    if (!mounted || !_shouldInterceptVolumeShutter) return;
+    unawaited(_onShutterPressed());
   }
 
   void _applyLoadedPersistentSettings(_PersistentAppSettings saved) {
@@ -2473,7 +2582,9 @@ class _CameraScreenState extends State<CameraScreen>
       _qualityPreset = saved.qualityPreset;
       _shutterSoundEnabled = saved.shutterSoundEnabled;
       _gridEnabled = saved.gridEnabled;
+      _volumeShutterEnabled = saved.volumeShutterEnabled;
     });
+    unawaited(_syncVolumeShutterInterception());
   }
 
   Future<void> _persistCurrentSettings() async {
@@ -2495,6 +2606,7 @@ class _CameraScreenState extends State<CameraScreen>
         qualityPreset: _qualityPreset,
         shutterSoundEnabled: _shutterSoundEnabled,
         gridEnabled: _gridEnabled,
+        volumeShutterEnabled: _volumeShutterEnabled,
       ),
     );
   }
@@ -2536,6 +2648,7 @@ class _CameraScreenState extends State<CameraScreen>
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
       _isPausedBackground = true;
+      unawaited(_syncVolumeShutterInterception());
       _cancelCountdown();
       _shutterBlinkTimer?.cancel();
       _shutterBlinkTimer = null;
@@ -2570,6 +2683,7 @@ class _CameraScreenState extends State<CameraScreen>
       });
     } else if (state == AppLifecycleState.resumed) {
       _isPausedBackground = false;
+      unawaited(_syncVolumeShutterInterception());
       _isInitializingCamera = false;
       _isSaving = false;
       _isCoolingDown = false;
@@ -2596,44 +2710,59 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _openSettingsPage() async {
     if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _CameraSettingsScreen(
-          shutterSoundEnabled: _shutterSoundEnabled,
-          gridEnabled: _gridEnabled,
-          aspectRatio: _aspectRatio,
-          qualityPreset: _qualityPreset,
-          onShutterSoundChanged: (val) {
-            if (!mounted) return;
-            setState(() => _shutterSoundEnabled = val);
-            unawaited(_persistCurrentSettings());
-            if (val) {
-              unawaited(_ShutterAudioService.playShutterSound());
-            }
-          },
-          onGridChanged: (val) {
-            if (!mounted) return;
-            setState(() => _gridEnabled = val);
-            unawaited(_persistCurrentSettings());
-          },
-          onAspectRatioChanged: (ratio) {
-            if (!mounted) return;
-            setState(() => _aspectRatio = ratio);
-            unawaited(_persistCurrentSettings());
-          },
-          onQualityPresetChanged: (preset) {
-            unawaited(_setQualityPreset(preset));
-          },
+    _isSubScreenOpen = true;
+    unawaited(_syncVolumeShutterInterception());
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _CameraSettingsScreen(
+            shutterSoundEnabled: _shutterSoundEnabled,
+            gridEnabled: _gridEnabled,
+            volumeShutterEnabled: _volumeShutterEnabled,
+            aspectRatio: _aspectRatio,
+            qualityPreset: _qualityPreset,
+            onShutterSoundChanged: (val) {
+              if (!mounted) return;
+              setState(() => _shutterSoundEnabled = val);
+              unawaited(_persistCurrentSettings());
+              if (val) {
+                unawaited(_ShutterAudioService.playShutterSound());
+              }
+            },
+            onGridChanged: (val) {
+              if (!mounted) return;
+              setState(() => _gridEnabled = val);
+              unawaited(_persistCurrentSettings());
+            },
+            onVolumeShutterChanged: (val) {
+              if (!mounted) return;
+              setState(() => _volumeShutterEnabled = val);
+              unawaited(_persistCurrentSettings());
+            },
+            onAspectRatioChanged: (ratio) {
+              if (!mounted) return;
+              setState(() => _aspectRatio = ratio);
+              unawaited(_persistCurrentSettings());
+            },
+            onQualityPresetChanged: (preset) {
+              unawaited(_setQualityPreset(preset));
+            },
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _isSubScreenOpen = false;
+      unawaited(_syncVolumeShutterInterception());
+    }
     if (mounted) {
       setState(() {
         _shutterSoundEnabled = _AppPrefsStore.current.shutterSoundEnabled;
         _gridEnabled = _AppPrefsStore.current.gridEnabled;
+        _volumeShutterEnabled = _AppPrefsStore.current.volumeShutterEnabled;
         _aspectRatio = _AppPrefsStore.current.aspectRatio;
         _qualityPreset = _AppPrefsStore.current.qualityPreset;
       });
+      unawaited(_syncVolumeShutterInterception());
     }
   }
 
@@ -2946,14 +3075,21 @@ class _CameraScreenState extends State<CameraScreen>
     _LatestPhotosGridScreen.resetSessionQuota();
     setState(() => _openDrawer = ActiveDrawer.none);
 
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _LatestPhotosGridScreen(
-          initialConfig: _currentWatermarkConfig(),
-          onConfigChanged: _applyWatermarkConfig,
+    _isSubScreenOpen = true;
+    unawaited(_syncVolumeShutterInterception());
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _LatestPhotosGridScreen(
+            initialConfig: _currentWatermarkConfig(),
+            onConfigChanged: _applyWatermarkConfig,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _isSubScreenOpen = false;
+      unawaited(_syncVolumeShutterInterception());
+    }
     _LatestPhotosGridScreen.resetSessionQuota();
   }
 
@@ -4366,6 +4502,8 @@ class _CameraScreenState extends State<CameraScreen>
   void dispose() {
     _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
+    _HardwareVolumeShutterService.attachShutterCallback(null);
+    unawaited(_HardwareVolumeShutterService.setInterceptActive(false));
     _clockTimer?.cancel();
     _countdownTimer?.cancel();
     _cooldownTimer?.cancel();
@@ -6814,34 +6952,35 @@ class _GalleryWatermarkEditorScreenState
       if (rawBytes.length < 64) {
         throw Exception('Byte file foto kosong atau tidak lengkap');
       }
-      final Uint8List outputBytes =
-          (_stampVisible && _StampRenderer.hasActiveContent(_cfg))
-              ? await _StampRenderer.buildStampedJpgBytes(
-                  baseJpgBytes: rawBytes,
-                  activeDt: _activeDateTime(),
-                  cfg: _cfg,
-                )
-              : _verifyEncodedJpgBytes(rawBytes);
+      final Uint8List outputBytes = _stampVisible
+          ? await _StampRenderer.buildStampedJpgBytes(
+              baseJpgBytes: rawBytes,
+              activeDt: _activeDateTime(),
+              cfg: _cfg,
+            )
+          : _verifyEncodedJpgBytes(
+              _encodeCleanJpgOrThrow(
+                img.bakeOrientation(img.decodeImage(rawBytes)!),
+                quality: 92,
+              ),
+            );
 
       final Directory tempDir = await getTemporaryDirectory();
-      tempOutPath =
-          '${tempDir.path}/album_stamp_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final String stampId = DateTime.now().millisecondsSinceEpoch.toString();
+      tempOutPath = '${tempDir.path}/album_stamp_$stampId.jpg';
       final File outFile = File(tempOutPath);
       await outFile.writeAsBytes(outputBytes, flush: true);
 
       if (await outFile.exists() && await outFile.length() > 64) {
         await Gal.putImage(outFile.path);
       }
+      _anyChanged = true;
       _LatestPhotosGridScreen.invalidateCache();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _stampVisible
-                ? 'Foto bertanda air terverifikasi & tersimpan ke galeri'
-                : 'Foto terverifikasi & tersimpan ke galeri',
-          ),
+        const SnackBar(
+          content: Text('Foto hasil tanda air tersimpan ke galeri'),
           backgroundColor: Colors.green,
         ),
       );
@@ -6850,7 +6989,7 @@ class _GalleryWatermarkEditorScreenState
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Gagal menyimpan tanda air foto: $e'),
+          content: Text('Gagal menyimpan foto: $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -6861,30 +7000,88 @@ class _GalleryWatermarkEditorScreenState
           if (await f.exists()) await f.delete();
         } catch (_) {}
       }
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
     }
   }
 
-  Widget _buildEditDrawer() {
+  Widget _buildPhotoPageItem(File file) {
+    final double? cachedAr = _aspectRatioCache[file.path];
+    if (cachedAr == null) {
+      unawaited(_resolvePhotoAspectRatio(file));
+    }
+
+    return LayoutBuilder(
+      builder: (context, outerBox) {
+        final double ar = cachedAr ?? (3.0 / 4.0);
+        double boxW = outerBox.maxWidth;
+        double boxH = boxW / ar;
+        if (outerBox.maxHeight.isFinite && boxH > outerBox.maxHeight) {
+          boxH = outerBox.maxHeight;
+          boxW = boxH * ar;
+        }
+
+        return Center(
+          child: SizedBox(
+            width: boxW,
+            height: boxH,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.file(
+                  file,
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => const Center(
+                    child: Icon(
+                      Icons.broken_image_outlined,
+                      size: 48,
+                      color: Colors.white54,
+                    ),
+                  ),
+                ),
+                if (_stampVisible)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _buildStampOverlayWidget(
+                      activeDt: _activeDateTime(),
+                      cfg: _cfg,
+                      boxWidth: boxW,
+                      boxHeight: boxH,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDrawerSheet() {
     if (!_editorDrawerOpen) return const SizedBox.shrink();
 
-    final DateTime dt = _activeDateTime();
-    final String timeSub =
-        '${_StampRenderer.formatHari(dt)}, ${_StampRenderer.formatTanggalLengkap(dt)} ${_StampRenderer.formatJamMenit(dt)}${_cfg.isManualTime ? ' (Manual)' : ''}';
+    final DateTime activeDt = _activeDateTime();
+    final String timeSubLabel = _cfg.isManualTime
+        ? '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)} (Manual)'
+        : '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)}';
 
     final bool hasSavedLogo = _cfg.logoFilePath != null &&
         _cfg.logoFilePath!.isNotEmpty &&
         File(_cfg.logoFilePath!).existsSync();
 
     return Container(
-      constraints: const BoxConstraints(maxHeight: 360),
+      constraints: const BoxConstraints(maxHeight: 370),
       width: double.infinity,
       decoration: const BoxDecoration(
         color: Color(0xFF1A1D24),
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -6906,6 +7103,7 @@ class _GalleryWatermarkEditorScreenState
                 ),
               ],
             ),
+            const SizedBox(height: 6),
             _WatermarkRowTile(
               icon: Icons.image_outlined,
               title: 'Logo',
@@ -6928,7 +7126,7 @@ class _GalleryWatermarkEditorScreenState
             _WatermarkRowTile(
               icon: Icons.schedule_outlined,
               title: 'Waktu',
-              subtitle: timeSub,
+              subtitle: timeSubLabel,
               value: _cfg.showTime,
               onChanged: (val) {
                 _updateCfg(
@@ -6956,8 +7154,8 @@ class _GalleryWatermarkEditorScreenState
                 title: 'Edit Alamat',
                 hint: 'Masukkan alamat lokasi...',
                 initialValue: _cfg.customAddress,
-                applyText: (v) => _updateCfg(
-                  _cfg.copyWith(customAddress: v, showAddress: true),
+                applyText: (txt) => _updateCfg(
+                  _cfg.copyWith(customAddress: txt, showAddress: true),
                 ),
               ),
             ),
@@ -6972,10 +7170,10 @@ class _GalleryWatermarkEditorScreenState
               },
               onTapContent: () => _editFieldDialog(
                 title: 'Edit Koordinat',
-                hint: 'Contoh: 3.695432°S, 128.181405°T',
+                hint: 'Masukkan koordinat GPS...',
                 initialValue: _cfg.gpsCoordsText,
-                applyText: (v) => _updateCfg(
-                  _cfg.copyWith(gpsCoordsText: v, showCoords: true),
+                applyText: (txt) => _updateCfg(
+                  _cfg.copyWith(gpsCoordsText: txt, showCoords: true),
                 ),
               ),
             ),
@@ -6994,8 +7192,8 @@ class _GalleryWatermarkEditorScreenState
                 title: 'Edit Perusahaan',
                 hint: 'Nama instansi / perusahaan...',
                 initialValue: _cfg.companyText,
-                applyText: (v) => _updateCfg(
-                  _cfg.copyWith(companyText: v, showCompany: true),
+                applyText: (txt) => _updateCfg(
+                  _cfg.copyWith(companyText: txt, showCompany: true),
                 ),
               ),
             ),
@@ -7014,12 +7212,12 @@ class _GalleryWatermarkEditorScreenState
                 title: 'Edit Nama',
                 hint: 'Nama petugas / pengguna...',
                 initialValue: _cfg.personNameText,
-                applyText: (v) => _updateCfg(
-                  _cfg.copyWith(personNameText: v, showPersonName: true),
+                applyText: (txt) => _updateCfg(
+                  _cfg.copyWith(personNameText: txt, showPersonName: true),
                 ),
               ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             Row(
               children: [
                 Expanded(
@@ -7027,7 +7225,7 @@ class _GalleryWatermarkEditorScreenState
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.white,
                       foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(10),
                       ),
@@ -7039,19 +7237,18 @@ class _GalleryWatermarkEditorScreenState
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF1E6BFF),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(10),
                       ),
                     ),
-                    onPressed: () =>
-                        setState(() => _editorDrawerOpen = false),
+                    onPressed: () => setState(() => _editorDrawerOpen = false),
                     child: const Text(
                       'Selesai',
                       style: TextStyle(fontWeight: FontWeight.w600),
@@ -7066,86 +7263,11 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
-  Widget _buildSinglePhotoStage(File file, BoxConstraints outerBox) {
-    final double? knownRatio = _aspectRatioCache[file.path];
-    if (knownRatio == null) {
-      unawaited(_resolvePhotoAspectRatio(file));
-    }
-
-    final double safeRatio =
-        (knownRatio != null && knownRatio > 0.1 && knownRatio <= 10.0)
-            ? knownRatio
-            : (3.0 / 4.0);
-
-    final double maxW = max(120.0, outerBox.maxWidth - 16.0);
-    final double maxH = max(160.0, outerBox.maxHeight - 16.0);
-
-    double boxW = maxW;
-    double boxH = boxW / safeRatio;
-    if (boxH > maxH) {
-      boxH = maxH;
-      boxW = boxH * safeRatio;
-    }
-
-    return Center(
-      child: SizedBox(
-        width: boxW,
-        height: boxH,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Image.file(
-              file,
-              fit: BoxFit.fill,
-              filterQuality: FilterQuality.medium,
-              gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => const Center(
-                child: Icon(
-                  Icons.broken_image_outlined,
-                  color: Colors.white54,
-                  size: 48,
-                ),
-              ),
-            ),
-            if (_stampVisible)
-              Positioned(
-                left: 0,
-                bottom: 0,
-                right: 0,
-                child: _buildStampOverlayWidget(
-                  activeDt: _activeDateTime(),
-                  cfg: _cfg,
-                  boxWidth: boxW,
-                  boxHeight: boxH,
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (_files.isEmpty) {
-      if (!_isClosingEmpty && !_isClosingScreen) {
-        _isClosingEmpty = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _safeCloseEditor(_anyChanged);
-        });
-      }
-      return const Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(
-          child: CircularProgressIndicator(
-            strokeWidth: 2.5,
-            color: Color(0xFFFFD000),
-          ),
-        ),
-      );
-    }
-
-    final int safeIndex = _currentIndex.clamp(0, _files.length - 1);
+    final int totalCount = _files.length;
+    final String titleCounter =
+        totalCount > 0 ? '${_currentIndex + 1} / $totalCount' : 'Foto';
 
     return PopScope(
       canPop: false,
@@ -7162,14 +7284,46 @@ class _GalleryWatermarkEditorScreenState
             onPressed: () => _safeCloseEditor(_anyChanged),
           ),
           title: Text(
-            'Foto ${safeIndex + 1} / ${_files.length}',
+            titleCounter,
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           actions: [
             IconButton(
-              onPressed: _isSaving ? null : _deleteCurrentPhotoPermanently,
               icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
               tooltip: 'Hapus Permanen',
+              onPressed: (_isSaving || totalCount == 0 || _isClosingEmpty)
+                  ? null
+                  : _deleteCurrentPhotoPermanently,
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFFFD000),
+                  foregroundColor: Colors.black,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: (_isSaving || totalCount == 0 || _isClosingEmpty)
+                    ? null
+                    : _saveStampedPhotoToGallery,
+                child: _isSaving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Text(
+                        'Simpan',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+              ),
             ),
           ],
         ),
@@ -7177,37 +7331,31 @@ class _GalleryWatermarkEditorScreenState
           child: Column(
             children: [
               Expanded(
-                child: LayoutBuilder(
-                  builder: (context, outerBox) {
-                    return PageView.builder(
-                      controller: _pageController,
-                      itemCount: _files.length,
-                      onPageChanged: (idx) {
-                        if (!mounted) return;
-                        setState(() {
-                          _currentIndex = idx;
-                          _stampVisible = false;
-                        });
-                        _prefetchAroundIndex(idx);
-                      },
-                      itemBuilder: (context, idx) {
-                        return _buildSinglePhotoStage(_files[idx], outerBox);
-                      },
-                    );
-                  },
-                ),
+                child: totalCount == 0
+                    ? const SizedBox.shrink()
+                    : PageView.builder(
+                        controller: _pageController,
+                        itemCount: totalCount,
+                        onPageChanged: (newIdx) {
+                          if (_isClosingEmpty || _isClosingScreen) return;
+                          setState(() => _currentIndex = newIdx);
+                          _prefetchAroundIndex(newIdx);
+                        },
+                        itemBuilder: (ctx, idx) =>
+                            _buildPhotoPageItem(_files[idx]),
+                      ),
               ),
-              _buildEditDrawer(),
+              _buildDrawerSheet(),
               Container(
                 color: Colors.black,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     _BottomActionIcon(
-                      icon: Icons.auto_awesome_mosaic_outlined,
-                      label: _stampVisible ? 'Sembunyi' : 'Template',
+                      icon: Icons.branding_watermark_outlined,
+                      label: 'Templat',
                       active: _stampVisible,
                       onTap: _toggleStampFromTemplateButton,
                     ),
@@ -7215,22 +7363,56 @@ class _GalleryWatermarkEditorScreenState
                       icon: Icons.edit_outlined,
                       label: 'Sunting',
                       active: _editorDrawerOpen,
-                      onTap: () => setState(
-                        () => _editorDrawerOpen = !_editorDrawerOpen,
-                      ),
-                    ),
-                    _BottomActionIcon(
-                      icon: _isSaving
-                          ? Icons.hourglass_top
-                          : Icons.save_alt_outlined,
-                      label: _isSaving ? 'Menyimpan...' : 'Simpan',
-                      active: false,
-                      onTap: _isSaving ? () {} : _saveStampedPhotoToGallery,
+                      onTap: () {
+                        setState(() {
+                          _editorDrawerOpen = !_editorDrawerOpen;
+                          if (_editorDrawerOpen && !_stampVisible) {
+                            _stampVisible = true;
+                          }
+                        });
+                      },
                     ),
                   ],
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniChipButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MiniChipButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFFFD000) : const Color(0xFF222732),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       ),
@@ -7258,40 +7440,36 @@ class _WatermarkRowTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         children: [
           Icon(icon, color: Colors.white70, size: 22),
           const SizedBox(width: 12),
           Expanded(
-            child: InkWell(
+            child: GestureDetector(
               onTap: onTapContent,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500,
-                      ),
+              behavior: HitTestBehavior.opaque,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white,
                     ),
-                    const SizedBox(height: 1),
-                    Text(
-                      subtitle,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white60,
-                        fontSize: 12,
-                      ),
+                  ),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.white54,
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -7301,43 +7479,6 @@ class _WatermarkRowTile extends StatelessWidget {
             onChanged: onChanged,
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _MiniChipButton extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _MiniChipButton({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 7),
-          decoration: BoxDecoration(
-            color: selected ? const Color(0xFFFFD000) : const Color(0xFF222630),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: selected ? Colors.black : Colors.white70,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -7360,7 +7501,7 @@ class _BottomActionIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color color = disabled
+    final color = disabled
         ? Colors.white30
         : (active ? const Color(0xFFFFD000) : Colors.white);
     return GestureDetector(
@@ -7371,14 +7512,14 @@ class _BottomActionIcon extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 3),
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 4),
             Text(
               label,
               style: TextStyle(
                 color: color,
-                fontSize: 11,
-                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                fontSize: 12,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
               ),
             ),
           ],

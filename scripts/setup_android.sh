@@ -1,83 +1,93 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Memulai setup proyek Android untuk timestamp_by_putra ==="
+echo "=== Memulai konfigurasi Android & MainActivity untuk timestamp_by_putra ==="
 
-MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
-if [ ! -f "$MANIFEST_PATH" ]; then
-  echo "AndroidManifest.xml belum ada, menjalankan flutter create --platforms=android --org com.putra --project-name timestamp_by_putra . ..."
-  flutter create --platforms=android --org com.putra --project-name timestamp_by_putra .
-fi
+MANIFEST_FILE="android/app/src/main/AndroidManifest.xml"
+BUILD_GRADLE_APP="android/app/build.gradle"
+BUILD_GRADLE_APP_KTS="android/app/build.gradle.kts"
+MAIN_ACTIVITY_KT="android/app/src/main/kotlin/com/putra/timestamp_by_putra/MainActivity.kt"
+ICON_SRC="assets/icon/app_icon.png"
 
-if [ -f "$MANIFEST_PATH" ]; then
-  python3 - << 'PY'
-from pathlib import Path
-import re
+mkdir -p "android/app/src/main/kotlin/com/putra/timestamp_by_putra"
 
-path = Path("android/app/src/main/AndroidManifest.xml")
-content = path.read_text(encoding="utf-8")
+if [ -f "$MANIFEST_FILE" ]; then
+  python3 - "$MANIFEST_FILE" << 'PY'
+import sys
+import xml.etree.ElementTree as ET
 
-if "xmlns:tools=" not in content and "<manifest" in content:
-    content = content.replace(
-        "<manifest",
-        '<manifest xmlns:tools="http://schemas.android.com/tools"',
-        1,
-    )
+path = sys.argv[1]
+ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+ET.register_namespace('tools', 'http://schemas.android.com/tools')
 
-content = re.sub(
-    r'[ \t]*<uses-permission\b[^>]*android\.permission\.WRITE_EXTERNAL_STORAGE[^>]*/>\s*\n?',
-    '',
-    content,
-    flags=re.DOTALL,
-)
+ANDROID_NS = 'http://schemas.android.com/apk/res/android'
+TOOLS_NS = 'http://schemas.android.com/tools'
 
-content = re.sub(
-    r'(android:name="android\.permission\.WRITE_EXTERNAL_STORAGE"[^>]*android:maxSdkVersion=")29(")',
-    r'\g<1>28\g<2>',
-    content,
-)
+tree = ET.parse(path)
+root = tree.getroot()
 
-write_perm = (
-    '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" '
-    'android:maxSdkVersion="28" tools:replace="android:maxSdkVersion" />'
-)
-
-if "</manifest>" in content:
-    content = content.replace("</manifest>", f"    {write_perm}\n</manifest>", 1)
-
-required_perms = [
-    '<uses-permission android:name="android.permission.CAMERA" />',
-    '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
-    '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />',
-    '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
-    '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
-    '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
-    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
+desired_permissions = [
+    ("android.permission.CAMERA", {}),
+    ("android.permission.ACCESS_FINE_LOCATION", {}),
+    ("android.permission.ACCESS_COARSE_LOCATION", {}),
+    ("android.permission.RECORD_AUDIO", {}),
+    ("android.permission.READ_MEDIA_IMAGES", {}),
+    ("android.permission.READ_MEDIA_VIDEO", {}),
+    ("android.permission.READ_MEDIA_VISUAL_USER_SELECTED", {}),
+    ("android.permission.READ_EXTERNAL_STORAGE", {f"{{{ANDROID_NS}}}maxSdkVersion": "32"}),
+    ("android.permission.WRITE_EXTERNAL_STORAGE", {
+        f"{{{ANDROID_NS}}}maxSdkVersion": "28",
+        f"{{{TOOLS_NS}}}replace": "android:maxSdkVersion",
+    }),
 ]
 
-missing = [p for p in required_perms if p.split('"')[1] not in content]
-if missing and "</manifest>" in content:
-    injection = "".join(f"    {p}\n" for p in missing)
-    content = content.replace("</manifest>", f"{injection}</manifest>", 1)
+existing_perms = {}
+for elem in list(root.findall("uses-permission")):
+    name = elem.attrib.get(f"{{{ANDROID_NS}}}name", "")
+    if name:
+        existing_perms[name] = elem
 
-path.write_text(content, encoding="utf-8")
-print("Berhasil menormalkan WRITE_EXTERNAL_STORAGE (maxSdkVersion=28 + tools:replace) dan izin AndroidManifest.xml")
+for perm_name, extra_attrs in desired_permissions:
+    elem = existing_perms.get(perm_name)
+    if elem is None:
+        elem = ET.Element("uses-permission", {f"{{{ANDROID_NS}}}name": perm_name})
+        root.insert(0, elem)
+    for k, v in extra_attrs.items():
+        elem.set(k, v)
+
+tree.write(path, encoding="utf-8", xml_declaration=True)
 PY
-else
-  echo "ERROR: $MANIFEST_PATH tidak ditemukan!"
-  exit 1
 fi
 
-ICON_SRC="assets/icon/app_icon.png"
+for gradle_file in "$BUILD_GRADLE_APP" "$BUILD_GRADLE_APP_KTS"; do
+  if [ -f "$gradle_file" ]; then
+    python3 - "$gradle_file" << 'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    src = f.read()
+
+src = re.sub(r'\bcompileSdkVersion\s+\d+', 'compileSdkVersion 36', src)
+src = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 36', src)
+src = re.sub(r'\bcompileSdk\s+\d+', 'compileSdk 36', src)
+src = re.sub(r'\btargetSdkVersion\s+\d+', 'targetSdkVersion 36', src)
+src = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 36', src)
+src = re.sub(r'\btargetSdk\s+\d+', 'targetSdk 36', src)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(src)
+PY
+  fi
+done
+
 if [ -f "$ICON_SRC" ]; then
   python3 - "$ICON_SRC" << 'PY'
-import shutil
-import subprocess
+import os
 import sys
-from pathlib import Path
 
-src = Path(sys.argv[1])
-res_root = Path("android/app/src/main/res")
+src_path = sys.argv[1]
 sizes = {
     "mipmap-mdpi": 48,
     "mipmap-hdpi": 72,
@@ -86,136 +96,213 @@ sizes = {
     "mipmap-xxxhdpi": 192,
 }
 
-pil_ok = False
 try:
     from PIL import Image, ImageOps
-    pil_ok = True
-except ImportError:
-    pil_ok = False
-
-if pil_ok:
-    with Image.open(src) as im:
-        rgb_im = im.convert("RGB")
-        padded = ImageOps.expand(rgb_im, border=max(1, int(min(rgb_im.size) * 0.08)), fill=(255, 255, 255))
-        for folder, px in sizes.items():
-            out_dir = res_root / folder
-            out_dir.mkdir(parents=True, exist_ok=True)
-            resized = padded.resize((px, px), Image.Resampling.LANCZOS)
-            for fname in ("ic_launcher.png", "ic_launcher_round.png"):
-                target = out_dir / fname
-                resized.save(target, format="PNG")
-    print("Berhasil memasang app_icon.png ke seluruh folder mipmap-* via Pillow")
-elif shutil.which("ffmpeg"):
+    base = Image.open(src_path).convert("RGBA")
     for folder, px in sizes.items():
-        out_dir = res_root / folder
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for fname in ("ic_launcher.png", "ic_launcher_round.png"):
-            target = out_dir / fname
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", str(src),
-                    "-vf", f"scale={px}:{px}:flags=lanczos",
-                    str(target),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-    print("Berhasil memasang app_icon.png ke seluruh folder mipmap-* via ffmpeg")
-else:
+        out_dir = os.path.join("android/app/src/main/res", folder)
+        os.makedirs(out_dir, exist_ok=True)
+        pad = max(1, int(round(px * 0.08)))
+        inner_px = max(1, px - (pad * 2))
+        fitted = ImageOps.contain(base, (inner_px, inner_px), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (px, px), (255, 255, 255, 255))
+        off_x = (px - fitted.width) // 2
+        off_y = (px - fitted.height) // 2
+        canvas.paste(fitted, (off_x, off_y), fitted)
+        rgb_out = canvas.convert("RGB")
+        for name in ("ic_launcher.png", "ic_launcher_round.png"):
+            rgb_out.save(os.path.join(out_dir, name), format="PNG")
+except Exception as e:
+    print(f"Pillow tidak tersedia atau gagal, fallback copy: {e}")
+    import shutil
     for folder in sizes:
-        out_dir = res_root / folder
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for fname in ("ic_launcher.png", "ic_launcher_round.png"):
-            shutil.copyfile(src, out_dir / fname)
-    print("Pillow & ffmpeg tidak tersedia; menyalin app_icon.png langsung ke mipmap-*")
-PY
-else
-  echo "PERINGATAN: $ICON_SRC tidak ditemukan, melewati pemasangan ikon kustom."
-fi
-
-MAIN_DART_PATH="lib/main.dart"
-if [ -f "$MAIN_DART_PATH" ]; then
-  python3 - "$MAIN_DART_PATH" << 'PY'
-import sys
-from pathlib import Path
-
-dart_path = Path(sys.argv[1])
-src = dart_path.read_text(encoding="utf-8")
-fixed = src.replace("const SizedBox.height(12)", "const SizedBox(height: 12)")
-if fixed != src:
-    dart_path.write_text(fixed, encoding="utf-8")
-    print("Berhasil memperbaiki 'const SizedBox.height(12)' menjadi 'const SizedBox(height: 12)' di lib/main.dart")
-else:
-    print("lib/main.dart sudah menggunakan 'const SizedBox(height: 12)'")
+        out_dir = os.path.join("android/app/src/main/res", folder)
+        os.makedirs(out_dir, exist_ok=True)
+        for name in ("ic_launcher.png", "ic_launcher_round.png"):
+            shutil.copyfile(src_path, os.path.join(out_dir, name))
 PY
 fi
 
-MAIN_ACTIVITY_KT="$(find android/app/src/main -name 'MainActivity.kt' 2>/dev/null | head -n 1 || true)"
-if [ -n "$MAIN_ACTIVITY_KT" ] && [ -f "$MAIN_ACTIVITY_KT" ]; then
-  python3 - "$MAIN_ACTIVITY_KT" << 'PY'
-import sys
-from pathlib import Path
-
-kt_path = Path(sys.argv[1])
-pkg_name = "com.putra.timestamp_by_putra"
-
-kotlin_code = r"""package __PKG__
+cat << 'EOF' > "$MAIN_ACTIVITY_KT"
+package com.putra.timestamp_by_putra
 
 import android.Manifest
 import android.app.Activity
+import android.app.RecoverableSecurityException
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.MediaScannerConnection
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Size
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
+import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : FlutterActivity() {
-    private val channelName = "timestamp_by_putra/media_store"
-    private val brightnessChannelName = "timestamp_by_putra/screen_brightness"
-    private val hardwareKeysChannelName = "timestamp_by_putra/hardware_keys"
-    private val reqMediaCode = 7001
-    private val reqDeleteCode = 7002
+    companion object {
+        private const val MEDIA_CHANNEL = "timestamp_by_putra/media_store"
+        private const val BRIGHTNESS_CHANNEL = "timestamp_by_putra/screen_brightness"
+        private const val HARDWARE_CHANNEL = "timestamp_by_putra/hardware_keys"
+        private const val REQ_MEDIA_PERMISSIONS = 9011
+        private const val REQ_DELETE_REQUEST = 9012
+    }
 
-    private var hardwareKeysChannel: MethodChannel? = null
-    private var volumeShutterInterceptActive: Boolean = false
-
-    private var pendingPermResult: MethodChannel.Result? = null
+    private var mediaChannel: MethodChannel? = null
+    private var hardwareChannel: MethodChannel? = null
+    private var pendingPermissionResult: MethodChannel.Result? = null
     private var pendingDeleteResult: MethodChannel.Result? = null
-    private var pendingDeleteUriCount: Int = 0
-    private var pendingDirectDeletedCount: Int = 0
-    private var pendingDeletePaths: ArrayList<String> = arrayListOf()
+    private var pendingDeleteAllTargets: List<Pair<String, Uri?>> = emptyList()
+    private var pendingDeleteDirectPaths: List<String> = emptyList()
+    private var savedBrightness: Float = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+    private var volumeShutterEnabled: Boolean = true
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        savedBrightness = window.attributes.screenBrightness
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        hardwareKeysChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            hardwareKeysChannelName
-        ).also { channel ->
-            channel.setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "setVolumeShutterEnabled" -> {
-                        volumeShutterInterceptActive = call.argument<Boolean>("enabled") ?: false
+        mediaChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, MEDIA_CHANNEL)
+        mediaChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestMediaPermissions" -> {
+                    if (hasAllMediaPermissions()) {
                         result.success(true)
+                    } else {
+                        if (pendingPermissionResult != null) {
+                            result.success(hasAllMediaPermissions())
+                            return@setMethodCallHandler
+                        }
+                        pendingPermissionResult = result
+                        ActivityCompat.requestPermissions(
+                            this,
+                            requiredMediaPermissions(),
+                            REQ_MEDIA_PERMISSIONS,
+                        )
                     }
-                    else -> result.notImplemented()
                 }
+
+                "getAlbumFolders" -> {
+                    Thread {
+                        try {
+                            val data = queryAlbumFoldersData()
+                            runOnUiThread { result.success(data) }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("ALBUM_ERROR", e.message, null)
+                            }
+                        }
+                    }.start()
+                }
+
+                "getAllImages" -> {
+                    val limitArg = (call.argument<Number>("limit")?.toInt() ?: 2500).coerceIn(1, 50000)
+                    val bucketIdArg = call.argument<String>("bucketId")?.trim()?.takeIf { it.isNotEmpty() }
+                    Thread {
+                        try {
+                            val data = queryAllImagesData(limit = limitArg, bucketId = bucketIdArg)
+                            runOnUiThread { result.success(data) }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("IMAGES_ERROR", e.message, null)
+                            }
+                        }
+                    }.start()
+                }
+
+                "readImageBytes" -> {
+                    val uriStr = call.argument<String>("contentUri")?.trim().orEmpty()
+                    val pathStr = call.argument<String>("path")?.trim().orEmpty()
+                    Thread {
+                        try {
+                            val bytes = loadImageBytes(uriStr = uriStr, pathStr = pathStr)
+                            runOnUiThread { result.success(bytes) }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("READ_BYTES_ERROR", e.message, null)
+                            }
+                        }
+                    }.start()
+                }
+
+                "readImageThumbnail" -> {
+                    val uriStr = call.argument<String>("contentUri")?.trim().orEmpty()
+                    val pathStr = call.argument<String>("path")?.trim().orEmpty()
+                    val maxSide = (call.argument<Number>("maxSide")?.toInt() ?: 320).coerceIn(64, 1600)
+                    Thread {
+                        try {
+                            val bytes = loadThumbnailBytes(
+                                uriStr = uriStr,
+                                pathStr = pathStr,
+                                maxSide = maxSide,
+                            )
+                            runOnUiThread { result.success(bytes) }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("READ_THUMB_ERROR", e.message, null)
+                            }
+                        }
+                    }.start()
+                }
+
+                "deletePermanently" -> {
+                    val rawPaths = call.argument<List<*>>("paths").orEmpty()
+                        .mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                        .distinct()
+                    val rawUris = call.argument<List<*>>("contentUris").orEmpty()
+                        .mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                        .distinct()
+
+                    if (rawPaths.isEmpty() && rawUris.isEmpty()) {
+                        result.success(
+                            mapOf(
+                                "deletedCount" to 0,
+                                "unresolvedPaths" to emptyList<String>(),
+                            ),
+                        )
+                        return@setMethodCallHandler
+                    }
+
+                    Thread {
+                        try {
+                            handlePermanentDelete(
+                                paths = rawPaths,
+                                contentUris = rawUris,
+                                result = result,
+                            )
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("DELETE_ERROR", e.message, null)
+                            }
+                        }
+                    }.start()
+                }
+
+                else -> result.notImplemented()
             }
         }
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, brightnessChannelName)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BRIGHTNESS_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "setKeepScreenOn" -> {
@@ -229,65 +316,49 @@ class MainActivity : FlutterActivity() {
                             result.success(true)
                         }
                     }
+
                     "setMaxBrightness" -> {
                         runOnUiThread {
+                            savedBrightness = window.attributes.screenBrightness
                             val attrs = window.attributes
                             attrs.screenBrightness = 1.0f
                             window.attributes = attrs
                             result.success(true)
                         }
                     }
+
                     "restoreBrightness" -> {
                         runOnUiThread {
                             val attrs = window.attributes
-                            attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                            attrs.screenBrightness = savedBrightness
                             window.attributes = attrs
                             result.success(true)
                         }
                     }
+
                     else -> result.notImplemented()
                 }
             }
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "requestMediaPermissions" -> requestMediaPermissions(result)
-                    "getAlbumFolders" -> {
-                        result.success(queryAlbumFolders())
-                    }
-                    "getAllImages" -> {
-                        val requestedLimit = call.argument<Int>("limit") ?: 2500
-                        val safeLimit = requestedLimit.coerceIn(1, 500000)
-                        val rawBucketId = call.argument<String>("bucketId")?.trim()
-                        val bucketId = if (rawBucketId.isNullOrEmpty()) null else rawBucketId
-                        result.success(queryAllImagePaths(safeLimit, bucketId))
-                    }
-                    "deletePermanently", "moveToTrash" -> {
-                        val rawPaths = call.argument<List<*>>("paths")
-                        val paths = arrayListOf<String>()
-                        if (rawPaths != null) {
-                            for (item in rawPaths) {
-                                val s = item?.toString()?.trim() ?: ""
-                                if (s.isNotEmpty()) {
-                                    paths.add(s)
-                                }
-                            }
-                        }
-                        deletePathsPermanently(paths, result)
-                    }
-                    else -> result.notImplemented()
+        hardwareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, HARDWARE_CHANNEL)
+        hardwareChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "setVolumeShutterEnabled" -> {
+                    volumeShutterEnabled = call.argument<Boolean>("enabled") ?: true
+                    result.success(true)
                 }
+
+                else -> result.notImplemented()
             }
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (volumeShutterInterceptActive &&
+        if (volumeShutterEnabled &&
             (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
-            if (event == null || event.repeatCount == 0) {
-                val keyName = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) "volume_up" else "volume_down"
-                hardwareKeysChannel?.invokeMethod("onVolumeShutterPressed", keyName)
+            if (event?.repeatCount == 0) {
+                hardwareChannel?.invokeMethod("onVolumeShutterPressed", null)
             }
             return true
         }
@@ -295,7 +366,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        if (volumeShutterInterceptActive &&
+        if (volumeShutterEnabled &&
             (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
             return true
@@ -304,518 +375,46 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun requiredMediaPermissions(): Array<String> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
-        } else {
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        return when {
+            Build.VERSION.SDK_INT >= 34 -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+            )
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+            )
+            else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
     }
 
     private fun hasAllMediaPermissions(): Boolean {
-        return requiredMediaPermissions().all { perm ->
-            ContextCompat.checkSelfPermission(this, perm) ==
-                PackageManager.PERMISSION_GRANTED
-        }
-    }
-
-    private fun requestMediaPermissions(result: MethodChannel.Result) {
-        if (hasAllMediaPermissions()) {
-            result.success(true)
-            return
-        }
-        if (pendingPermResult != null) {
-            result.error("IN_PROGRESS", "Permintaan izin sedang berjalan", null)
-            return
-        }
-        pendingPermResult = result
-        ActivityCompat.requestPermissions(
-            this,
-            requiredMediaPermissions(),
-            reqMediaCode,
-        )
-    }
-
-    private fun isSupportedPhotoPath(path: String): Boolean {
-        val lower = path.lowercase()
-        return lower.endsWith(".jpg") ||
-            lower.endsWith(".jpeg") ||
-            lower.endsWith(".png") ||
-            lower.endsWith(".webp") ||
-            lower.endsWith(".heic") ||
-            lower.endsWith(".heif")
-    }
-
-    private data class FolderAccumulator(
-        val bucketId: String,
-        val bucketName: String,
-        val relativePath: String,
-        var coverPath: String,
-        var latestDateSec: Long,
-        var count: Int,
-    )
-
-    private fun queryAlbumFolders(): HashMap<String, Any> {
-        val folderList = arrayListOf<HashMap<String, Any>>()
-        var totalAllCount = 0
-        var latestAllCoverPath = ""
-
-        if (!hasAllMediaPermissions()) {
-            return hashMapOf(
-                "totalAllCount" to 0,
-                "latestAllCoverPath" to "",
-                "folders" to folderList,
-            )
-        }
-
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-
-        val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DATA,
-                MediaStore.Images.Media.RELATIVE_PATH,
-                MediaStore.Images.Media.DISPLAY_NAME,
-                MediaStore.Images.Media.BUCKET_ID,
-                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
-                MediaStore.Images.Media.DATE_TAKEN,
-                MediaStore.Images.Media.DATE_MODIFIED,
-            )
-        } else {
-            arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DATA,
-                MediaStore.Images.Media.BUCKET_ID,
-                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
-                MediaStore.Images.Media.DATE_TAKEN,
-                MediaStore.Images.Media.DATE_MODIFIED,
-            )
-        }
-
-        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
-        val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
-        val seenPaths = HashSet<String>()
-        val folderMap = LinkedHashMap<String, FolderAccumulator>()
-
-        try {
-            contentResolver.query(
-                collection,
-                projection,
-                null,
-                null,
-                sortOrder,
-            )?.use { cursor ->
-                val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-                val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
-                } else {
-                    -1
-                }
-                val nameCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-                } else {
-                    -1
-                }
-                val bucketIdCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
-                val bucketNameCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-                val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
-                val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
-
-                while (cursor.moveToNext()) {
-                    val relPathRaw = if (relCol >= 0) (cursor.getString(relCol) ?: "").trim() else ""
-                    var path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
-                    if (path.isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && nameCol >= 0) {
-                        val dispName = (cursor.getString(nameCol) ?: "").trim()
-                        if (dispName.isNotEmpty()) {
-                            val cleanRel = relPathRaw.trim('/')
-                            path = if (cleanRel.isNotEmpty()) {
-                                "$primaryRoot/$cleanRel/$dispName"
-                            } else {
-                                "$primaryRoot/$dispName"
-                            }
-                        }
-                    }
-
-                    if (path.isEmpty() || !isSupportedPhotoPath(path) || seenPaths.contains(path)) {
-                        continue
-                    }
-                    seenPaths.add(path)
-
-                    val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
-                    val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
-                    val effectiveSec = when {
-                        modSec > 0L -> modSec
-                        takenMs > 0L -> takenMs / 1000L
-                        else -> System.currentTimeMillis() / 1000L
-                    }
-
-                    if (totalAllCount == 0) {
-                        latestAllCoverPath = path
-                    }
-                    totalAllCount++
-
-                    val rawBucketId = if (bucketIdCol >= 0) (cursor.getString(bucketIdCol) ?: "").trim() else ""
-                    val parentFolderFallback = File(path).parentFile?.name ?: "Penyimpanan"
-                    val bucketKey = if (rawBucketId.isNotEmpty()) rawBucketId else "path_${File(path).parent ?: parentFolderFallback}"
-                    val rawBucketName = if (bucketNameCol >= 0) (cursor.getString(bucketNameCol) ?: "").trim() else ""
-                    val resolvedName = if (rawBucketName.isNotEmpty()) rawBucketName else parentFolderFallback
-
-                    val existing = folderMap[bucketKey]
-                    if (existing == null) {
-                        folderMap[bucketKey] = FolderAccumulator(
-                            bucketId = bucketKey,
-                            bucketName = resolvedName,
-                            relativePath = relPathRaw,
-                            coverPath = path,
-                            latestDateSec = effectiveSec,
-                            count = 1,
-                        )
-                    } else {
-                        existing.count += 1
-                    }
-                }
+        return when {
+            Build.VERSION.SDK_INT >= 34 -> {
+                val fullImages = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                ) == PackageManager.PERMISSION_GRANTED
+                val partialSelected = ContextCompat.checkSelfPermission(
+                    this,
+                    "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+                ) == PackageManager.PERMISSION_GRANTED
+                fullImages || partialSelected
             }
-        } catch (_: Exception) {
-        }
-
-        for (acc in folderMap.values) {
-            folderList.add(
-                hashMapOf<String, Any>(
-                    "bucketId" to acc.bucketId,
-                    "bucketName" to acc.bucketName,
-                    "relativePath" to acc.relativePath,
-                    "coverPath" to acc.coverPath,
-                    "latestDateSec" to acc.latestDateSec,
-                    "count" to acc.count,
-                )
-            )
-        }
-
-        return hashMapOf(
-            "totalAllCount" to totalAllCount,
-            "latestAllCoverPath" to latestAllCoverPath,
-            "folders" to folderList,
-        )
-    }
-
-    private fun queryAllImagePaths(
-        limit: Int = 2500,
-        bucketId: String? = null,
-    ): HashMap<String, Any> {
-        val list = arrayListOf<Any>()
-        var hasMore = false
-        if (!hasAllMediaPermissions()) {
-            return hashMapOf(
-                "items" to list,
-                "hasMore" to false,
-            )
-        }
-
-        val seen = HashSet<String>()
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-
-        val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DATA,
-                MediaStore.Images.Media.RELATIVE_PATH,
-                MediaStore.Images.Media.DISPLAY_NAME,
-                MediaStore.Images.Media.BUCKET_ID,
-                MediaStore.Images.Media.DATE_TAKEN,
-                MediaStore.Images.Media.DATE_MODIFIED,
-            )
-        } else {
-            arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DATA,
-                MediaStore.Images.Media.BUCKET_ID,
-                MediaStore.Images.Media.DATE_TAKEN,
-                MediaStore.Images.Media.DATE_MODIFIED,
-            )
-        }
-
-        val isPathFallbackBucket = bucketId != null && bucketId.startsWith("path_")
-        val selection: String? = if (bucketId != null && !isPathFallbackBucket) {
-            "${MediaStore.Images.Media.BUCKET_ID} = ?"
-        } else {
-            null
-        }
-        val selectionArgs: Array<String>? = if (bucketId != null && !isPathFallbackBucket) {
-            arrayOf(bucketId)
-        } else {
-            null
-        }
-        val fallbackParentTarget = if (isPathFallbackBucket) bucketId!!.removePrefix("path_") else null
-
-        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
-        val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
-
-        try {
-            contentResolver.query(
-                collection,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder,
-            )?.use { cursor ->
-                val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-                val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
-                } else {
-                    -1
-                }
-                val nameCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-                } else {
-                    -1
-                }
-                val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
-                val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
-
-                while (cursor.moveToNext()) {
-                    var path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
-                    if (path.isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && nameCol >= 0) {
-                        val dispName = (cursor.getString(nameCol) ?: "").trim()
-                        val relPath = if (relCol >= 0) (cursor.getString(relCol) ?: "").trim() else ""
-                        if (dispName.isNotEmpty()) {
-                            val cleanRel = relPath.trim('/')
-                            path = if (cleanRel.isNotEmpty()) {
-                                "$primaryRoot/$cleanRel/$dispName"
-                            } else {
-                                "$primaryRoot/$dispName"
-                            }
-                        }
-                    }
-                    if (path.isEmpty() || !isSupportedPhotoPath(path) || seen.contains(path)) {
-                        continue
-                    }
-                    if (fallbackParentTarget != null) {
-                        val parentDir = File(path).parent ?: ""
-                        if (parentDir != fallbackParentTarget) {
-                            continue
-                        }
-                    }
-                    if (list.size >= limit) {
-                        hasMore = true
-                        break
-                    }
-                    val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
-                    val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
-                    val effectiveSec = when {
-                        modSec > 0L -> modSec
-                        takenMs > 0L -> takenMs / 1000L
-                        else -> System.currentTimeMillis() / 1000L
-                    }
-                    seen.add(path)
-                    list.add(
-                        hashMapOf<String, Any>(
-                            "path" to path,
-                            "dateModified" to effectiveSec,
-                        )
-                    )
-                }
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                ) == PackageManager.PERMISSION_GRANTED
             }
-        } catch (_: Exception) {
-        }
-
-        return hashMapOf(
-            "items" to list,
-            "hasMore" to hasMore,
-        )
-    }
-
-    private fun extractScopedRelativeAndName(fullPath: String): Pair<String, String>? {
-        val normalized = fullPath.replace('\\', '/').trim()
-        val lastSlash = normalized.lastIndexOf('/')
-        if (lastSlash <= 0 || lastSlash >= normalized.length - 1) return null
-
-        val displayName = normalized.substring(lastSlash + 1)
-        val parentDir = normalized.substring(0, lastSlash)
-        val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.replace('\\', '/').trimEnd('/')
-
-        val relWithoutRoot = when {
-            parentDir.startsWith("$primaryRoot/") -> parentDir.removePrefix("$primaryRoot/")
-            parentDir == primaryRoot -> ""
-            parentDir.startsWith("/storage/emulated/0/") -> parentDir.removePrefix("/storage/emulated/0/")
             else -> {
-                val match = Regex("^/storage/[^/]+/(.+)$").find(parentDir)
-                match?.groupValues?.getOrNull(1) ?: return null
-            }
-        }
-        val scopedRel = if (relWithoutRoot.isEmpty()) "" else "${relWithoutRoot.trimEnd('/')}/"
-        return Pair(scopedRel, displayName)
-    }
-
-    private fun resolveMediaUriForPath(path: String): Uri? {
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val scopedParts = extractScopedRelativeAndName(path)
-            if (scopedParts != null) {
-                val (relPath, dispName) = scopedParts
-                try {
-                    contentResolver.query(
-                        collection,
-                        arrayOf(MediaStore.Images.Media._ID),
-                        "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND ${MediaStore.Images.Media.DISPLAY_NAME} = ?",
-                        arrayOf(relPath, dispName),
-                        "${MediaStore.Images.Media._ID} DESC",
-                    )?.use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            val idCol = cursor.getColumnIndex(MediaStore.Images.Media._ID)
-                            if (idCol >= 0) {
-                                val id = cursor.getLong(idCol)
-                                return ContentUris.withAppendedId(collection, id)
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        try {
-            contentResolver.query(
-                collection,
-                arrayOf(MediaStore.Images.Media._ID),
-                "${MediaStore.Images.Media.DATA} = ?",
-                arrayOf(path),
-                null,
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val idCol = cursor.getColumnIndex(MediaStore.Images.Media._ID)
-                    if (idCol >= 0) {
-                        val id = cursor.getLong(idCol)
-                        return ContentUris.withAppendedId(collection, id)
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        }
-
-        return null
-    }
-
-    private fun deletePathsPermanently(
-        paths: List<String>,
-        result: MethodChannel.Result,
-    ) {
-        if (paths.isEmpty()) {
-            result.success(
-                hashMapOf<String, Any>(
-                    "deletedCount" to 0,
-                    "unresolvedPaths" to emptyList<String>(),
-                )
-            )
-            return
-        }
-
-        var directDeleted = 0
-        val urisToRequest = arrayListOf<Uri>()
-        val unresolvedPaths = arrayListOf<String>()
-        val scannedPaths = arrayListOf<String>()
-
-        for (rawPath in paths) {
-            val clean = rawPath.trim()
-            if (clean.isEmpty()) continue
-            scannedPaths.add(clean)
-
-            var removed = false
-            val f = File(clean)
-            if (f.exists()) {
-                try {
-                    if (f.delete()) {
-                        removed = true
-                    }
-                } catch (_: SecurityException) {
-                    removed = false
-                } catch (_: Exception) {
-                    removed = false
-                }
-            }
-
-            val uri = resolveMediaUriForPath(clean)
-            if (!removed && uri != null) {
-                try {
-                    val rows = contentResolver.delete(uri, null, null)
-                    if (rows > 0) {
-                        removed = true
-                    }
-                } catch (_: SecurityException) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                        !urisToRequest.contains(uri)
-                    ) {
-                        urisToRequest.add(uri)
-                    }
-                } catch (_: Exception) {
-                }
-            }
-
-            if (removed) {
-                directDeleted++
-            } else if (uri == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                unresolvedPaths.add(clean)
-            }
-        }
-
-        if (scannedPaths.isNotEmpty()) {
-            try {
-                MediaScannerConnection.scanFile(
+                ContextCompat.checkSelfPermission(
                     this,
-                    scannedPaths.toTypedArray(),
-                    null,
-                    null,
-                )
-            } catch (_: Exception) {
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                ) == PackageManager.PERMISSION_GRANTED
             }
         }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && urisToRequest.isNotEmpty()) {
-            if (pendingDeleteResult != null) {
-                result.error("IN_PROGRESS", "Penghapusan permanen sedang berjalan", null)
-                return
-            }
-            try {
-                val pendingIntent = MediaStore.createDeleteRequest(
-                    contentResolver,
-                    urisToRequest,
-                )
-                pendingDeleteResult = result
-                pendingDeleteUriCount = urisToRequest.size
-                pendingDirectDeletedCount = directDeleted
-                pendingDeletePaths = unresolvedPaths
-                ActivityCompat.startIntentSenderForResult(
-                    this,
-                    pendingIntent.intentSender,
-                    reqDeleteCode,
-                    null,
-                    0,
-                    0,
-                    0,
-                    null,
-                )
-                return
-            } catch (_: Exception) {
-            }
-        }
-
-        result.success(
-            hashMapOf<String, Any>(
-                "deletedCount" to directDeleted,
-                "unresolvedPaths" to unresolvedPaths,
-            )
-        )
     }
 
     override fun onRequestPermissionsResult(
@@ -824,46 +423,657 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == reqMediaCode) {
-            val cb = pendingPermResult
-            pendingPermResult = null
+        if (requestCode == REQ_MEDIA_PERMISSIONS) {
+            val cb = pendingPermissionResult
+            pendingPermissionResult = null
             cb?.success(hasAllMediaPermissions())
         }
     }
 
-    override fun onActivityResult(
-        requestCode: Int,
-        resultCode: Int,
-        data: Intent?,
-    ) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == reqDeleteCode) {
-            val cb = pendingDeleteResult
-            val uriCount = pendingDeleteUriCount
-            val directDeleted = pendingDirectDeletedCount
-            val unresolved = pendingDeletePaths
+    private fun mediaCollectionUri(): Uri {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+    }
 
-            pendingDeleteResult = null
-            pendingDeleteUriCount = 0
-            pendingDirectDeletedCount = 0
-            pendingDeletePaths = arrayListOf()
+    private fun buildResolvedPath(
+        rawData: String?,
+        relPath: String?,
+        displayName: String?,
+    ): String {
+        val trimmedData = rawData?.trim().orEmpty()
+        if (trimmedData.isNotEmpty() && File(trimmedData).exists()) {
+            return trimmedData
+        }
+        val cleanRel = relPath?.trim()?.trim('/')?.replace('\\', '/').orEmpty()
+        val cleanName = displayName?.trim().orEmpty()
+        if (cleanRel.isNotEmpty() && cleanName.isNotEmpty()) {
+            val primaryRoot = Environment.getExternalStorageDirectory().absolutePath
+            val candidate = "$primaryRoot/$cleanRel/$cleanName"
+            if (File(candidate).exists()) {
+                return candidate
+            }
+            return trimmedData.ifEmpty { candidate }
+        }
+        return trimmedData
+    }
 
-            val granted = resultCode == Activity.RESULT_OK
-            val totalDeleted = if (granted) directDeleted + uriCount else directDeleted
-            cb?.success(
-                hashMapOf<String, Any>(
-                    "deletedCount" to totalDeleted,
-                    "unresolvedPaths" to unresolved,
+    private fun queryAlbumFoldersData(): Map<String, Any?> {
+        val collection = mediaCollectionUri()
+        val projection = mutableListOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.MIME_TYPE,
+            MediaStore.Images.Media.DATE_MODIFIED,
+            MediaStore.Images.Media.DATE_ADDED,
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            projection.add(MediaStore.Images.Media.BUCKET_ID)
+            projection.add(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            projection.add(MediaStore.Images.Media.RELATIVE_PATH)
+        }
+        @Suppress("DEPRECATION")
+        projection.add(MediaStore.Images.Media.DATA)
+
+        val selection = "${MediaStore.Images.Media.MIME_TYPE} LIKE ? OR ${MediaStore.Images.Media.MIME_TYPE} IS NULL"
+        val selectionArgs = arrayOf("image/%")
+        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
+
+        var totalAllCount = 0
+        var latestAllCoverPath = ""
+        var latestAllCoverUri = ""
+
+        data class FolderAcc(
+            val bucketId: String,
+            val bucketName: String,
+            val relativePath: String,
+            var count: Int,
+            var coverPath: String,
+            var coverUri: String,
+        )
+
+        val folderMap = LinkedHashMap<String, FolderAcc>()
+
+        contentResolver.query(
+            collection,
+            projection.toTypedArray(),
+            selection,
+            selectionArgs,
+            sortOrder,
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+            val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+            val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+            val addCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+            val bucketIdCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
+            } else {
+                -1
+            }
+            val bucketNameCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            } else {
+                -1
+            }
+            val relPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
+
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idCol)
+                val itemUri = ContentUris.withAppendedId(collection, id)
+                val dispName = if (nameCol >= 0) cursor.getString(nameCol) else null
+                val rawData = if (dataCol >= 0) cursor.getString(dataCol) else null
+                val relPath = if (relPathCol >= 0) cursor.getString(relPathCol) else null
+                val resolvedPath = buildResolvedPath(rawData, relPath, dispName)
+
+                if (resolvedPath.isEmpty() && itemUri.toString().isEmpty()) continue
+
+                totalAllCount++
+                if (latestAllCoverUri.isEmpty()) {
+                    latestAllCoverUri = itemUri.toString()
+                    latestAllCoverPath = resolvedPath
+                }
+
+                val bIdRaw = if (bucketIdCol >= 0) cursor.getString(bucketIdCol)?.trim().orEmpty() else ""
+                val bNameRaw = if (bucketNameCol >= 0) cursor.getString(bucketNameCol)?.trim().orEmpty() else ""
+                val cleanRel = relPath?.trim()?.replace('\\', '/').orEmpty()
+
+                val fallbackBucketId = when {
+                    bIdRaw.isNotEmpty() -> bIdRaw
+                    cleanRel.isNotEmpty() -> "rel:$cleanRel"
+                    resolvedPath.contains('/') -> "dir:${resolvedPath.substringBeforeLast('/')}"
+                    else -> "root_images"
+                }
+
+                val fallbackBucketName = when {
+                    bNameRaw.isNotEmpty() -> bNameRaw
+                    cleanRel.trim('/').isNotEmpty() -> cleanRel.trim('/').substringAfterLast('/')
+                    resolvedPath.contains('/') -> resolvedPath.substringBeforeLast('/').substringAfterLast('/')
+                    else -> "Pictures"
+                }
+
+                val existing = folderMap[fallbackBucketId]
+                if (existing == null) {
+                    folderMap[fallbackBucketId] = FolderAcc(
+                        bucketId = fallbackBucketId,
+                        bucketName = fallbackBucketName,
+                        relativePath = cleanRel,
+                        count = 1,
+                        coverPath = resolvedPath,
+                        coverUri = itemUri.toString(),
+                    )
+                } else {
+                    existing.count += 1
+                }
+            }
+        }
+
+        val foldersOut = folderMap.values.map { acc ->
+            mapOf(
+                "bucketId" to acc.bucketId,
+                "bucketName" to acc.bucketName,
+                "relativePath" to acc.relativePath,
+                "count" to acc.count,
+                "coverPath" to acc.coverPath,
+                "coverUri" to acc.coverUri,
+            )
+        }
+
+        return mapOf(
+            "totalAllCount" to totalAllCount,
+            "latestAllCoverPath" to latestAllCoverPath,
+            "latestAllCoverUri" to latestAllCoverUri,
+            "folders" to foldersOut,
+        )
+    }
+
+    private fun queryAllImagesData(limit: Int, bucketId: String?): Map<String, Any?> {
+        val collection = mediaCollectionUri()
+        val projection = mutableListOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.MIME_TYPE,
+            MediaStore.Images.Media.DATE_MODIFIED,
+            MediaStore.Images.Media.DATE_ADDED,
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            projection.add(MediaStore.Images.Media.BUCKET_ID)
+            projection.add(MediaStore.Images.Media.RELATIVE_PATH)
+        }
+        @Suppress("DEPRECATION")
+        projection.add(MediaStore.Images.Media.DATA)
+
+        val whereClauses = mutableListOf(
+            "(${MediaStore.Images.Media.MIME_TYPE} LIKE ? OR ${MediaStore.Images.Media.MIME_TYPE} IS NULL)",
+        )
+        val whereArgs = mutableListOf("image/%")
+
+        val cleanBucketId = bucketId?.trim().orEmpty()
+        if (cleanBucketId.isNotEmpty() &&
+            !cleanBucketId.startsWith("rel:") &&
+            !cleanBucketId.startsWith("dir:") &&
+            cleanBucketId != "root_images" &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        ) {
+            whereClauses.add("${MediaStore.Images.Media.BUCKET_ID} = ?")
+            whereArgs.add(cleanBucketId)
+        }
+
+        val selection = whereClauses.joinToString(" AND ")
+        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
+
+        val items = ArrayList>(min(limit, 2500))
+        var hasMore = false
+
+        contentResolver.query(
+            collection,
+            projection.toTypedArray(),
+            selection,
+            whereArgs.toTypedArray(),
+            sortOrder,
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+            val mimeCol = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+            val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+            val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+            val addCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+            val relPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
+
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idCol)
+                val itemUri = ContentUris.withAppendedId(collection, id)
+                val dispName = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
+                val mimeType = if (mimeCol >= 0) cursor.getString(mimeCol).orEmpty() else ""
+                val rawData = if (dataCol >= 0) cursor.getString(dataCol) else null
+                val relPath = if (relPathCol >= 0) cursor.getString(relPathCol) else null
+                val resolvedPath = buildResolvedPath(rawData, relPath, dispName)
+
+                if (cleanBucketId.startsWith("rel:")) {
+                    val targetRel = cleanBucketId.removePrefix("rel:")
+                    if (relPath?.trim()?.replace('\\', '/') != targetRel) continue
+                } else if (cleanBucketId.startsWith("dir:")) {
+                    val targetDir = cleanBucketId.removePrefix("dir:")
+                    val parentDir = if (resolvedPath.contains('/')) {
+                        resolvedPath.substringBeforeLast('/')
+                    } else {
+                        ""
+                    }
+                    if (parentDir != targetDir) continue
+                } else if (cleanBucketId == "root_images") {
+                    if (resolvedPath.contains('/')) continue
+                }
+
+                if (resolvedPath.isEmpty() && itemUri.toString().isEmpty()) continue
+
+                if (items.size >= limit) {
+                    hasMore = true
+                    break
+                }
+
+                val modSec = when {
+                    modCol >= 0 && cursor.getLong(modCol) > 0L -> cursor.getLong(modCol)
+                    addCol >= 0 && cursor.getLong(addCol) > 0L -> cursor.getLong(addCol)
+                    else -> System.currentTimeMillis() / 1000L
+                }
+
+                items.add(
+                    mapOf(
+                        "path" to resolvedPath,
+                        "contentUri" to itemUri.toString(),
+                        "displayName" to dispName,
+                        "mimeType" to mimeType,
+                        "dateModified" to modSec,
+                    ),
                 )
+            }
+        }
+
+        return mapOf(
+            "items" to items,
+            "hasMore" to hasMore,
+        )
+    }
+
+    private fun readStreamToBytes(stream: InputStream): ByteArray {
+        val out = ByteArrayOutputStream(32768)
+        val buf = ByteArray(16384)
+        while (true) {
+            val n = stream.read(buf)
+            if (n <= 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    private fun loadImageBytes(uriStr: String, pathStr: String): ByteArray? {
+        if (uriStr.isNotEmpty()) {
+            try {
+                val uri = Uri.parse(uriStr)
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    val bytes = readStreamToBytes(stream)
+                    if (bytes.isNotEmpty()) return bytes
+                }
+            } catch (_: Exception) {
+            }
+        }
+        if (pathStr.isNotEmpty()) {
+            try {
+                val f = File(pathStr)
+                if (f.exists() && f.length() > 0L) {
+                    return f.readBytes()
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private fun applyExifRotation(bitmap: Bitmap, exifDegree: Int): Bitmap {
+        if (exifDegree == 0) return bitmap
+        val m = Matrix()
+        m.postRotate(exifDegree.toFloat())
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
+    }
+
+    private fun readExifDegreeFromUriOrPath(uriStr: String, pathStr: String): Int {
+        try {
+            if (uriStr.isNotEmpty()) {
+                contentResolver.openInputStream(Uri.parse(uriStr))?.use { ins ->
+                    val exif = ExifInterface(ins)
+                    return when (exif.getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL,
+                    )) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                        ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                        ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                        else -> 0
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        if (pathStr.isNotEmpty()) {
+            try {
+                val exif = ExifInterface(pathStr)
+                return when (exif.getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                    else -> 0
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return 0
+    }
+
+    private fun loadThumbnailBytes(uriStr: String, pathStr: String, maxSide: Int): ByteArray? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && uriStr.isNotEmpty()) {
+            try {
+                val bmp = contentResolver.loadThumbnail(
+                    Uri.parse(uriStr),
+                    Size(maxSide, maxSide),
+                    null,
+                )
+                val out = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.JPEG, 82, out)
+                return out.toByteArray()
+            } catch (_: Exception) {
+            }
+        }
+
+        val fullBytes = loadImageBytes(uriStr = uriStr, pathStr = pathStr) ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(fullBytes, 0, fullBytes.size, bounds)
+        val longest = max(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (longest / sample > maxSide * 2) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = max(1, sample) }
+        val decoded = BitmapFactory.decodeByteArray(fullBytes, 0, fullBytes.size, opts) ?: return null
+        val deg = readExifDegreeFromUriOrPath(uriStr = uriStr, pathStr = pathStr)
+        val oriented = applyExifRotation(decoded, deg)
+        val scale = min(1.0f, maxSide.toFloat() / max(1, max(oriented.width, oriented.height)))
+        val finalBmp = if (scale < 0.99f) {
+            Bitmap.createScaledBitmap(
+                oriented,
+                max(1, (oriented.width * scale).toInt()),
+                max(1, (oriented.height * scale).toInt()),
+                true,
+            )
+        } else {
+            oriented
+        }
+        val out = ByteArrayOutputStream()
+        finalBmp.compress(Bitmap.CompressFormat.JPEG, 82, out)
+        return out.toByteArray()
+    }
+
+    private fun resolveUriForPath(path: String): Uri? {
+        if (path.isEmpty()) return null
+        val collection = mediaCollectionUri()
+        @Suppress("DEPRECATION")
+        val projection = arrayOf(MediaStore.Images.Media._ID)
+        @Suppress("DEPRECATION")
+        val selection = "${MediaStore.Images.Media.DATA} = ?"
+        contentResolver.query(
+            collection,
+            projection,
+            selection,
+            arrayOf(path),
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val id = cursor.getLong(0)
+                return ContentUris.withAppendedId(collection, id)
+            }
+        }
+        return null
+    }
+
+    private fun handlePermanentDelete(
+        paths: List<String>,
+        contentUris: List<String>,
+        result: MethodChannel.Result,
+    ) {
+        var deletedCount = 0
+        val unresolvedPaths = mutableListOf<String>()
+        val targetPairs = LinkedHashMap<String, Pair<String, Uri?>>()
+
+        for (uStr in contentUris) {
+            val parsed = try {
+                Uri.parse(uStr)
+            } catch (_: Exception) {
+                null
+            }
+            if (parsed != null) {
+                targetPairs["uri:$uStr"] = Pair("", parsed)
+            }
+        }
+
+        for (p in paths) {
+            val existing = targetPairs.entries.firstOrNull { it.value.first == p }
+            if (existing != null) continue
+            val resolvedUri = resolveUriForPath(p)
+            targetPairs["path:$p"] = Pair(p, resolvedUri)
+        }
+
+        val urisForApi30: MutableList<Uri> = mutableListOf()
+
+        for ((_, pair) in targetPairs) {
+            val path = pair.first
+            val uri = pair.second
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if (uri != null) {
+                    urisForApi30.add(uri)
+                } else if (path.isNotEmpty()) {
+                    unresolvedPaths.add(path)
+                }
+                continue
+            }
+
+            var removed = false
+            if (uri != null) {
+                try {
+                    val rows = contentResolver.delete(uri, null, null)
+                    if (rows > 0) removed = true
+                } catch (secEx: SecurityException) {
+                    if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q &&
+                        secEx is RecoverableSecurityException
+                    ) {
+                        pendingDeleteAllTargets = targetPairs.values.toList()
+                        pendingDeleteDirectPaths = paths
+                        pendingDeleteResult = result
+                        runOnUiThread {
+                            try {
+                                ActivityCompat.startIntentSenderForResult(
+                                    this,
+                                    secEx.userAction.actionIntent.intentSender,
+                                    REQ_DELETE_REQUEST,
+                                    null,
+                                    0,
+                                    0,
+                                    0,
+                                    null,
+                                )
+                            } catch (_: Exception) {
+                                pendingDeleteResult = null
+                                result.success(
+                                    mapOf(
+                                        "deletedCount" to deletedCount,
+                                        "unresolvedPaths" to unresolvedPaths,
+                                    ),
+                                )
+                            }
+                        }
+                        return
+                    }
+                } catch (_: Exception) {
+                }
+            }
+
+            if (!removed && path.isNotEmpty()) {
+                try {
+                    val f = File(path)
+                    if (!f.exists() || f.delete()) {
+                        removed = true
+                    }
+                } catch (_: Exception) {
+                }
+            }
+
+            if (removed) {
+                deletedCount++
+            } else if (path.isNotEmpty()) {
+                unresolvedPaths.add(path)
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && urisForApi30.isNotEmpty()) {
+            try {
+                val distinctUris = urisForApi30.distinct()
+                val pendingIntent = MediaStore.createDeleteRequest(contentResolver, distinctUris)
+                pendingDeleteAllTargets = targetPairs.values.toList()
+                pendingDeleteDirectPaths = paths
+                pendingDeleteResult = result
+                runOnUiThread {
+                    try {
+                        ActivityCompat.startIntentSenderForResult(
+                            this,
+                            pendingIntent.intentSender,
+                            REQ_DELETE_REQUEST,
+                            null,
+                            0,
+                            0,
+                            0,
+                            null,
+                        )
+                    } catch (_: Exception) {
+                        pendingDeleteResult = null
+                        result.success(
+                            mapOf(
+                                "deletedCount" to 0,
+                                "unresolvedPaths" to unresolvedPaths,
+                            ),
+                        )
+                    }
+                }
+                return
+            } catch (_: Exception) {
+            }
+        }
+
+        runOnUiThread {
+            result.success(
+                mapOf(
+                    "deletedCount" to deletedCount,
+                    "unresolvedPaths" to unresolvedPaths,
+                ),
             )
         }
     }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_DELETE_REQUEST) {
+            val cb = pendingDeleteResult
+            val targets = pendingDeleteAllTargets
+            val directPaths = pendingDeleteDirectPaths
+            pendingDeleteResult = null
+            pendingDeleteAllTargets = emptyList()
+            pendingDeleteDirectPaths = emptyList()
+
+            if (cb == null) return
+
+            if (resultCode == Activity.RESULT_OK) {
+                Thread {
+                    var confirmedDeleted = 0
+                    val stillRemaining = mutableListOf<String>()
+
+                    for ((path, uri) in targets) {
+                        var gone = false
+                        if (uri != null) {
+                            try {
+                                contentResolver.delete(uri, null, null)
+                            } catch (_: Exception) {
+                            }
+                            try {
+                                contentResolver.query(uri, arrayOf(MediaStore.Images.Media._ID), null, null, null)?.use { c ->
+                                    if (!c.moveToFirst()) gone = true
+                                }
+                            } catch (_: Exception) {
+                                gone = true
+                            }
+                        }
+                        if (path.isNotEmpty()) {
+                            try {
+                                val f = File(path)
+                                if (f.exists()) {
+                                    f.delete()
+                                }
+                                if (!f.exists()) gone = true
+                            } catch (_: Exception) {
+                            }
+                        }
+                        if (gone) {
+                            confirmedDeleted++
+                        } else if (path.isNotEmpty()) {
+                            stillRemaining.add(path)
+                        }
+                    }
+
+                    if (confirmedDeleted == 0 && targets.isNotEmpty()) {
+                        confirmedDeleted = targets.size
+                    }
+
+                    for (p in directPaths) {
+                        try {
+                            val f = File(p)
+                            if (f.exists() && !stillRemaining.contains(p)) {
+                                stillRemaining.add(p)
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    runOnUiThread {
+                        cb.success(
+                            mapOf(
+                                "deletedCount" to confirmedDeleted,
+                                "unresolvedPaths" to stillRemaining.distinct(),
+                            ),
+                        )
+                    }
+                }.start()
+            } else {
+                cb.success(
+                    mapOf(
+                        "deletedCount" to 0,
+                        "unresolvedPaths" to directPaths,
+                    ),
+                )
+            }
+        }
+    }
 }
-""".replace("__PKG__", pkg_name)
+EOF
 
-kt_path.write_text(kotlin_code, encoding="utf-8")
-print(f"Berhasil memperbarui {kt_path}")
-PY
-fi
-
-echo "=== Setup Android selesai ==="
+chmod +x "$MAIN_ACTIVITY_KT"
+echo "=== Selesai konfigurasi Android & MainActivity ==="

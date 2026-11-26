@@ -76,6 +76,286 @@ enum CollageLayoutId {
   sixHeroLeft3Right2Bottom,
 }
 
+class _MediaSourceRef {
+  final String path;
+  final String contentUri;
+  final String displayName;
+  final String mimeType;
+
+  const _MediaSourceRef({
+    this.path = '',
+    this.contentUri = '',
+    this.displayName = '',
+    this.mimeType = '',
+  });
+
+  String get uniqueKey => contentUri.isNotEmpty ? contentUri : path;
+
+  bool get isValid => path.isNotEmpty || contentUri.isNotEmpty;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is _MediaSourceRef && other.uniqueKey == uniqueKey;
+  }
+
+  @override
+  int get hashCode => uniqueKey.hashCode;
+}
+
+class _AndroidMediaReader {
+  static const MethodChannel _channel =
+      MethodChannel('timestamp_by_putra/media_store');
+
+  static bool _canDirectFileAccess(String path) {
+    if (path.isEmpty) return false;
+    try {
+      final File f = File(path);
+      return f.existsSync() && f.lengthSync() > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<Uint8List?> readFullBytes(_MediaSourceRef ref) async {
+    if (ref.path.isNotEmpty) {
+      try {
+        final File f = File(ref.path);
+        if (await f.exists() && await f.length() > 0) {
+          final Uint8List bytes = await f.readAsBytes();
+          if (bytes.isNotEmpty) return bytes;
+        }
+      } catch (_) {}
+    }
+
+    if (Platform.isAndroid &&
+        (ref.contentUri.isNotEmpty || ref.path.isNotEmpty)) {
+      try {
+        final dynamic res = await _channel.invokeMethod(
+          'readImageBytes',
+          {
+            'contentUri': ref.contentUri,
+            'path': ref.path,
+          },
+        ).timeout(const Duration(seconds: 10));
+        if (res is Uint8List && res.isNotEmpty) {
+          return res;
+        }
+      } catch (e) {
+        debugPrint('readFullBytes native fallback gagal: $e');
+      }
+    }
+    return null;
+  }
+
+  static Future<Uint8List?> readThumbnailBytes(
+    _MediaSourceRef ref, {
+    int maxSide = 320,
+  }) async {
+    if (Platform.isAndroid &&
+        (ref.contentUri.isNotEmpty || ref.path.isNotEmpty)) {
+      try {
+        final dynamic res = await _channel.invokeMethod(
+          'readImageThumbnail',
+          {
+            'contentUri': ref.contentUri,
+            'path': ref.path,
+            'maxSide': maxSide,
+          },
+        ).timeout(const Duration(seconds: 6));
+        if (res is Uint8List && res.isNotEmpty) {
+          return res;
+        }
+      } catch (_) {}
+    }
+    return readFullBytes(ref);
+  }
+}
+
+class _SmartMediaImage extends StatefulWidget {
+  final _MediaSourceRef source;
+  final int? cacheWidth;
+  final BoxFit fit;
+  final Alignment alignment;
+  final FilterQuality filterQuality;
+  final WidgetBuilder? errorBuilder;
+
+  const _SmartMediaImage({
+    super.key,
+    required this.source,
+    this.cacheWidth,
+    this.fit = BoxFit.cover,
+    this.alignment = Alignment.center,
+    this.filterQuality = FilterQuality.low,
+    this.errorBuilder,
+  });
+
+  @override
+  State<_SmartMediaImage> createState() => _SmartMediaImageState();
+}
+
+class _SmartMediaImageState extends State<_SmartMediaImage> {
+  static final Map<String, Uint8List> _memCache = {};
+  static const int _maxMemEntries = 140;
+
+  Uint8List? _bytes;
+  bool _loading = false;
+  bool _failed = false;
+
+  String get _cacheKey =>
+      '${widget.source.uniqueKey}@${widget.cacheWidth ?? 0}';
+
+  bool get _useDirectFile =>
+      _AndroidMediaReader._canDirectFileAccess(widget.source.path);
+
+  @override
+  void initState() {
+    super.initState();
+    _initLoad();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SmartMediaImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source.uniqueKey != widget.source.uniqueKey ||
+        oldWidget.cacheWidth != widget.cacheWidth) {
+      _bytes = null;
+      _failed = false;
+      _initLoad();
+    }
+  }
+
+  void _putCache(String key, Uint8List data) {
+    if (_memCache.length >= _maxMemEntries) {
+      _memCache.remove(_memCache.keys.first);
+    }
+    _memCache[key] = data;
+  }
+
+  void _initLoad() {
+    if (_useDirectFile) return;
+
+    final String key = _cacheKey;
+    final Uint8List? cached = _memCache[key];
+    if (cached != null && cached.isNotEmpty) {
+      _bytes = cached;
+      _loading = false;
+      return;
+    }
+
+    _loading = true;
+    unawaited(_fetchBytes(key));
+  }
+
+  Future<void> _fetchBytes(String key) async {
+    final int? cw = widget.cacheWidth;
+    final Uint8List? data = (cw != null && cw <= 540)
+        ? await _AndroidMediaReader.readThumbnailBytes(
+            widget.source,
+            maxSide: max(180, cw),
+          )
+        : await _AndroidMediaReader.readFullBytes(widget.source);
+
+    if (!mounted || _cacheKey != key) return;
+    if (data != null && data.isNotEmpty) {
+      _putCache(key, data);
+      setState(() {
+        _bytes = data;
+        _loading = false;
+        _failed = false;
+      });
+    } else {
+      setState(() {
+        _loading = false;
+        _failed = true;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_useDirectFile) {
+      return Image.file(
+        File(widget.source.path),
+        cacheWidth: widget.cacheWidth,
+        fit: widget.fit,
+        alignment: widget.alignment,
+        filterQuality: widget.filterQuality,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) {
+          if (widget.source.contentUri.isNotEmpty &&
+              _bytes == null &&
+              !_loading &&
+              !_failed) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              setState(() => _loading = true);
+              unawaited(_fetchBytes(_cacheKey));
+            });
+          }
+          if (_bytes != null && _bytes!.isNotEmpty) {
+            return Image.memory(
+              _bytes!,
+              cacheWidth: widget.cacheWidth,
+              fit: widget.fit,
+              alignment: widget.alignment,
+              filterQuality: widget.filterQuality,
+              gaplessPlayback: true,
+            );
+          }
+          return widget.errorBuilder?.call(context) ??
+              const Center(
+                child: Icon(
+                  Icons.broken_image_outlined,
+                  color: Colors.white38,
+                ),
+              );
+        },
+      );
+    }
+
+    if (_bytes != null && _bytes!.isNotEmpty) {
+      return Image.memory(
+        _bytes!,
+        cacheWidth: widget.cacheWidth,
+        fit: widget.fit,
+        alignment: widget.alignment,
+        filterQuality: widget.filterQuality,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) =>
+            widget.errorBuilder?.call(context) ??
+            const Center(
+              child: Icon(
+                Icons.broken_image_outlined,
+                color: Colors.white38,
+              ),
+            ),
+      );
+    }
+
+    if (_failed) {
+      return widget.errorBuilder?.call(context) ??
+          const Center(
+            child: Icon(
+              Icons.broken_image_outlined,
+              color: Colors.white38,
+            ),
+          );
+    }
+
+    return const Center(
+      child: SizedBox(
+        width: 18,
+        height: 18,
+        child: CircularProgressIndicator(
+          strokeWidth: 1.8,
+          color: Colors.white30,
+        ),
+      ),
+    );
+  }
+}
+
 class _CropResizeRequest {
   final Uint8List bytes;
   final PhotoAspectRatio ratio;
@@ -1294,7 +1574,7 @@ class _PersistentAppSettings {
     this.showLogo = false,
     this.logoFilePath,
     this.showTime = true,
-    this.showAddress = false,
+    this.showAddress = true,
     this.customAddress = '',
     this.showCoords = false,
     this.showCompany = false,
@@ -1351,9 +1631,10 @@ class _PersistentAppSettings {
           : null,
       showTime: map['showTime'] is bool ? map['showTime'] as bool : true,
       showAddress:
-          map['showAddress'] is bool ? map['showAddress'] as bool : false,
-      customAddress:
-          map['customAddress'] is String ? map['customAddress'] as String : '',
+          map['showAddress'] is bool ? map['showAddress'] as bool : true,
+      customAddress: map['customAddress'] is String
+          ? map['customAddress'] as String
+          : '',
       showCoords: map['showCoords'] is bool ? map['showCoords'] as bool : false,
       showCompany:
           map['showCompany'] is bool ? map['showCompany'] as bool : false,
@@ -1782,13 +2063,21 @@ class _PermanentDeleteService {
     }
   }
 
-  static Future<int> deleteFilesPermanently(List<String> filePaths) async {
-    final List<String> cleanPaths = filePaths
-        .map((e) => e.trim())
+  static Future<int> deleteSourcesPermanently(
+    List<_MediaSourceRef> sources,
+  ) async {
+    final List<String> cleanPaths = sources
+        .map((e) => e.path.trim())
         .where((e) => e.isNotEmpty)
         .toSet()
         .toList();
-    if (cleanPaths.isEmpty) return 0;
+    final List<String> cleanUris = sources
+        .map((e) => e.contentUri.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+
+    if (cleanPaths.isEmpty && cleanUris.isEmpty) return 0;
 
     if (Platform.isAndroid) {
       try {
@@ -1805,7 +2094,10 @@ class _PermanentDeleteService {
       try {
         final dynamic nativeRes = await _mediaStoreChannel.invokeMethod(
           'deletePermanently',
-          {'paths': remainingPaths},
+          {
+            'paths': cleanPaths,
+            'contentUris': cleanUris,
+          },
         ).timeout(const Duration(seconds: 12));
         if (nativeRes is Map) {
           deletedCount += (nativeRes['deletedCount'] as num?)?.toInt() ?? 0;
@@ -1818,7 +2110,7 @@ class _PermanentDeleteService {
                   .toList()
               : const [];
         } else if (nativeRes is bool && nativeRes) {
-          deletedCount += remainingPaths.length;
+          deletedCount += max(cleanPaths.length, cleanUris.length);
           remainingPaths = const [];
         }
       } catch (e) {
@@ -2941,7 +3233,7 @@ class _CameraScreenState extends State<CameraScreen>
   DateTime _systemNow = DateTime.now();
   Timer? _clockTimer;
 
-  bool _showAddress = false;
+  bool _showAddress = true;
   String _customAddress = '';
 
   bool _showCoords = false;
@@ -5011,7 +5303,7 @@ class _AlbumFolderItem {
   final String? bucketId;
   final String title;
   final String relativePath;
-  final String coverPath;
+  final _MediaSourceRef coverSource;
   final int count;
   final bool isAllVirtual;
 
@@ -5019,7 +5311,7 @@ class _AlbumFolderItem {
     required this.bucketId,
     required this.title,
     required this.relativePath,
-    required this.coverPath,
+    required this.coverSource,
     required this.count,
     this.isAllVirtual = false,
   });
@@ -5102,12 +5394,12 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
       try {
         await _mediaStoreChannel
             .invokeMethod('requestMediaPermissions')
-            .timeout(const Duration(seconds: 4));
+            .timeout(const Duration(seconds: 5));
       } catch (_) {}
     }
 
     int totalAllCount = 0;
-    String latestAllCover = '';
+    _MediaSourceRef latestAllCover = const _MediaSourceRef();
     final List<_AlbumFolderItem> parsedFolders = [];
 
     if (Platform.isAndroid) {
@@ -5117,8 +5409,15 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
             .timeout(const Duration(seconds: 12));
         if (rawRes is Map) {
           totalAllCount = (rawRes['totalAllCount'] as num?)?.toInt() ?? 0;
-          latestAllCover =
+          final String allCoverPath =
               rawRes['latestAllCoverPath']?.toString().trim() ?? '';
+          final String allCoverUri =
+              rawRes['latestAllCoverUri']?.toString().trim() ?? '';
+          latestAllCover = _MediaSourceRef(
+            path: allCoverPath,
+            contentUri: allCoverUri,
+          );
+
           final dynamic rawList = rawRes['folders'];
           if (rawList is List) {
             for (final entry in rawList) {
@@ -5128,17 +5427,23 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
                   entry['bucketName']?.toString().trim() ?? '';
               final String rel =
                   entry['relativePath']?.toString().trim() ?? '';
-              final String cover =
+              final String coverPath =
                   entry['coverPath']?.toString().trim() ?? '';
+              final String coverUri =
+                  entry['coverUri']?.toString().trim() ?? '';
               final int cnt = (entry['count'] as num?)?.toInt() ?? 0;
-              if (bId.isEmpty || cnt <= 0 || cover.isEmpty) continue;
+              final _MediaSourceRef coverRef = _MediaSourceRef(
+                path: coverPath,
+                contentUri: coverUri,
+              );
+              if (bId.isEmpty || cnt <= 0 || !coverRef.isValid) continue;
 
               parsedFolders.add(
                 _AlbumFolderItem(
                   bucketId: bId,
                   title: _localizeFolderTitle(bName, rel),
                   relativePath: rel,
-                  coverPath: cover,
+                  coverSource: coverRef,
                   count: cnt,
                 ),
               );
@@ -5153,13 +5458,13 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
     final List<_AlbumFolderItem> primary = [];
     final List<_AlbumFolderItem> others = [];
 
-    if (totalAllCount > 0 && latestAllCover.isNotEmpty) {
+    if (totalAllCount > 0 && latestAllCover.isValid) {
       primary.add(
         _AlbumFolderItem(
           bucketId: null,
           title: 'Semua',
           relativePath: '',
-          coverPath: latestAllCover,
+          coverSource: latestAllCover,
           count: totalAllCount,
           isAllVirtual: true,
         ),
@@ -5211,8 +5516,6 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
   }
 
   Widget _buildFolderCard(_AlbumFolderItem item) {
-    final File coverFile = File(item.coverPath);
-
     return GestureDetector(
       onTap: () => unawaited(_openFolder(item)),
       child: Column(
@@ -5224,13 +5527,12 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
               child: Container(
                 width: double.infinity,
                 color: const Color(0xFF1A1D24),
-                child: Image.file(
-                  coverFile,
+                child: _SmartMediaImage(
+                  source: item.coverSource,
                   cacheWidth: 280,
                   filterQuality: FilterQuality.low,
                   fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const Center(
+                  errorBuilder: (_) => const Center(
                     child: Icon(
                       Icons.folder_outlined,
                       color: Colors.white54,
@@ -5390,11 +5692,11 @@ class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
 }
 
 class _MediaEntry {
-  final File file;
+  final _MediaSourceRef source;
   final DateTime modified;
 
   const _MediaEntry({
-    required this.file,
+    required this.source,
     required this.modified,
   });
 }
@@ -5524,7 +5826,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   double _cachedViewportWidth = 390.0;
 
   bool _selectionMode = false;
-  final List<String> _selectedPaths = [];
+  final List<_MediaSourceRef> _selectedSources = [];
 
   final ValueNotifier<double> _scrubFractionNotifier =
       ValueNotifier<double>(0.0);
@@ -5542,6 +5844,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     '.webp',
     '.heic',
     '.heif',
+    '.dng',
+    '.bmp',
+    '.gif',
   };
 
   String get _bucketCacheKey =>
@@ -5577,7 +5882,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     setState(() {
       _selectionMode = !_selectionMode;
       if (!_selectionMode) {
-        _selectedPaths.clear();
+        _selectedSources.clear();
       }
       _scrubDraggingNotifier.value = false;
       _scrubDatePillNotifier.value = null;
@@ -5585,11 +5890,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     });
   }
 
-  void _enterSelectionWithPath(String path) {
+  void _enterSelectionWithSource(_MediaSourceRef src) {
     setState(() {
       _selectionMode = true;
-      if (!_selectedPaths.contains(path)) {
-        _selectedPaths.add(path);
+      if (!_selectedSources.contains(src)) {
+        _selectedSources.add(src);
       }
       _scrubDraggingNotifier.value = false;
       _scrubDatePillNotifier.value = null;
@@ -5597,28 +5902,29 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     });
   }
 
-  void _toggleSelectPath(String path) {
+  void _toggleSelectSource(_MediaSourceRef src) {
     setState(() {
-      final int idx = _selectedPaths.indexOf(path);
+      final int idx = _selectedSources.indexOf(src);
       if (idx != -1) {
-        _selectedPaths.removeAt(idx);
+        _selectedSources.removeAt(idx);
       } else {
-        _selectedPaths.add(path);
+        _selectedSources.add(src);
       }
     });
   }
 
   Future<void> _openCollageStageFromSelection() async {
-    final int count = _selectedPaths.length;
+    final int count = _selectedSources.length;
     if (count < _minCollagePhotos || count > _maxCollagePhotos) {
       return;
     }
-    final List<File> chosenFiles = _selectedPaths.map((p) => File(p)).toList();
+    final List<_MediaSourceRef> chosenSources =
+        List<_MediaSourceRef>.from(_selectedSources);
 
     final bool? savedNew = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => _CollageStagePreviewScreen(
-          selectedFiles: chosenFiles,
+          selectedSources: chosenSources,
           initialConfig: _config,
         ),
       ),
@@ -5627,7 +5933,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (!mounted) return;
     setState(() {
       _selectionMode = false;
-      _selectedPaths.clear();
+      _selectedSources.clear();
     });
 
     if (savedNew == true) {
@@ -5637,8 +5943,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Future<void> _deleteSelectedPermanently() async {
-    if (_selectedPaths.isEmpty || _isDeleting) return;
-    final List<String> targets = _selectedPaths.toList();
+    if (_selectedSources.isEmpty || _isDeleting) return;
+    final List<_MediaSourceRef> targets =
+        List<_MediaSourceRef>.from(_selectedSources);
     final bool ok =
         await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
       context,
@@ -5648,7 +5955,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     setState(() => _isDeleting = true);
     final int deleted =
-        await _PermanentDeleteService.deleteFilesPermanently(targets);
+        await _PermanentDeleteService.deleteSourcesPermanently(targets);
     if (deleted > 0) {
       _LatestPhotosGridScreen.invalidateBucketCache(widget.bucketId);
       await _loadAllPhotos(forceRefresh: true);
@@ -5659,7 +5966,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       _isDeleting = false;
       if (deleted > 0) {
         _selectionMode = false;
-        _selectedPaths.clear();
+        _selectedSources.clear();
       }
     });
 
@@ -5899,11 +6206,25 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     return false;
   }
 
+  bool _isSupportedMediaItem({
+    required String path,
+    required String contentUri,
+    required String mimeType,
+    required String displayName,
+  }) {
+    final String lowerMime = mimeType.toLowerCase().trim();
+    if (lowerMime.startsWith('image/')) return true;
+    if (contentUri.isNotEmpty) return true;
+    if (_isPhotoFile(path)) return true;
+    if (displayName.isNotEmpty && _isPhotoFile(displayName)) return true;
+    return false;
+  }
+
   Future<void> _ensureMediaPermissions() async {
     if (!Platform.isAndroid) return;
     try {
       await _mediaStoreChannel.invokeMethod('requestMediaPermissions').timeout(
-            const Duration(seconds: 4),
+            const Duration(seconds: 5),
           );
     } catch (e) {
       debugPrint('requestMediaPermissions belum tersedia/gagal: $e');
@@ -5954,10 +6275,16 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
         }
         final item = rawItems[i];
         String path = '';
+        String contentUri = '';
+        String displayName = '';
+        String mimeType = '';
         DateTime mod = nowFallback;
 
         if (item is Map) {
           path = item['path']?.toString().trim() ?? '';
+          contentUri = item['contentUri']?.toString().trim() ?? '';
+          displayName = item['displayName']?.toString().trim() ?? '';
+          mimeType = item['mimeType']?.toString().trim() ?? '';
           final num? sec = item['dateModified'] as num?;
           if (sec != null && sec > 0) {
             mod = DateTime.fromMillisecondsSinceEpoch(
@@ -5968,11 +6295,26 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
           path = item?.toString().trim() ?? '';
         }
 
-        if (path.isEmpty || !_isPhotoFile(path) || seen.contains(path)) {
+        if (!_isSupportedMediaItem(
+          path: path,
+          contentUri: contentUri,
+          mimeType: mimeType,
+          displayName: displayName,
+        )) {
           continue;
         }
-        seen.add(path);
-        results.add(_MediaEntry(file: File(path), modified: mod));
+
+        final _MediaSourceRef srcRef = _MediaSourceRef(
+          path: path,
+          contentUri: contentUri,
+          displayName: displayName,
+          mimeType: mimeType,
+        );
+        if (!srcRef.isValid || seen.contains(srcRef.uniqueKey)) {
+          continue;
+        }
+        seen.add(srcRef.uniqueKey);
+        results.add(_MediaEntry(source: srcRef, modified: mod));
       }
 
       return _MediaQueryBatchResult(
@@ -6030,7 +6372,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             }
             allEntries.add(
               _MediaEntry(
-                file: entity,
+                source: _MediaSourceRef(path: entity.path),
                 modified: nowFallback,
               ),
             );
@@ -6176,14 +6518,15 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Future<void> _openPhotoWatermarkEditorAtIndex(int initialIndex) async {
-    final List<File> allFiles = _entries.map((e) => e.file).toList();
-    if (allFiles.isEmpty) return;
+    final List<_MediaSourceRef> allSources =
+        _entries.map((e) => e.source).toList();
+    if (allSources.isEmpty) return;
 
     final bool? changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => _GalleryWatermarkEditorScreen(
-          photoFiles: allFiles,
-          initialIndex: initialIndex.clamp(0, allFiles.length - 1),
+          photoSources: allSources,
+          initialIndex: initialIndex.clamp(0, allSources.length - 1),
           initialConfig: _config,
           onConfigUpdated: (updatedCfg) {
             if (!mounted) return;
@@ -6351,11 +6694,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   Widget _buildSelectionActionBar() {
-    if (!_selectionMode || _selectedPaths.isEmpty) {
+    if (!_selectionMode || _selectedSources.isEmpty) {
       return const SizedBox.shrink();
     }
 
-    final int count = _selectedPaths.length;
+    final int count = _selectedSources.length;
     final bool overCollageLimit = count > _maxCollagePhotos;
     final bool canCollage =
         count >= _minCollagePhotos && count <= _maxCollagePhotos;
@@ -6531,9 +6874,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
               ),
         title: Text(
           _selectionMode
-              ? (_selectedPaths.isEmpty
+              ? (_selectedSources.isEmpty
                   ? 'Pilih Foto (2–6 Kolase / Hapus)'
-                  : '${_selectedPaths.length} Dipilih')
+                  : '${_selectedSources.length} Dipilih')
               : '${widget.folderTitle} ($total)',
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
@@ -6648,20 +6991,20 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                     final entry = sec.entries[localIdx];
                                     final int globalIdx =
                                         sec.startGlobalIndex + localIdx;
-                                    final String path = entry.file.path;
+                                    final _MediaSourceRef src = entry.source;
                                     final int selOrder =
-                                        _selectedPaths.indexOf(path);
+                                        _selectedSources.indexOf(src);
                                     final bool isSelected = selOrder != -1;
 
                                     return GestureDetector(
                                       onLongPress: () {
                                         if (!_selectionMode) {
-                                          _enterSelectionWithPath(path);
+                                          _enterSelectionWithSource(src);
                                         }
                                       },
                                       onTap: () {
                                         if (_selectionMode) {
-                                          _toggleSelectPath(path);
+                                          _toggleSelectSource(src);
                                         } else {
                                           _openPhotoWatermarkEditorAtIndex(
                                             globalIdx,
@@ -6673,14 +7016,12 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                         children: [
                                           Container(
                                             color: const Color(0xFF1A1D24),
-                                            child: Image.file(
-                                              entry.file,
+                                            child: _SmartMediaImage(
+                                              source: src,
                                               cacheWidth: 260,
                                               filterQuality: FilterQuality.low,
                                               fit: BoxFit.cover,
-                                              gaplessPlayback: true,
-                                              errorBuilder: (_, __, ___) =>
-                                                  const Center(
+                                              errorBuilder: (_) => const Center(
                                                 child: Icon(
                                                   Icons.broken_image_outlined,
                                                   color: Colors.white38,
@@ -6771,11 +7112,11 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 }
 
 class _CollageStagePreviewScreen extends StatefulWidget {
-  final List<File> selectedFiles;
+  final List<_MediaSourceRef> selectedSources;
   final _WatermarkConfig initialConfig;
 
   const _CollageStagePreviewScreen({
-    required this.selectedFiles,
+    required this.selectedSources,
     required this.initialConfig,
   });
 
@@ -6788,7 +7129,7 @@ class _CollageStagePreviewScreenState
     extends State<_CollageStagePreviewScreen> {
   final Random _random = Random();
 
-  late List<File> _slotFiles;
+  late List<_MediaSourceRef> _slotSources;
   late List<Offset> _slotPans;
   late List<double> _slotAspectRatios;
   late CollageLayoutId _selectedLayout;
@@ -6816,11 +7157,11 @@ class _CollageStagePreviewScreenState
   @override
   void initState() {
     super.initState();
-    _slotFiles = List<File>.from(widget.selectedFiles);
-    _slotPans = List<Offset>.filled(_slotFiles.length, Offset.zero);
-    _slotAspectRatios = List<double>.filled(_slotFiles.length, 3.0 / 4.0);
+    _slotSources = List<_MediaSourceRef>.from(widget.selectedSources);
+    _slotPans = List<Offset>.filled(_slotSources.length, Offset.zero);
+    _slotAspectRatios = List<double>.filled(_slotSources.length, 3.0 / 4.0);
     _selectedLayout =
-        _CollageLayoutCatalog.defaultForCount(_slotFiles.length).id;
+        _CollageLayoutCatalog.defaultForCount(_slotSources.length).id;
     _config = widget.initialConfig;
     _stampDateTime = _config.isManualTime
         ? _config.manualDateTime
@@ -6829,13 +7170,15 @@ class _CollageStagePreviewScreenState
   }
 
   Future<void> _detectInitialImageAspects() async {
-    final List<File> filesSnapshot = List<File>.from(_slotFiles);
+    final List<_MediaSourceRef> sourcesSnapshot =
+        List<_MediaSourceRef>.from(_slotSources);
     final List<double> detected = List<double>.from(_slotAspectRatios);
 
-    for (int i = 0; i < filesSnapshot.length; i++) {
+    for (int i = 0; i < sourcesSnapshot.length; i++) {
       try {
-        if (!await filesSnapshot[i].exists()) continue;
-        final Uint8List bytes = await filesSnapshot[i].readAsBytes();
+        final Uint8List? bytes =
+            await _AndroidMediaReader.readFullBytes(sourcesSnapshot[i]);
+        if (bytes == null || bytes.isEmpty) continue;
         final _ImageAspectInfo? info =
             await compute(_inspectAspectFromBytesIsolate, bytes);
         if (info != null &&
@@ -6861,14 +7204,14 @@ class _CollageStagePreviewScreenState
     if (fromIdx == toIdx ||
         fromIdx < 0 ||
         toIdx < 0 ||
-        fromIdx >= _slotFiles.length ||
-        toIdx >= _slotFiles.length) {
+        fromIdx >= _slotSources.length ||
+        toIdx >= _slotSources.length) {
       return;
     }
     setState(() {
-      final File tmpFile = _slotFiles[fromIdx];
-      _slotFiles[fromIdx] = _slotFiles[toIdx];
-      _slotFiles[toIdx] = tmpFile;
+      final _MediaSourceRef tmpSource = _slotSources[fromIdx];
+      _slotSources[fromIdx] = _slotSources[toIdx];
+      _slotSources[toIdx] = tmpSource;
 
       final Offset tmpPan = _slotPans[fromIdx];
       _slotPans[fromIdx] = _slotPans[toIdx];
@@ -6931,7 +7274,7 @@ class _CollageStagePreviewScreenState
   }
 
   Future<void> _saveHighResCollage() async {
-    if (_isSaving || _slotFiles.isEmpty) return;
+    if (_isSaving || _slotSources.isEmpty) return;
     setState(() => _isSaving = true);
 
     String? tempOutPath;
@@ -6963,10 +7306,12 @@ class _CollageStagePreviewScreenState
           List<Uint8List?>.filled(outSlots.length, null);
 
       for (final slot in outSlots) {
-        if (slot.index >= _slotFiles.length) continue;
-        final File f = _slotFiles[slot.index];
-        if (!await f.exists()) continue;
-        final Uint8List rawBytes = await f.readAsBytes();
+        if (slot.index >= _slotSources.length) continue;
+        final _MediaSourceRef src = _slotSources[slot.index];
+        final Uint8List? rawBytes =
+            await _AndroidMediaReader.readFullBytes(src);
+        if (rawBytes == null || rawBytes.isEmpty) continue;
+
         final Offset pan = slot.index < _slotPans.length
             ? _slotPans[slot.index]
             : Offset.zero;
@@ -7150,7 +7495,7 @@ class _CollageStagePreviewScreenState
   @override
   Widget build(BuildContext context) {
     final List<_CollageLayoutDef> availableLayouts =
-        _CollageLayoutCatalog.layoutsForCount(_slotFiles.length);
+        _CollageLayoutCatalog.layoutsForCount(_slotSources.length);
     final _CollageLayoutDef currentDef =
         _CollageLayoutCatalog.findById(_selectedLayout);
 
@@ -7159,7 +7504,7 @@ class _CollageStagePreviewScreenState
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: Text(
-          'Kolase (${_slotFiles.length} Foto)',
+          'Kolase (${_slotSources.length} Foto)',
           style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
         ),
         actions: [
@@ -7192,44 +7537,47 @@ class _CollageStagePreviewScreenState
       body: Column(
         children: [
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-              child: LayoutBuilder(
-                builder: (context, outerBox) {
-                  final double ar =
-                      _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
-                    layoutId: currentDef.id,
-                    slotAspectRatios: _slotAspectRatios,
-                    canvasW: max(120.0, outerBox.maxWidth),
-                    gap: _gap,
-                    outerPadding: _outerPadding,
-                  );
-                  double canvasW = outerBox.maxWidth;
-                  double canvasH = canvasW / ar;
-                  if (canvasH > outerBox.maxHeight) {
-                    canvasH = outerBox.maxHeight;
-                    canvasW = canvasH * ar;
-                  }
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: LayoutBuilder(
+                  builder: (context, outerBox) {
+                    final double maxW = outerBox.maxWidth;
+                    final double maxH = outerBox.maxHeight;
+                    final double adaptiveAspect =
+                        _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
+                      layoutId: _selectedLayout,
+                      slotAspectRatios: _slotAspectRatios,
+                      canvasW: maxW,
+                      gap: _gap,
+                      outerPadding: _outerPadding,
+                    );
 
-                  final List<_CollageSlotRect> slots =
-                      _CollageLayoutCatalog.computeSlots(
-                    layoutId: currentDef.id,
-                    canvasW: canvasW,
-                    canvasH: canvasH,
-                    gap: _gap,
-                    outerPadding: _outerPadding,
-                    slotAspectRatios: _slotAspectRatios,
-                  );
+                    double canvasW = maxW;
+                    double canvasH = canvasW / adaptiveAspect;
+                    if (canvasH > maxH) {
+                      canvasH = maxH;
+                      canvasW = canvasH * adaptiveAspect;
+                    }
 
-                  return Center(
-                    child: Container(
+                    final List<_CollageSlotRect> slots =
+                        _CollageLayoutCatalog.computeSlots(
+                      layoutId: _selectedLayout,
+                      canvasW: canvasW,
+                      canvasH: canvasH,
+                      gap: _gap,
+                      outerPadding: _outerPadding,
+                      slotAspectRatios: _slotAspectRatios,
+                    );
+
+                    return Container(
                       width: canvasW,
                       height: canvasH,
                       decoration: BoxDecoration(
                         color: _bgColor,
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.5),
+                            color: Colors.black.withValues(alpha: 0.6),
                             blurRadius: 12,
                           ),
                         ],
@@ -7237,90 +7585,119 @@ class _CollageStagePreviewScreenState
                       child: Stack(
                         children: [
                           for (final slot in slots)
-                            Positioned(
-                              left: slot.x,
-                              top: slot.y,
-                              width: slot.w,
-                              height: slot.h,
-                              child: DragTarget<int>(
-                                onWillAcceptWithDetails: (details) =>
-                                    details.data != slot.index,
-                                onAcceptWithDetails: (details) =>
-                                    _swapSlots(details.data, slot.index),
-                                builder: (ctx, candidateData, rejectedData) {
-                                  final bool isDropTarget =
-                                      candidateData.isNotEmpty;
-                                  final bool isActive =
-                                      _activeSlotIndex == slot.index;
-                                  final Offset pan =
-                                      slot.index < _slotPans.length
-                                          ? _slotPans[slot.index]
-                                          : Offset.zero;
+                            if (slot.index < _slotSources.length)
+                              Positioned(
+                                left: slot.x,
+                                top: slot.y,
+                                width: slot.w,
+                                height: slot.h,
+                                child: DragTarget<int>(
+                                  onWillAcceptWithDetails: (details) =>
+                                      details.data != slot.index,
+                                  onAcceptWithDetails: (details) =>
+                                      _swapSlots(details.data, slot.index),
+                                  builder: (ctx, candidateData, rejectedData) {
+                                    final bool isDropTarget =
+                                        candidateData.isNotEmpty;
+                                    final bool isActive =
+                                        _activeSlotIndex == slot.index;
+                                    final Offset pan =
+                                        slot.index < _slotPans.length
+                                            ? _slotPans[slot.index]
+                                            : Offset.zero;
+                                    final _MediaSourceRef src =
+                                        _slotSources[slot.index];
 
-                                  return LongPressDraggable<int>(
-                                    data: slot.index,
-                                    feedback: Material(
-                                      color: Colors.transparent,
-                                      child: SizedBox(
-                                        width: slot.w * 0.72,
-                                        height: slot.h * 0.72,
+                                    return LongPressDraggable<int>(
+                                      data: slot.index,
+                                      feedback: Material(
+                                        color: Colors.transparent,
                                         child: Opacity(
                                           opacity: 0.85,
-                                          child: Image.file(
-                                            _slotFiles[slot.index],
-                                            cacheWidth: 320,
-                                            fit: BoxFit.cover,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                    child: GestureDetector(
-                                      onTap: () {
-                                        setState(
-                                          () => _activeSlotIndex = slot.index,
-                                        );
-                                      },
-                                      onPanUpdate: (details) =>
-                                          _handleSlotPanUpdate(
-                                        slot.index,
-                                        details,
-                                        slot.w,
-                                        slot.h,
-                                      ),
-                                      child: Container(
-                                        decoration: BoxDecoration(
-                                          border: isDropTarget
-                                              ? Border.all(
-                                                  color:
-                                                      const Color(0xFFFFD000),
-                                                  width: 3,
-                                                )
-                                              : (isActive
-                                                  ? Border.all(
-                                                      color: const Color(
-                                                        0xFFFFD000,
-                                                      ),
-                                                      width: 1.8,
-                                                    )
-                                                  : null),
-                                        ),
-                                        child: ClipRect(
-                                          child: Image.file(
-                                            _slotFiles[slot.index],
-                                            cacheWidth: 720,
-                                            fit: BoxFit.cover,
-                                            alignment: Alignment(
-                                              pan.dx,
-                                              pan.dy,
+                                          child: Container(
+                                            width: min(slot.w, 120),
+                                            height: min(slot.h, 120),
+                                            decoration: BoxDecoration(
+                                              border: Border.all(
+                                                color: const Color(0xFFFFD000),
+                                                width: 2.5,
+                                              ),
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                            ),
+                                            child: ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(6),
+                                              child: _SmartMediaImage(
+                                                source: src,
+                                                cacheWidth: 260,
+                                                fit: BoxFit.cover,
+                                              ),
                                             ),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                  );
-                                },
+                                      childWhenDragging: Container(
+                                        color: Colors.black26,
+                                        child: const Center(
+                                          child: Icon(
+                                            Icons.swap_horiz,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      ),
+                                      child: GestureDetector(
+                                        onTap: () {
+                                          setState(() =>
+                                              _activeSlotIndex = slot.index);
+                                        },
+                                        onPanUpdate: (details) =>
+                                            _handleSlotPanUpdate(
+                                          slot.index,
+                                          details,
+                                          slot.w,
+                                          slot.h,
+                                        ),
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            ClipRect(
+                                              child: _SmartMediaImage(
+                                                source: src,
+                                                cacheWidth: 720,
+                                                fit: BoxFit.cover,
+                                                alignment:
+                                                    Alignment(pan.dx, pan.dy),
+                                                filterQuality:
+                                                    FilterQuality.medium,
+                                              ),
+                                            ),
+                                            if (isDropTarget || isActive)
+                                              IgnorePointer(
+                                                child: Container(
+                                                  decoration: BoxDecoration(
+                                                    border: Border.all(
+                                                      color: isDropTarget
+                                                          ? const Color(
+                                                              0xFFFFD000,
+                                                            )
+                                                          : const Color(
+                                                              0xFF38BDF8,
+                                                            ),
+                                                      width: isDropTarget
+                                                          ? 3.0
+                                                          : 2.0,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
                               ),
-                            ),
                           if (_applyStamp)
                             Positioned(
                               left: 0,
@@ -7338,17 +7715,10 @@ class _CollageStagePreviewScreenState
                             ),
                         ],
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
-            ),
-          ),
-          const Padding(
-            padding: EdgeInsets.only(bottom: 4),
-            child: Text(
-              'Geser foto untuk atur posisi • Tahan & seret untuk tukar kotak',
-              style: TextStyle(color: Colors.white54, fontSize: 11),
             ),
           ),
           Container(
@@ -7356,131 +7726,204 @@ class _CollageStagePreviewScreenState
               color: Color(0xFF161920),
               borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
             ),
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-            child: SafeArea(
-              top: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    height: 66,
-                    child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: availableLayouts.length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 10),
-                      itemBuilder: (ctx, idx) {
-                        final def = availableLayouts[idx];
-                        final bool isSel = def.id == _selectedLayout;
-                        return GestureDetector(
-                          onTap: () => setState(() => _selectedLayout = def.id),
-                          child: _buildLayoutThumbIcon(def, isSel),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      const SizedBox(
-                        width: 58,
-                        child: Text(
-                          'Jarak',
-                          style: TextStyle(color: Colors.white70, fontSize: 12),
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Tata Letak: ${currentDef.label}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      Expanded(
+                    ),
+                    const Text(
+                      'Geser foto / tahan untuk tukar',
+                      style: TextStyle(color: Colors.white54, fontSize: 11),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 66,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: availableLayouts.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (ctx, idx) {
+                      final def = availableLayouts[idx];
+                      final bool isSel = def.id == _selectedLayout;
+                      return GestureDetector(
+                        onTap: () => setState(() => _selectedLayout = def.id),
+                        child: _buildLayoutThumbIcon(def, isSel),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const SizedBox(
+                      width: 62,
+                      child: Text(
+                        'Jarak',
+                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                      ),
+                    ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 7,
+                          ),
+                        ),
                         child: Slider(
                           value: _gap,
-                          min: 0,
-                          max: 18,
+                          min: 0.0,
+                          max: 20.0,
                           activeColor: const Color(0xFFFFD000),
                           onChanged: (v) => setState(() => _gap = v),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      const SizedBox(
-                        width: 44,
-                        child: Text(
-                          'Tepi',
-                          style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                    SizedBox(
+                      width: 34,
+                      child: Text(
+                        '${_gap.round()}',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
                         ),
                       ),
-                      Expanded(
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const SizedBox(
+                      width: 62,
+                      child: Text(
+                        'Bingkai',
+                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                      ),
+                    ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 7,
+                          ),
+                        ),
                         child: Slider(
                           value: _outerPadding,
-                          min: 0,
-                          max: 24,
+                          min: 0.0,
+                          max: 24.0,
                           activeColor: const Color(0xFFFFD000),
                           onChanged: (v) => setState(() => _outerPadding = v),
                         ),
                       ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      const Text(
-                        'Latar:',
-                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                    SizedBox(
+                      width: 34,
+                      child: Text(
+                        '${_outerPadding.round()}',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: SizedBox(
-                          height: 28,
-                          child: ListView.separated(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: _bgSwatches.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 8),
-                            itemBuilder: (ctx, i) {
-                              final c = _bgSwatches[i];
-                              final bool sel = _bgColor == c;
-                              return GestureDetector(
-                                onTap: () => setState(() => _bgColor = c),
-                                child: Container(
-                                  width: 26,
-                                  height: 26,
-                                  decoration: BoxDecoration(
-                                    color: c,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: sel
-                                          ? const Color(0xFFFFD000)
-                                          : Colors.white38,
-                                      width: sel ? 2.5 : 1.0,
-                                    ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Text(
+                      'Latar:',
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: _bgSwatches.map((c) {
+                            final bool isSel = _bgColor == c;
+                            return GestureDetector(
+                              onTap: () => setState(() => _bgColor = c),
+                              child: Container(
+                                width: 24,
+                                height: 24,
+                                margin: const EdgeInsets.only(right: 8),
+                                decoration: BoxDecoration(
+                                  color: c,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: isSel
+                                        ? const Color(0xFFFFD000)
+                                        : Colors.white38,
+                                    width: isSel ? 2.5 : 1.0,
                                   ),
                                 ),
-                              );
-                            },
-                          ),
+                              ),
+                            );
+                          }).toList(),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      FilterChip(
-                        selected: _applyStamp,
-                        label: Text(
-                          _applyStamp ? 'Stempel ON' : 'Stempel OFF',
-                          style: const TextStyle(fontSize: 11),
+                    ),
+                    const SizedBox(width: 6),
+                    InkWell(
+                      onTap: _pickStampDateTime,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 5,
                         ),
-                        onSelected: (v) => setState(() => _applyStamp = v),
+                        decoration: BoxDecoration(
+                          color: Colors.white10,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.schedule,
+                              size: 14,
+                              color: Color(0xFFFFD000),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _StampRenderer.formatJamMenit(_stampDateTime),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      if (_applyStamp) ...[
-                        const SizedBox(width: 4),
-                        IconButton(
-                          onPressed: _pickStampDateTime,
-                          icon: const Icon(
-                            Icons.edit_calendar,
-                            size: 19,
-                            color: Color(0xFFFFD000),
-                          ),
-                          visualDensity: VisualDensity.compact,
-                          tooltip: 'Ubah Tanggal & Jam Stempel',
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
-              ),
+                    ),
+                    const SizedBox(width: 4),
+                    Switch(
+                      value: _applyStamp,
+                      activeTrackColor: const Color(0xFFFFD000),
+                      onChanged: (v) => setState(() => _applyStamp = v),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
         ],
@@ -7490,13 +7933,13 @@ class _CollageStagePreviewScreenState
 }
 
 class _GalleryWatermarkEditorScreen extends StatefulWidget {
-  final List<File> photoFiles;
+  final List<_MediaSourceRef> photoSources;
   final int initialIndex;
   final _WatermarkConfig initialConfig;
   final ValueChanged<_WatermarkConfig> onConfigUpdated;
 
   const _GalleryWatermarkEditorScreen({
-    required this.photoFiles,
+    required this.photoSources,
     required this.initialIndex,
     required this.initialConfig,
     required this.onConfigUpdated,
@@ -7512,107 +7955,62 @@ class _GalleryWatermarkEditorScreenState
   final ImagePicker _picker = ImagePicker();
   final Random _random = Random();
 
+  late List<_MediaSourceRef> _sources;
   late PageController _pageController;
-  late List<File> _files;
   late int _currentIndex;
   late _WatermarkConfig _config;
   late DateTime _stampDateTime;
-  bool _isStampingMode = false;
+  bool _isStampPanelOpen = false;
   bool _isSaving = false;
   bool _isDeleting = false;
-  bool _hasAnyChange = false;
+  bool _hasChanges = false;
+  double _currentPhotoAspectRatio = 3.0 / 4.0;
+  int _aspectDetectGeneration = 0;
 
-  final Map<int, double> _aspectCache = {};
-  final Set<int> _pendingAspectLoads = {};
+  _MediaSourceRef get _currentPhotoSource => _sources[_currentIndex];
 
   @override
   void initState() {
     super.initState();
-    _files = List<File>.from(widget.photoFiles);
-    _currentIndex = widget.initialIndex.clamp(0, max(0, _files.length - 1));
+    _sources = List<_MediaSourceRef>.from(widget.photoSources);
+    _currentIndex = widget.initialIndex.clamp(0, _sources.length - 1);
     _pageController = PageController(initialPage: _currentIndex);
     _config = widget.initialConfig;
     _stampDateTime = _config.isManualTime
         ? _config.manualDateTime
         : DateTime.now();
-    _ensureAspectCached(_currentIndex);
-    if (_currentIndex + 1 < _files.length) {
-      _ensureAspectCached(_currentIndex + 1);
-    }
-    if (_currentIndex - 1 >= 0) {
-      _ensureAspectCached(_currentIndex - 1);
-    }
+    _detectPhotoAspectRatio(_currentPhotoSource);
   }
 
-  void _ensureAspectCached(int index) {
-    if (index < 0 || index >= _files.length) return;
-    if (_aspectCache.containsKey(index) || _pendingAspectLoads.contains(index)) {
-      return;
-    }
-    _pendingAspectLoads.add(index);
-    final File f = _files[index];
-    unawaited(() async {
-      try {
-        if (!await f.exists()) return;
-        final Uint8List bytes = await f.readAsBytes();
-        final _ImageAspectInfo? info =
-            await compute(_inspectAspectFromBytesIsolate, bytes);
-        if (info != null &&
-            info.aspectRatio.isFinite &&
-            info.aspectRatio > 0.05 &&
-            info.aspectRatio < 20.0) {
-          _aspectCache[index] = info.aspectRatio;
-          if (mounted) {
-            setState(() {});
-          }
-        }
-      } catch (_) {
-      } finally {
-        _pendingAspectLoads.remove(index);
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _detectPhotoAspectRatio(_MediaSourceRef source) async {
+    final int gen = ++_aspectDetectGeneration;
+    try {
+      final Uint8List? bytes = await _AndroidMediaReader.readFullBytes(source);
+      if (bytes == null || bytes.isEmpty) return;
+      final _ImageAspectInfo? info =
+          await compute(_inspectAspectFromBytesIsolate, bytes);
+      if (!mounted || gen != _aspectDetectGeneration) return;
+      if (info != null && info.width > 0 && info.height > 0) {
+        setState(() {
+          _currentPhotoAspectRatio = info.aspectRatio;
+        });
       }
-    }());
+    } catch (_) {}
   }
 
-  File get _currentFile => _files[_currentIndex];
-
-  void _syncConfig(_WatermarkConfig next) {
-    _config = next;
+  void _updateConfig(_WatermarkConfig next) {
+    setState(() => _config = next);
     widget.onConfigUpdated(next);
-    unawaited(
-      _AppPrefsStore.save(
-        _PersistentAppSettings(
-          showLogo: next.showLogo,
-          logoFilePath: next.logoFilePath,
-          showTime: next.showTime,
-          showAddress: next.showAddress,
-          customAddress: next.customAddress,
-          showCoords: next.showCoords,
-          companyText: next.companyText,
-          showCompany: next.showCompany,
-          personNameText: next.personNameText,
-          showPersonName: next.showPersonName,
-          formSize: next.formSize,
-          textColor: next.textColor,
-          aspectRatio: _AppPrefsStore.current.aspectRatio,
-          qualityPreset: _AppPrefsStore.current.qualityPreset,
-          shutterSoundEnabled: _AppPrefsStore.current.shutterSoundEnabled,
-          gridEnabled: _AppPrefsStore.current.gridEnabled,
-          volumeShutterEnabled: _AppPrefsStore.current.volumeShutterEnabled,
-          saveDualPhotos: _AppPrefsStore.current.saveDualPhotos,
-        ),
-      ),
-    );
-  }
-
-  void _toggleStampOverlayMode() {
-    setState(() {
-      _isStampingMode = !_isStampingMode;
-    });
   }
 
   Future<void> _deleteCurrentPhotoPermanently() async {
-    if (_files.isEmpty || _isDeleting || _isSaving) return;
-    final String targetPath = _currentFile.path;
+    if (_isDeleting || _sources.isEmpty) return;
     final bool ok =
         await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
       context,
@@ -7621,41 +8019,12 @@ class _GalleryWatermarkEditorScreenState
     if (!ok || !mounted) return;
 
     setState(() => _isDeleting = true);
+    final _MediaSourceRef targetSource = _currentPhotoSource;
     final int deleted =
-        await _PermanentDeleteService.deleteFilesPermanently([targetPath]);
+        await _PermanentDeleteService.deleteSourcesPermanently([targetSource]);
+
     if (!mounted) return;
-
-    if (deleted > 0) {
-      _hasAnyChange = true;
-      _files.removeAt(_currentIndex);
-      _aspectCache.clear();
-      _pendingAspectLoads.clear();
-
-      if (_files.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Foto dihapus permanen'),
-            backgroundColor: Colors.green,
-          ),
-        );
-        Navigator.of(context).pop(true);
-        return;
-      }
-
-      if (_currentIndex >= _files.length) {
-        _currentIndex = _files.length - 1;
-      }
-      _pageController.jumpToPage(_currentIndex);
-      _ensureAspectCached(_currentIndex);
-      setState(() => _isDeleting = false);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Foto dihapus permanen'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } else {
+    if (deleted <= 0) {
       setState(() => _isDeleting = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -7663,10 +8032,35 @@ class _GalleryWatermarkEditorScreenState
           backgroundColor: Colors.orange,
         ),
       );
+      return;
     }
+
+    _hasChanges = true;
+    _LatestPhotosGridScreen.resetAllSessionCaches();
+    _sources.removeAt(_currentIndex);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Foto dihapus secara permanen'),
+        backgroundColor: Colors.green,
+      ),
+    );
+
+    if (_sources.isEmpty) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+
+    final int nextIdx = _currentIndex.clamp(0, _sources.length - 1);
+    setState(() {
+      _currentIndex = nextIdx;
+      _isDeleting = false;
+    });
+    _pageController.jumpToPage(nextIdx);
+    _detectPhotoAspectRatio(_sources[nextIdx]);
   }
 
-  Future<void> _pickLogo() async {
+  Future<void> _pickLogoForAlbum() async {
     try {
       final XFile? picked = await _picker.pickImage(
         source: ImageSource.gallery,
@@ -7675,21 +8069,14 @@ class _GalleryWatermarkEditorScreenState
       if (picked != null && mounted) {
         final permanentPath = await _AppPrefsStore.persistLogoFile(picked.path);
         if (!mounted) return;
-        setState(() {
-          _syncConfig(
-            _config.copyWith(
-              logoFilePath: permanentPath,
-              showLogo: true,
-            ),
-          );
-        });
+        _updateConfig(
+          _config.copyWith(logoFilePath: permanentPath, showLogo: true),
+        );
       }
-    } catch (e) {
-      debugPrint('Gagal memilih logo di editor: $e');
-    }
+    } catch (_) {}
   }
 
-  Future<void> _pickDateTime() async {
+  Future<void> _pickDateTimeForAlbum() async {
     final DateTime? pickedDate = await showDatePicker(
       context: context,
       locale: const Locale('id', 'ID'),
@@ -7714,24 +8101,17 @@ class _GalleryWatermarkEditorScreenState
         pickedTime.minute,
         0,
       );
-      _syncConfig(
-        _config.copyWith(
-          showTime: true,
-          isManualTime: true,
-          manualDateTime: _stampDateTime,
-        ),
-      );
     });
   }
 
-  Future<void> _editTextField({
+  Future<void> _showTextEditor({
     required String title,
     required String hint,
     required String initialValue,
-    required ValueChanged<String> onApply,
+    required ValueChanged<String> onSave,
   }) async {
     final ctrl = TextEditingController(text: initialValue);
-    final String? res = await showDialog<String>(
+    final res = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(title),
@@ -7758,11 +8138,11 @@ class _GalleryWatermarkEditorScreenState
     );
     ctrl.dispose();
     if (res != null && mounted) {
-      setState(() => onApply(res.trim()));
+      onSave(res.trim());
     }
   }
 
-  Future<void> _pickSizeAndColor() async {
+  Future<void> _showSizeAndColorDialog() async {
     StampFormSize tempSize = _config.formSize;
     StampTextColor tempColor = _config.textColor;
 
@@ -7798,11 +8178,7 @@ class _GalleryWatermarkEditorScreenState
                     title: Text(item.$2),
                     onTap: () {
                       tempSize = item.$1;
-                      if (mounted) {
-                        setState(() {
-                          _syncConfig(_config.copyWith(formSize: item.$1));
-                        });
-                      }
+                      _updateConfig(_config.copyWith(formSize: item.$1));
                       setDialogState(() {});
                     },
                   ),
@@ -7826,11 +8202,7 @@ class _GalleryWatermarkEditorScreenState
                       label: Text(_StampRenderer.colorLabel(c)),
                       onSelected: (_) {
                         tempColor = c;
-                        if (mounted) {
-                          setState(() {
-                            _syncConfig(_config.copyWith(textColor: c));
-                          });
-                        }
+                        _updateConfig(_config.copyWith(textColor: c));
                         setDialogState(() {});
                       },
                     );
@@ -7857,88 +8229,304 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
-  Future<void> _saveStampedPhotoToGallery() async {
-    if (_isSaving) return;
+  Future<void> _saveStampedCopy() async {
+    if (_isSaving || _isDeleting || _sources.isEmpty) return;
     setState(() => _isSaving = true);
-
-    String? tempStampedPath;
+    String? tempOutPath;
     try {
-      final File srcFile = _currentFile;
-      if (!await srcFile.exists()) {
-        throw Exception('Berkas foto tidak ditemukan');
-      }
-      final Uint8List rawBytes = await srcFile.readAsBytes();
-      if (rawBytes.length < 64) {
-        throw Exception('Berkas foto kosong atau rusak');
+      final Uint8List? rawBytes =
+          await _AndroidMediaReader.readFullBytes(_currentPhotoSource);
+      if (rawBytes == null || rawBytes.isEmpty) {
+        throw Exception('File foto tidak dapat dibaca');
       }
 
-      final _WatermarkConfig activeCfg = _config.copyWith(
-        isManualTime: true,
-        manualDateTime: _stampDateTime,
-      );
-
-      final Uint8List stampedBytes = await _StampRenderer.buildStampedJpgBytes(
+      final Uint8List stampedJpgBytes =
+          await _StampRenderer.buildStampedJpgBytes(
         baseJpgBytes: rawBytes,
         activeDt: _stampDateTime,
-        cfg: activeCfg,
+        cfg: _config.copyWith(
+          isManualTime: true,
+          manualDateTime: _stampDateTime,
+        ),
       );
 
-      final Directory tempDir = await getTemporaryDirectory();
-      final String uniqueId =
+      final dir = await getTemporaryDirectory();
+      final uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
-      tempStampedPath = '${tempDir.path}/album_stamp_$uniqueId.jpg';
-      final File outFile = File(tempStampedPath);
-      await outFile.writeAsBytes(stampedBytes, flush: true);
+      tempOutPath = '${dir.path}/album_stamp_$uniqueId.jpg';
+      final outFile = File(tempOutPath);
+      await outFile.writeAsBytes(stampedJpgBytes, flush: true);
 
       await Gal.putImage(outFile.path);
-      _hasAnyChange = true;
+      _hasChanges = true;
+      _LatestPhotosGridScreen.resetAllSessionCaches();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Foto berstempel berhasil disimpan ke galeri'),
+          content: Text('Foto berstempel berhasil disimpan ke Galeri'),
           backgroundColor: Colors.green,
         ),
       );
-      setState(() => _isStampingMode = false);
+      Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Gagal menyimpan stempel: $e'),
+          content: Text('Gagal menyimpan stempel foto: $e'),
           backgroundColor: Colors.red,
         ),
       );
     } finally {
-      if (tempStampedPath != null) {
+      if (tempOutPath != null) {
         try {
-          final File f = File(tempStampedPath);
+          final f = File(tempOutPath);
           if (await f.exists()) await f.delete();
         } catch (_) {}
       }
-      if (mounted) {
-        setState(() => _isSaving = false);
-      }
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
-  @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
+  String _sizeLabel(StampFormSize s) {
+    switch (s) {
+      case StampFormSize.small:
+        return 'Kecil';
+      case StampFormSize.medium:
+        return 'Sedang';
+      case StampFormSize.large:
+        return 'Besar';
+    }
+  }
+
+  Widget _buildReadOnlyBottomBar() {
+    return Container(
+      color: const Color(0xFF14171E),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _BottomActionIcon(
+              icon: Icons.verified_outlined,
+              label: 'Stempel',
+              active: false,
+              disabled: _isDeleting,
+              onTap: () {
+                setState(() {
+                  _isStampPanelOpen = true;
+                });
+              },
+            ),
+            _BottomActionIcon(
+              icon: Icons.delete_forever_outlined,
+              label: 'Hapus',
+              active: false,
+              disabled: _isDeleting,
+              onTap: () => unawaited(_deleteCurrentPhotoPermanently()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStampEditorDrawerPanel() {
+    final bool hasSavedLogo = _config.logoFilePath != null &&
+        _config.logoFilePath!.isNotEmpty &&
+        File(_config.logoFilePath!).existsSync();
+
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 350),
+      decoration: const BoxDecoration(
+        color: Color(0xFF1A1D24),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Atur Stempel Foto',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => setState(() => _isStampPanelOpen = false),
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            _WatermarkRowTile(
+              icon: Icons.image_outlined,
+              title: 'Logo',
+              subtitle: hasSavedLogo
+                  ? (_config.showLogo
+                      ? 'Logo aktif (tersimpan permanen)'
+                      : 'Logo tersimpan (ketuk untuk ganti)')
+                  : 'Ketuk untuk memilih logo',
+              value: _config.showLogo,
+              onChanged: (val) {
+                if (val && !hasSavedLogo) {
+                  _pickLogoForAlbum();
+                } else {
+                  _updateConfig(_config.copyWith(showLogo: val));
+                }
+              },
+              onTapContent: _pickLogoForAlbum,
+            ),
+            _WatermarkRowTile(
+              icon: Icons.schedule_outlined,
+              title: 'Tanggal & Jam Stempel',
+              subtitle:
+                  '${_StampRenderer.formatHari(_stampDateTime)}, ${_StampRenderer.formatTanggalLengkap(_stampDateTime)} ${_StampRenderer.formatJamMenit(_stampDateTime)}',
+              value: _config.showTime,
+              onChanged: (val) =>
+                  _updateConfig(_config.copyWith(showTime: val)),
+              onTapContent: _pickDateTimeForAlbum,
+            ),
+            _WatermarkRowTile(
+              icon: Icons.location_on_outlined,
+              title: 'Alamat',
+              subtitle: _config.customAddress.isNotEmpty
+                  ? _config.customAddress
+                  : 'Ketuk untuk mengedit alamat',
+              value: _config.showAddress,
+              onChanged: (val) =>
+                  _updateConfig(_config.copyWith(showAddress: val)),
+              onTapContent: () => _showTextEditor(
+                title: 'Edit Alamat',
+                hint: 'Masukkan alamat...',
+                initialValue: _config.customAddress,
+                onSave: (v) => _updateConfig(
+                  _config.copyWith(customAddress: v, showAddress: true),
+                ),
+              ),
+            ),
+            _WatermarkRowTile(
+              icon: Icons.public_outlined,
+              title: 'Koordinat',
+              subtitle: _config.gpsCoordsText,
+              value: _config.showCoords,
+              onChanged: (val) =>
+                  _updateConfig(_config.copyWith(showCoords: val)),
+              onTapContent: () => _showTextEditor(
+                title: 'Edit Koordinat',
+                hint: 'Masukkan koordinat GPS...',
+                initialValue: _config.gpsCoordsText,
+                onSave: (v) => _updateConfig(
+                  _config.copyWith(gpsCoordsText: v, showCoords: true),
+                ),
+              ),
+            ),
+            _WatermarkRowTile(
+              icon: Icons.notes_outlined,
+              title: 'Perusahaan',
+              subtitle: _config.companyText.isNotEmpty
+                  ? _config.companyText
+                  : 'Ketuk untuk mengedit',
+              value: _config.showCompany,
+              onChanged: (val) =>
+                  _updateConfig(_config.copyWith(showCompany: val)),
+              onTapContent: () => _showTextEditor(
+                title: 'Edit Perusahaan',
+                hint: 'Nama instansi / perusahaan...',
+                initialValue: _config.companyText,
+                onSave: (v) => _updateConfig(
+                  _config.copyWith(companyText: v, showCompany: true),
+                ),
+              ),
+            ),
+            _WatermarkRowTile(
+              icon: Icons.badge_outlined,
+              title: 'Nama',
+              subtitle: _config.personNameText.isNotEmpty
+                  ? _config.personNameText
+                  : 'Ketuk untuk mengedit',
+              value: _config.showPersonName,
+              onChanged: (val) =>
+                  _updateConfig(_config.copyWith(showPersonName: val)),
+              onTapContent: () => _showTextEditor(
+                title: 'Edit Nama',
+                hint: 'Nama petugas / pengguna...',
+                initialValue: _config.personNameText,
+                onSave: (v) => _updateConfig(
+                  _config.copyWith(personNameText: v, showPersonName: true),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onPressed: _showSizeAndColorDialog,
+                    child: Text(
+                      'Warna & Ukuran (${_StampRenderer.colorLabel(_config.textColor)} • ${_sizeLabel(_config.formSize)})',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFFD000),
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onPressed: _isSaving ? null : _saveStampedCopy,
+                    child: Text(
+                      _isSaving ? 'Menyimpan...' : 'Simpan Stempel',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool hasSavedLogo = _config.logoFilePath != null &&
-        _config.logoFilePath!.isNotEmpty &&
-        File(_config.logoFilePath!).existsSync();
+    final activeCfg = _config.copyWith(
+      isManualTime: true,
+      manualDateTime: _stampDateTime,
+    );
 
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        Navigator.of(context).pop(_hasAnyChange);
+        if (_isStampPanelOpen) {
+          setState(() => _isStampPanelOpen = false);
+          return;
+        }
+        Navigator.of(context).pop(_hasChanges);
       },
       child: Scaffold(
         backgroundColor: Colors.black,
@@ -7946,317 +8534,154 @@ class _GalleryWatermarkEditorScreenState
           backgroundColor: Colors.black,
           leading: IconButton(
             icon: const Icon(Icons.arrow_back, color: Colors.white),
-            onPressed: () => Navigator.of(context).pop(_hasAnyChange),
+            onPressed: () {
+              if (_isStampPanelOpen) {
+                setState(() => _isStampPanelOpen = false);
+              } else {
+                Navigator.of(context).pop(_hasChanges);
+              }
+            },
           ),
           title: Text(
-            '${_currentIndex + 1} / ${_files.length}',
-            style: const TextStyle(fontSize: 16),
+            _isStampPanelOpen
+                ? 'Stempel Foto (${_currentIndex + 1}/${_sources.length})'
+                : 'Foto (${_currentIndex + 1}/${_sources.length})',
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
           ),
           actions: [
-            IconButton(
-              onPressed:
-                  (_isDeleting || _isSaving) ? null : _toggleStampOverlayMode,
-              icon: Icon(
-                _isStampingMode
-                    ? Icons.auto_awesome_motion
-                    : Icons.add_photo_alternate_outlined,
-                color: _isStampingMode ? const Color(0xFFFFD000) : Colors.white,
+            if (_isStampPanelOpen) ...[
+              IconButton(
+                onPressed:
+                    _isDeleting ? null : _deleteCurrentPhotoPermanently,
+                icon:
+                    const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
+                tooltip: 'Hapus Permanen',
               ),
-              tooltip: _isStampingMode
-                  ? 'Sembunyikan Pratinjau Stempel'
-                  : 'Tambah Stempel',
-            ),
-            IconButton(
-              onPressed:
-                  (_isDeleting || _isSaving) ? null : _deleteCurrentPhotoPermanently,
-              icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
-              tooltip: 'Hapus Permanen',
-            ),
-            if (_isStampingMode)
               Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: FilledButton(
+                padding: const EdgeInsets.only(right: 10),
+                child: FilledButton.icon(
                   style: FilledButton.styleFrom(
                     backgroundColor: const Color(0xFFFFD000),
                     foregroundColor: Colors.black,
                   ),
-                  onPressed: _isSaving ? null : _saveStampedPhotoToGallery,
-                  child: Text(
+                  onPressed:
+                      (_isSaving || _isDeleting) ? null : _saveStampedCopy,
+                  icon: _isSaving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.black,
+                          ),
+                        )
+                      : const Icon(Icons.check, size: 18),
+                  label: Text(
                     _isSaving ? 'Menyimpan...' : 'Simpan',
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
+            ],
           ],
         ),
-        body: Column(
+        body: Stack(
           children: [
-            Expanded(
-              child: PageView.builder(
-                controller: _pageController,
-                itemCount: _files.length,
-                onPageChanged: (idx) {
-                  setState(() => _currentIndex = idx);
-                  _ensureAspectCached(idx);
-                  if (idx + 1 < _files.length) {
-                    _ensureAspectCached(idx + 1);
-                  }
-                  if (idx - 1 >= 0) {
-                    _ensureAspectCached(idx - 1);
-                  }
-                },
-                itemBuilder: (ctx, idx) {
-                  final File file = _files[idx];
-                  final bool isCurrent = idx == _currentIndex;
-                  final double ratio = _aspectCache[idx] ?? (3.0 / 4.0);
-
-                  return LayoutBuilder(
-                    builder: (context, box) {
-                      double boxW = box.maxWidth;
-                      double boxH = boxW / ratio;
-                      if (box.maxHeight.isFinite && boxH > box.maxHeight) {
-                        boxH = box.maxHeight;
-                        boxW = boxH * ratio;
-                      }
-                      boxW = max(80.0, boxW);
-                      boxH = max(80.0, boxH);
-
-                      return Center(
-                        child: SizedBox(
-                          width: boxW,
-                          height: boxH,
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              Image.file(
-                                file,
+            Column(
+              children: [
+                Expanded(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      PageView.builder(
+                        controller: _pageController,
+                        itemCount: _sources.length,
+                        onPageChanged: (idx) {
+                          setState(() => _currentIndex = idx);
+                          _detectPhotoAspectRatio(_sources[idx]);
+                        },
+                        itemBuilder: (ctx, idx) {
+                          return InteractiveViewer(
+                            minScale: 1.0,
+                            maxScale: 4.0,
+                            child: Center(
+                              child: _SmartMediaImage(
+                                source: _sources[idx],
+                                cacheWidth: 1600,
                                 fit: BoxFit.contain,
-                                gaplessPlayback: true,
-                                errorBuilder: (_, __, ___) => const Center(
+                                errorBuilder: (_) => const Center(
                                   child: Icon(
                                     Icons.broken_image_outlined,
+                                    size: 56,
                                     color: Colors.white54,
-                                    size: 40,
                                   ),
                                 ),
                               ),
-                              if (isCurrent && _isStampingMode)
-                                Positioned(
-                                  left: 0,
-                                  right: 0,
-                                  bottom: 0,
-                                  child: _buildStampOverlayWidget(
-                                    activeDt: _stampDateTime,
-                                    cfg: _config.copyWith(
-                                      isManualTime: true,
-                                      manualDateTime: _stampDateTime,
-                                    ),
-                                    boxWidth: boxW,
-                                    boxHeight: boxH,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-            if (_isStampingMode)
-              Container(
-                constraints: const BoxConstraints(maxHeight: 330),
-                decoration: const BoxDecoration(
-                  color: Color(0xFF1A1D24),
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-                ),
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          'Atur Stempel Foto',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      _WatermarkRowTile(
-                        icon: Icons.image_outlined,
-                        title: 'Logo',
-                        subtitle: hasSavedLogo
-                            ? (_config.showLogo
-                                ? 'Logo aktif'
-                                : 'Logo tersimpan (ketuk untuk ganti)')
-                            : 'Ketuk untuk memilih logo',
-                        value: _config.showLogo,
-                        onChanged: (v) {
-                          if (v && !hasSavedLogo) {
-                            _pickLogo();
-                          } else {
-                            setState(() {
-                              _syncConfig(_config.copyWith(showLogo: v));
-                            });
-                          }
+                            ),
+                          );
                         },
-                        onTapContent: _pickLogo,
                       ),
-                      _WatermarkRowTile(
-                        icon: Icons.schedule_outlined,
-                        title: 'Waktu',
-                        subtitle:
-                            '${_StampRenderer.formatHari(_stampDateTime)}, ${_StampRenderer.formatTanggalLengkap(_stampDateTime)} ${_StampRenderer.formatJamMenit(_stampDateTime)}',
-                        value: _config.showTime,
-                        onChanged: (v) => setState(() {
-                          _syncConfig(_config.copyWith(showTime: v));
-                        }),
-                        onTapContent: _pickDateTime,
-                      ),
-                      _WatermarkRowTile(
-                        icon: Icons.location_on_outlined,
-                        title: 'Alamat',
-                        subtitle: _config.customAddress.isNotEmpty
-                            ? _config.customAddress
-                            : 'Ketuk untuk mengedit alamat',
-                        value: _config.showAddress,
-                        onChanged: (v) => setState(() {
-                          _syncConfig(_config.copyWith(showAddress: v));
-                        }),
-                        onTapContent: () => _editTextField(
-                          title: 'Edit Alamat',
-                          hint: 'Masukkan alamat...',
-                          initialValue: _config.customAddress,
-                          onApply: (val) => _syncConfig(
-                            _config.copyWith(
-                              customAddress: val,
-                              showAddress: true,
+                      if (_isStampPanelOpen)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: LayoutBuilder(
+                              builder: (context, box) {
+                                final double ar = _currentPhotoAspectRatio > 0
+                                    ? _currentPhotoAspectRatio
+                                    : (3.0 / 4.0);
+                                double photoW = box.maxWidth;
+                                double photoH = photoW / ar;
+                                if (box.maxHeight.isFinite &&
+                                    photoH > box.maxHeight) {
+                                  photoH = box.maxHeight;
+                                  photoW = photoH * ar;
+                                }
+
+                                return Center(
+                                  child: SizedBox(
+                                    width: photoW,
+                                    height: photoH,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        Positioned(
+                                          left: 0,
+                                          right: 0,
+                                          bottom: 0,
+                                          child: _buildStampOverlayWidget(
+                                            activeDt: _stampDateTime,
+                                            cfg: activeCfg,
+                                            boxWidth: photoW,
+                                            boxHeight: photoH,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
                           ),
                         ),
-                      ),
-                      _WatermarkRowTile(
-                        icon: Icons.public_outlined,
-                        title: 'Koordinat',
-                        subtitle: _config.gpsCoordsText,
-                        value: _config.showCoords,
-                        onChanged: (v) => setState(() {
-                          _syncConfig(_config.copyWith(showCoords: v));
-                        }),
-                        onTapContent: () => _editTextField(
-                          title: 'Edit Koordinat',
-                          hint: 'Contoh: -3.695430°S, 128.181400°T',
-                          initialValue: _config.gpsCoordsText,
-                          onApply: (val) => _syncConfig(
-                            _config.copyWith(
-                              gpsCoordsText: val,
-                              showCoords: true,
-                            ),
-                          ),
-                        ),
-                      ),
-                      _WatermarkRowTile(
-                        icon: Icons.notes_outlined,
-                        title: 'Perusahaan',
-                        subtitle: _config.companyText.isNotEmpty
-                            ? _config.companyText
-                            : 'Ketuk untuk mengedit',
-                        value: _config.showCompany,
-                        onChanged: (v) => setState(() {
-                          _syncConfig(_config.copyWith(showCompany: v));
-                        }),
-                        onTapContent: () => _editTextField(
-                          title: 'Edit Perusahaan',
-                          hint: 'Nama instansi / perusahaan...',
-                          initialValue: _config.companyText,
-                          onApply: (val) => _syncConfig(
-                            _config.copyWith(
-                              companyText: val,
-                              showCompany: true,
-                            ),
-                          ),
-                        ),
-                      ),
-                      _WatermarkRowTile(
-                        icon: Icons.badge_outlined,
-                        title: 'Nama',
-                        subtitle: _config.personNameText.isNotEmpty
-                            ? _config.personNameText
-                            : 'Ketuk untuk mengedit',
-                        value: _config.showPersonName,
-                        onChanged: (v) => setState(() {
-                          _syncConfig(_config.copyWith(showPersonName: v));
-                        }),
-                        onTapContent: () => _editTextField(
-                          title: 'Edit Nama',
-                          hint: 'Nama petugas / pengguna...',
-                          initialValue: _config.personNameText,
-                          onApply: (val) => _syncConfig(
-                            _config.copyWith(
-                              personNameText: val,
-                              showPersonName: true,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton(
-                          onPressed: _pickSizeAndColor,
-                          child: Text(
-                            'Warna & Ukuran (${_StampRenderer.colorLabel(_config.textColor)} • ${_config.formSize.name})',
-                          ),
-                        ),
-                      ),
                     ],
+                  ),
+                ),
+                if (_isStampPanelOpen)
+                  _buildStampEditorDrawerPanel()
+                else
+                  _buildReadOnlyBottomBar(),
+              ],
+            ),
+            if (_isDeleting)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  child: const Center(
+                    child: CircularProgressIndicator(color: Color(0xFFFFD000)),
                   ),
                 ),
               ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MiniChipButton extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _MiniChipButton({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFFFFD000) : const Color(0xFF232833),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: selected ? const Color(0xFFFFD000) : Colors.white24,
-          ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected ? Colors.black : Colors.white70,
-            fontSize: 12,
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-          ),
         ),
       ),
     );
@@ -8301,17 +8726,17 @@ class _WatermarkRowTile extends StatelessWidget {
                       title,
                       style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 15,
+                        fontSize: 14,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(height: 1),
+                    const SizedBox(height: 2),
                     Text(
                       subtitle,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Colors.white54,
+                        color: Colors.white60,
                         fontSize: 12,
                       ),
                     ),
@@ -8326,6 +8751,40 @@ class _WatermarkRowTile extends StatelessWidget {
             onChanged: onChanged,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _MiniChipButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MiniChipButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFFFD000) : Colors.white12,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ),
     );
   }
@@ -8349,20 +8808,28 @@ class _BottomActionIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = disabled
-        ? Colors.white24
+        ? Colors.white30
         : (active ? const Color(0xFFFFD000) : Colors.white);
-    return GestureDetector(
+    return InkWell(
       onTap: disabled ? null : onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: color, size: 26),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(color: color, fontSize: 11),
-          ),
-        ],
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 26),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

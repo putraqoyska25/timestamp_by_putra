@@ -253,10 +253,15 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "requestMediaPermissions" -> requestMediaPermissions(result)
+                    "getAlbumFolders" -> {
+                        result.success(queryAlbumFolders())
+                    }
                     "getAllImages" -> {
                         val requestedLimit = call.argument<Int>("limit") ?: 2500
                         val safeLimit = requestedLimit.coerceIn(1, 500000)
-                        result.success(queryAllImagePaths(safeLimit))
+                        val rawBucketId = call.argument<String>("bucketId")?.trim()
+                        val bucketId = if (rawBucketId.isNullOrEmpty()) null else rawBucketId
+                        result.success(queryAllImagePaths(safeLimit, bucketId))
                     }
                     "deletePermanently", "moveToTrash" -> {
                         val rawPaths = call.argument<List<*>>("paths")
@@ -340,7 +345,166 @@ class MainActivity : FlutterActivity() {
             lower.endsWith(".heif")
     }
 
-    private fun queryAllImagePaths(limit: Int = 2500): HashMap<String, Any> {
+    private data class FolderAccumulator(
+        val bucketId: String,
+        val bucketName: String,
+        val relativePath: String,
+        var coverPath: String,
+        var latestDateSec: Long,
+        var count: Int,
+    )
+
+    private fun queryAlbumFolders(): HashMap<String, Any> {
+        val folderList = arrayListOf<HashMap<String, Any>>()
+        var totalAllCount = 0
+        var latestAllCoverPath = ""
+
+        if (!hasAllMediaPermissions()) {
+            return hashMapOf(
+                "totalAllCount" to 0,
+                "latestAllCoverPath" to "",
+                "folders" to folderList,
+            )
+        }
+
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
+        val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.RELATIVE_PATH,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.BUCKET_ID,
+                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+                MediaStore.Images.Media.DATE_TAKEN,
+                MediaStore.Images.Media.DATE_MODIFIED,
+            )
+        } else {
+            arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.BUCKET_ID,
+                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+                MediaStore.Images.Media.DATE_TAKEN,
+                MediaStore.Images.Media.DATE_MODIFIED,
+            )
+        }
+
+        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
+        val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
+        val seenPaths = HashSet<String>()
+        val folderMap = LinkedHashMap<String, FolderAccumulator>()
+
+        try {
+            contentResolver.query(
+                collection,
+                projection,
+                null,
+                null,
+                sortOrder,
+            )?.use { cursor ->
+                val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+                } else {
+                    -1
+                }
+                val nameCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                } else {
+                    -1
+                }
+                val bucketIdCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
+                val bucketNameCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+
+                while (cursor.moveToNext()) {
+                    val relPathRaw = if (relCol >= 0) (cursor.getString(relCol) ?: "").trim() else ""
+                    var path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
+                    if (path.isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && nameCol >= 0) {
+                        val dispName = (cursor.getString(nameCol) ?: "").trim()
+                        if (dispName.isNotEmpty()) {
+                            val cleanRel = relPathRaw.trim('/')
+                            path = if (cleanRel.isNotEmpty()) {
+                                "$primaryRoot/$cleanRel/$dispName"
+                            } else {
+                                "$primaryRoot/$dispName"
+                            }
+                        }
+                    }
+
+                    if (path.isEmpty() || !isSupportedPhotoPath(path) || seenPaths.contains(path)) {
+                        continue
+                    }
+                    seenPaths.add(path)
+
+                    val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
+                    val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
+                    val effectiveSec = when {
+                        modSec > 0L -> modSec
+                        takenMs > 0L -> takenMs / 1000L
+                        else -> System.currentTimeMillis() / 1000L
+                    }
+
+                    if (totalAllCount == 0) {
+                        latestAllCoverPath = path
+                    }
+                    totalAllCount++
+
+                    val rawBucketId = if (bucketIdCol >= 0) (cursor.getString(bucketIdCol) ?: "").trim() else ""
+                    val parentFolderFallback = File(path).parentFile?.name ?: "Penyimpanan"
+                    val bucketKey = if (rawBucketId.isNotEmpty()) rawBucketId else "path_${File(path).parent ?: parentFolderFallback}"
+                    val rawBucketName = if (bucketNameCol >= 0) (cursor.getString(bucketNameCol) ?: "").trim() else ""
+                    val resolvedName = if (rawBucketName.isNotEmpty()) rawBucketName else parentFolderFallback
+
+                    val existing = folderMap[bucketKey]
+                    if (existing == null) {
+                        folderMap[bucketKey] = FolderAccumulator(
+                            bucketId = bucketKey,
+                            bucketName = resolvedName,
+                            relativePath = relPathRaw,
+                            coverPath = path,
+                            latestDateSec = effectiveSec,
+                            count = 1,
+                        )
+                    } else {
+                        existing.count += 1
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        for (acc in folderMap.values) {
+            folderList.add(
+                hashMapOf<String, Any>(
+                    "bucketId" to acc.bucketId,
+                    "bucketName" to acc.bucketName,
+                    "relativePath" to acc.relativePath,
+                    "coverPath" to acc.coverPath,
+                    "latestDateSec" to acc.latestDateSec,
+                    "count" to acc.count,
+                )
+            )
+        }
+
+        return hashMapOf(
+            "totalAllCount" to totalAllCount,
+            "latestAllCoverPath" to latestAllCoverPath,
+            "folders" to folderList,
+        )
+    }
+
+    private fun queryAllImagePaths(
+        limit: Int = 2500,
+        bucketId: String? = null,
+    ): HashMap<String, Any> {
         val list = arrayListOf<Any>()
         var hasMore = false
         if (!hasAllMediaPermissions()) {
@@ -363,6 +527,7 @@ class MainActivity : FlutterActivity() {
                 MediaStore.Images.Media.DATA,
                 MediaStore.Images.Media.RELATIVE_PATH,
                 MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.BUCKET_ID,
                 MediaStore.Images.Media.DATE_TAKEN,
                 MediaStore.Images.Media.DATE_MODIFIED,
             )
@@ -370,10 +535,25 @@ class MainActivity : FlutterActivity() {
             arrayOf(
                 MediaStore.Images.Media._ID,
                 MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.BUCKET_ID,
                 MediaStore.Images.Media.DATE_TAKEN,
                 MediaStore.Images.Media.DATE_MODIFIED,
             )
         }
+
+        val isPathFallbackBucket = bucketId != null && bucketId.startsWith("path_")
+        val selection: String? = if (bucketId != null && !isPathFallbackBucket) {
+            "${MediaStore.Images.Media.BUCKET_ID} = ?"
+        } else {
+            null
+        }
+        val selectionArgs: Array<String>? = if (bucketId != null && !isPathFallbackBucket) {
+            arrayOf(bucketId)
+        } else {
+            null
+        }
+        val fallbackParentTarget = if (isPathFallbackBucket) bucketId!!.removePrefix("path_") else null
+
         val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
         val primaryRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
 
@@ -381,8 +561,8 @@ class MainActivity : FlutterActivity() {
             contentResolver.query(
                 collection,
                 projection,
-                null,
-                null,
+                selection,
+                selectionArgs,
                 sortOrder,
             )?.use { cursor ->
                 val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
@@ -415,6 +595,12 @@ class MainActivity : FlutterActivity() {
                     }
                     if (path.isEmpty() || !isSupportedPhotoPath(path) || seen.contains(path)) {
                         continue
+                    }
+                    if (fallbackParentTarget != null) {
+                        val parentDir = File(path).parent ?: ""
+                        if (parentDir != fallbackParentTarget) {
+                            continue
+                        }
                     }
                     if (list.size >= limit) {
                         hasMore = true

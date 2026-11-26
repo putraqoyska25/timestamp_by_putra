@@ -7515,14 +7515,18 @@ class _GalleryWatermarkEditorScreenState
   final ImagePicker _picker = ImagePicker();
   final Random _random = Random();
 
-  late List<File> _files;
   late PageController _pageController;
+  late List<File> _files;
   late int _currentIndex;
   late _WatermarkConfig _config;
   late DateTime _stampDateTime;
+  bool _isStampingMode = false;
   bool _isSaving = false;
   bool _isDeleting = false;
-  bool _hasAnyModification = false;
+  bool _hasAnyChange = false;
+
+  final Map<int, double> _aspectCache = {};
+  final Set<int> _pendingAspectLoads = {};
 
   @override
   void initState() {
@@ -7531,68 +7535,55 @@ class _GalleryWatermarkEditorScreenState
     _currentIndex = widget.initialIndex.clamp(0, max(0, _files.length - 1));
     _pageController = PageController(initialPage: _currentIndex);
     _config = widget.initialConfig;
-    _stampDateTime =
-        _config.isManualTime ? _config.manualDateTime : DateTime.now();
+    _stampDateTime = _config.isManualTime
+        ? _config.manualDateTime
+        : DateTime.now();
+    _ensureAspectCached(_currentIndex);
+    if (_currentIndex + 1 < _files.length) {
+      _ensureAspectCached(_currentIndex + 1);
+    }
+    if (_currentIndex - 1 >= 0) {
+      _ensureAspectCached(_currentIndex - 1);
+    }
   }
 
-  File get _currentPhotoFile => _files[_currentIndex];
+  void _ensureAspectCached(int index) {
+    if (index < 0 || index >= _files.length) return;
+    if (_aspectCache.containsKey(index) || _pendingAspectLoads.contains(index)) {
+      return;
+    }
+    _pendingAspectLoads.add(index);
+    final file = _files[index];
+    unawaited(
+      Future<void>(() async {
+        try {
+          if (!await file.exists()) return;
+          final bytes = await file.readAsBytes();
+          final _ImageAspectInfo? info =
+              await compute(_inspectAspectFromBytesIsolate, bytes);
+          if (info != null &&
+              info.aspectRatio.isFinite &&
+              info.aspectRatio > 0.05 &&
+              info.aspectRatio < 20.0 &&
+              mounted) {
+            setState(() {
+              _aspectCache[index] = info.aspectRatio;
+            });
+          }
+        } catch (_) {
+        } finally {
+          _pendingAspectLoads.remove(index);
+        }
+      }),
+    );
+  }
 
   void _updateConfig(_WatermarkConfig next) {
     setState(() => _config = next);
     widget.onConfigUpdated(next);
   }
 
-  Future<void> _deleteCurrentPhotoPermanently() async {
-    if (_files.isEmpty || _isDeleting || _isSaving) return;
-    final File target = _currentPhotoFile;
-    final bool ok =
-        await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
-      context,
-      count: 1,
-    );
-    if (!ok || !mounted) return;
-
-    setState(() => _isDeleting = true);
-    final int deleted =
-        await _PermanentDeleteService.deleteFilesPermanently([target.path]);
-
-    if (!mounted) return;
-    if (deleted > 0) {
-      _hasAnyModification = true;
-      setState(() {
-        _files.removeAt(_currentIndex);
-        _isDeleting = false;
-        if (_files.isNotEmpty) {
-          _currentIndex = _currentIndex.clamp(0, _files.length - 1);
-        }
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Foto dihapus permanen'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      if (_files.isEmpty) {
-        Navigator.of(context).pop(true);
-      } else {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_pageController.hasClients) {
-            _pageController.jumpToPage(_currentIndex);
-          }
-        });
-      }
-    } else {
-      setState(() => _isDeleting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Penghapusan permanen dibatalkan atau ditolak'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-    }
-  }
-
-  Future<void> _pickLogoImage() async {
+  Future<void> _pickLogo() async {
     try {
       final XFile? picked = await _picker.pickImage(
         source: ImageSource.gallery,
@@ -7602,15 +7593,16 @@ class _GalleryWatermarkEditorScreenState
         final permanentPath = await _AppPrefsStore.persistLogoFile(picked.path);
         if (!mounted) return;
         _updateConfig(
-          _config.copyWith(logoFilePath: permanentPath, showLogo: true),
+          _config.copyWith(
+            logoFilePath: permanentPath,
+            showLogo: true,
+          ),
         );
       }
-    } catch (e) {
-      debugPrint('Gagal memilih logo di editor album: $e');
-    }
+    } catch (_) {}
   }
 
-  Future<void> _pickStampDateTime() async {
+  Future<void> _pickDateTime() async {
     final DateTime? pickedDate = await showDatePicker(
       context: context,
       locale: const Locale('id', 'ID'),
@@ -7645,11 +7637,11 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
-  Future<void> _showEditTextDialog({
+  Future<void> _editText({
     required String title,
     required String hint,
     required String currentValue,
-    required ValueChanged<String> onSaved,
+    required ValueChanged<String> onSave,
   }) async {
     final controller = TextEditingController(text: currentValue);
     final result = await showDialog<String>(
@@ -7680,7 +7672,7 @@ class _GalleryWatermarkEditorScreenState
     controller.dispose();
 
     if (result != null && mounted) {
-      onSaved(result.trim());
+      onSave(result.trim());
     }
   }
 
@@ -7720,7 +7712,9 @@ class _GalleryWatermarkEditorScreenState
                     title: Text(item.$2),
                     onTap: () {
                       tempSize = item.$1;
-                      _updateConfig(_config.copyWith(formSize: item.$1));
+                      if (mounted) {
+                        _updateConfig(_config.copyWith(formSize: item.$1));
+                      }
                       setDialogState(() {});
                     },
                   ),
@@ -7744,7 +7738,9 @@ class _GalleryWatermarkEditorScreenState
                       label: Text(_StampRenderer.colorLabel(c)),
                       onSelected: (_) {
                         tempColor = c;
-                        _updateConfig(_config.copyWith(textColor: c));
+                        if (mounted) {
+                          _updateConfig(_config.copyWith(textColor: c));
+                        }
                         setDialogState(() {});
                       },
                     );
@@ -7771,48 +7767,98 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
+  Future<void> _deleteCurrentPhotoPermanently() async {
+    if (_isDeleting || _files.isEmpty) return;
+    final File target = _files[_currentIndex];
+    final bool ok =
+        await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
+      context,
+      count: 1,
+    );
+    if (!ok || !mounted) return;
+
+    setState(() => _isDeleting = true);
+    final int deleted =
+        await _PermanentDeleteService.deleteFilesPermanently([target.path]);
+
+    if (!mounted) return;
+    if (deleted <= 0) {
+      setState(() => _isDeleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Penghapusan permanen dibatalkan atau ditolak'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    _hasAnyChange = true;
+    _files.removeAt(_currentIndex);
+    _aspectCache.clear();
+    _pendingAspectLoads.clear();
+
+    if (_files.isEmpty) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+
+    final int nextIndex = _currentIndex.clamp(0, _files.length - 1);
+    setState(() {
+      _currentIndex = nextIndex;
+      _isDeleting = false;
+    });
+    _pageController.jumpToPage(nextIndex);
+    _ensureAspectCached(nextIndex);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Foto dihapus permanen'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
   Future<void> _saveStampedCopy() async {
     if (_isSaving || _files.isEmpty) return;
     setState(() => _isSaving = true);
 
     String? tempOutPath;
     try {
-      final rawBytes = await _currentPhotoFile.readAsBytes();
-      final effectiveCfg = _config.copyWith(
-        isManualTime: true,
-        manualDateTime: _stampDateTime,
-      );
-
-      final Uint8List stampedJpgBytes =
-          await _StampRenderer.buildStampedJpgBytes(
+      final File sourceFile = _files[_currentIndex];
+      final Uint8List rawBytes = await sourceFile.readAsBytes();
+      final Uint8List stampedBytes = await _StampRenderer.buildStampedJpgBytes(
         baseJpgBytes: rawBytes,
         activeDt: _stampDateTime,
-        cfg: effectiveCfg,
+        cfg: _config.copyWith(
+          isManualTime: true,
+          manualDateTime: _stampDateTime,
+        ),
       );
 
-      final dir = await getTemporaryDirectory();
+      final Directory tempDir = await getTemporaryDirectory();
       final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
-      tempOutPath = '${dir.path}/album_stamp_$uniqueId.jpg';
-      final outFile = File(tempOutPath);
-      await outFile.writeAsBytes(stampedJpgBytes, flush: true);
+      tempOutPath = '${tempDir.path}/album_stamp_$uniqueId.jpg';
+      final File outFile = File(tempOutPath);
+      await outFile.writeAsBytes(stampedBytes, flush: true);
 
       await Gal.putImage(outFile.path);
-      _hasAnyModification = true;
+      _hasAnyChange = true;
 
       if (!mounted) return;
+      setState(() => _isStampingMode = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Foto berstempel baru berhasil disimpan ke Galeri'),
           backgroundColor: Colors.green,
         ),
       );
-      Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Gagal menyimpan stempel: $e'),
+          content: Text('Gagal menyimpan foto stempel: $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -7829,7 +7875,7 @@ class _GalleryWatermarkEditorScreenState
     }
   }
 
-  String _getFormSizeLabel() {
+  String _sizeLabel() {
     switch (_config.formSize) {
       case StampFormSize.small:
         return 'Kecil';
@@ -7840,6 +7886,14 @@ class _GalleryWatermarkEditorScreenState
     }
   }
 
+  void _handleBackNavigation() {
+    if (_isStampingMode) {
+      setState(() => _isStampingMode = false);
+      return;
+    }
+    Navigator.of(context).pop(_hasAnyChange);
+  }
+
   @override
   void dispose() {
     _pageController.dispose();
@@ -7848,10 +7902,6 @@ class _GalleryWatermarkEditorScreenState
 
   @override
   Widget build(BuildContext context) {
-    final effectiveCfg = _config.copyWith(
-      isManualTime: true,
-      manualDateTime: _stampDateTime,
-    );
     final String timeSubLabel =
         '${_StampRenderer.formatHari(_stampDateTime)}, ${_StampRenderer.formatTanggalLengkap(_stampDateTime)} ${_StampRenderer.formatJamMenit(_stampDateTime)}';
 
@@ -7863,7 +7913,7 @@ class _GalleryWatermarkEditorScreenState
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) {
-          Navigator.of(context).pop(_hasAnyModification);
+          _handleBackNavigation();
         }
       },
       child: Scaffold(
@@ -7871,118 +7921,143 @@ class _GalleryWatermarkEditorScreenState
         appBar: AppBar(
           backgroundColor: Colors.black,
           leading: IconButton(
-            icon: const Icon(Icons.arrow_back, color: Colors.white),
-            onPressed: () => Navigator.of(context).pop(_hasAnyModification),
+            icon: Icon(
+              _isStampingMode ? Icons.close : Icons.arrow_back,
+              color: Colors.white,
+            ),
+            onPressed: _handleBackNavigation,
           ),
           title: Text(
-            _files.isEmpty
-                ? 'Sunting Stempel'
+            _isStampingMode
+                ? 'Stempel Foto (${_currentIndex + 1}/${_files.length})'
                 : 'Foto ${_currentIndex + 1} / ${_files.length}',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           actions: [
-            IconButton(
-              onPressed: (_isDeleting || _isSaving || _files.isEmpty)
-                  ? null
-                  : _deleteCurrentPhotoPermanently,
-              icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
-              tooltip: 'Hapus Permanen Foto Ini',
-            ),
-            Padding(
-              padding: const EdgeInsets.only(right: 10),
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFFFFD000),
-                  foregroundColor: Colors.black,
-                ),
-                onPressed:
-                    (_isSaving || _isDeleting || _files.isEmpty) ? null : _saveStampedCopy,
-                icon: _isSaving
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.black,
-                        ),
-                      )
-                    : const Icon(Icons.save_alt, size: 18),
-                label: Text(
-                  _isSaving ? 'Menyimpan...' : 'Simpan Baru',
-                  style: const TextStyle(fontWeight: FontWeight.w700),
+            if (_isStampingMode)
+              Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFFFD000),
+                    foregroundColor: Colors.black,
+                  ),
+                  onPressed:
+                      (_isSaving || _isDeleting) ? null : _saveStampedCopy,
+                  icon: _isSaving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.black,
+                          ),
+                        )
+                      : const Icon(Icons.save_alt, size: 18),
+                  label: Text(
+                    _isSaving ? 'Menyimpan...' : 'Simpan Baru',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                 ),
               ),
-            ),
           ],
         ),
-        body: _files.isEmpty
-            ? const Center(
-                child: Text(
-                  'Tidak ada foto tersisa.',
-                  style: TextStyle(color: Colors.white70),
-                ),
-              )
-            : Column(
-                children: [
-                  Expanded(
-                    child: PageView.builder(
-                      controller: _pageController,
-                      itemCount: _files.length,
-                      onPageChanged: (idx) {
-                        setState(() => _currentIndex = idx);
-                      },
-                      itemBuilder: (context, idx) {
-                        final fileItem = _files[idx];
-                        return Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: LayoutBuilder(
-                            builder: (context, outerBox) {
-                              return Center(
-                                child: Image.file(
-                                  fileItem,
-                                  fit: BoxFit.contain,
-                                  frameBuilder: (ctx, child, frame, wasSync) {
-                                    return Stack(
-                                      alignment: Alignment.bottomLeft,
-                                      children: [
-                                        child,
-                                        Positioned(
-                                          left: 0,
-                                          right: 0,
-                                          bottom: 0,
-                                          child: LayoutBuilder(
-                                            builder: (c, imgBox) {
-                                              final double renderedW =
-                                                  imgBox.maxWidth.isFinite
-                                                      ? imgBox.maxWidth
-                                                      : outerBox.maxWidth;
-                                              final double renderedH =
-                                                  imgBox.maxHeight.isFinite
-                                                      ? imgBox.maxHeight
-                                                      : outerBox.maxHeight;
-                                              return _buildStampOverlayWidget(
-                                                activeDt: _stampDateTime,
-                                                cfg: effectiveCfg,
-                                                boxWidth: renderedW,
-                                                boxHeight: renderedH,
-                                              );
-                                            },
-                                          ),
+        body: Stack(
+          children: [
+            Column(
+              children: [
+                Expanded(
+                  child: PageView.builder(
+                    controller: _pageController,
+                    physics: _isStampingMode
+                        ? const NeverScrollableScrollPhysics()
+                        : const BouncingScrollPhysics(),
+                    itemCount: _files.length,
+                    onPageChanged: (idx) {
+                      setState(() => _currentIndex = idx);
+                      _ensureAspectCached(idx);
+                      if (idx + 1 < _files.length) {
+                        _ensureAspectCached(idx + 1);
+                      }
+                      if (idx - 1 >= 0) {
+                        _ensureAspectCached(idx - 1);
+                      }
+                    },
+                    itemBuilder: (ctx, idx) {
+                      _ensureAspectCached(idx);
+                      final double aspect = _aspectCache[idx] ?? (3.0 / 4.0);
+
+                      return Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          _isStampingMode ? 12 : 0,
+                          _isStampingMode ? 8 : 0,
+                          _isStampingMode ? 12 : 0,
+                          _isStampingMode ? 8 : 0,
+                        ),
+                        child: LayoutBuilder(
+                          builder: (context, box) {
+                            double boxW = box.maxWidth;
+                            double boxH = boxW / aspect;
+                            if (boxH > box.maxHeight) {
+                              boxH = box.maxHeight;
+                              boxW = boxH * aspect;
+                            }
+
+                            final Widget framedPhoto = SizedBox(
+                              width: boxW,
+                              height: boxH,
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  Image.file(
+                                    _files[idx],
+                                    fit: BoxFit.contain,
+                                    gaplessPlayback: true,
+                                    errorBuilder: (_, __, ___) => const Center(
+                                      child: Icon(
+                                        Icons.broken_image_outlined,
+                                        color: Colors.white54,
+                                        size: 44,
+                                      ),
+                                    ),
+                                  ),
+                                  if (_isStampingMode)
+                                    Positioned(
+                                      left: 0,
+                                      right: 0,
+                                      bottom: 0,
+                                      child: _buildStampOverlayWidget(
+                                        activeDt: _stampDateTime,
+                                        cfg: _config.copyWith(
+                                          isManualTime: true,
+                                          manualDateTime: _stampDateTime,
                                         ),
-                                      ],
-                                    );
-                                  },
-                                ),
-                              );
-                            },
-                          ),
-                        );
-                      },
-                    ),
+                                        boxWidth: boxW,
+                                        boxHeight: boxH,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            );
+
+                            if (_isStampingMode) {
+                              return Center(child: framedPhoto);
+                            }
+
+                            return InteractiveViewer(
+                              minScale: 1.0,
+                              maxScale: 4.0,
+                              child: Center(child: framedPhoto),
+                            );
+                          },
+                        ),
+                      );
+                    },
                   ),
+                ),
+                if (_isStampingMode)
                   Container(
                     constraints: const BoxConstraints(maxHeight: 330),
-                    width: double.infinity,
                     decoration: const BoxDecoration(
                       color: Color(0xFF1A1D24),
                       borderRadius:
@@ -8004,12 +8079,12 @@ class _GalleryWatermarkEditorScreenState
                             value: _config.showLogo,
                             onChanged: (val) {
                               if (val && !hasSavedLogo) {
-                                _pickLogoImage();
+                                _pickLogo();
                               } else {
                                 _updateConfig(_config.copyWith(showLogo: val));
                               }
                             },
-                            onTapContent: _pickLogoImage,
+                            onTapContent: _pickLogo,
                           ),
                           _WatermarkRowTile(
                             icon: Icons.schedule_outlined,
@@ -8018,7 +8093,7 @@ class _GalleryWatermarkEditorScreenState
                             value: _config.showTime,
                             onChanged: (val) =>
                                 _updateConfig(_config.copyWith(showTime: val)),
-                            onTapContent: _pickStampDateTime,
+                            onTapContent: _pickDateTime,
                           ),
                           _WatermarkRowTile(
                             icon: Icons.location_on_outlined,
@@ -8027,13 +8102,13 @@ class _GalleryWatermarkEditorScreenState
                                 ? _config.customAddress
                                 : 'Ketuk untuk mengedit alamat',
                             value: _config.showAddress,
-                            onChanged: (val) => _updateConfig(
-                                _config.copyWith(showAddress: val)),
-                            onTapContent: () => _showEditTextDialog(
+                            onChanged: (val) =>
+                                _updateConfig(_config.copyWith(showAddress: val)),
+                            onTapContent: () => _editText(
                               title: 'Edit Alamat',
-                              hint: 'Masukkan alamat lokasi...',
+                              hint: 'Masukkan alamat...',
                               currentValue: _config.customAddress,
-                              onSaved: (v) => _updateConfig(
+                              onSave: (v) => _updateConfig(
                                 _config.copyWith(
                                   customAddress: v,
                                   showAddress: true,
@@ -8046,13 +8121,13 @@ class _GalleryWatermarkEditorScreenState
                             title: 'Koordinat',
                             subtitle: _config.gpsCoordsText,
                             value: _config.showCoords,
-                            onChanged: (val) => _updateConfig(
-                                _config.copyWith(showCoords: val)),
-                            onTapContent: () => _showEditTextDialog(
+                            onChanged: (val) =>
+                                _updateConfig(_config.copyWith(showCoords: val)),
+                            onTapContent: () => _editText(
                               title: 'Edit Koordinat',
-                              hint: 'Contoh: -3.658037°S, 128.198605°T',
+                              hint: 'Contoh: -3.6580°S, 128.1986°T',
                               currentValue: _config.gpsCoordsText,
-                              onSaved: (v) => _updateConfig(
+                              onSave: (v) => _updateConfig(
                                 _config.copyWith(
                                   gpsCoordsText: v,
                                   showCoords: true,
@@ -8067,13 +8142,13 @@ class _GalleryWatermarkEditorScreenState
                                 ? _config.companyText
                                 : 'Ketuk untuk mengedit',
                             value: _config.showCompany,
-                            onChanged: (val) => _updateConfig(
-                                _config.copyWith(showCompany: val)),
-                            onTapContent: () => _showEditTextDialog(
+                            onChanged: (val) =>
+                                _updateConfig(_config.copyWith(showCompany: val)),
+                            onTapContent: () => _editText(
                               title: 'Edit Perusahaan',
                               hint: 'Nama instansi / perusahaan...',
                               currentValue: _config.companyText,
-                              onSaved: (v) => _updateConfig(
+                              onSave: (v) => _updateConfig(
                                 _config.copyWith(
                                   companyText: v,
                                   showCompany: true,
@@ -8089,12 +8164,13 @@ class _GalleryWatermarkEditorScreenState
                                 : 'Ketuk untuk mengedit',
                             value: _config.showPersonName,
                             onChanged: (val) => _updateConfig(
-                                _config.copyWith(showPersonName: val)),
-                            onTapContent: () => _showEditTextDialog(
+                              _config.copyWith(showPersonName: val),
+                            ),
+                            onTapContent: () => _editText(
                               title: 'Edit Nama',
-                              hint: 'Nama petugas / pengguna...',
+                              hint: 'Nama petugas...',
                               currentValue: _config.personNameText,
-                              onSaved: (v) => _updateConfig(
+                              onSave: (v) => _updateConfig(
                                 _config.copyWith(
                                   personNameText: v,
                                   showPersonName: true,
@@ -8103,23 +8179,122 @@ class _GalleryWatermarkEditorScreenState
                             ),
                           ),
                           const SizedBox(height: 10),
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Colors.black,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 12),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton(
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: Colors.white70,
+                                    side: const BorderSide(
+                                      color: Colors.white24,
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 12,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  onPressed: () =>
+                                      setState(() => _isStampingMode = false),
+                                  child: const Text(
+                                    'Batal',
+                                    style:
+                                        TextStyle(fontWeight: FontWeight.w600),
+                                  ),
                                 ),
                               ),
-                              onPressed: _showSizePickerDialog,
-                              child: Text(
-                                'Warna & Ukuran (${_StampRenderer.colorLabel(_config.textColor)} • ${_getFormSizeLabel()})',
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w600),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                flex: 2,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.white,
+                                    foregroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 12,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  onPressed: _showSizePickerDialog,
+                                  child: Text(
+                                    'Warna & Ukuran (${_StampRenderer.colorLabel(_config.textColor)} • ${_sizeLabel()})',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  Container(
+                    color: const Color(0xFF14171E),
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                    child: SafeArea(
+                      top: false,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton.icon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFFFD000),
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              onPressed: (_isSaving || _isDeleting)
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _stampDateTime = _config.isManualTime
+                                            ? _config.manualDateTime
+                                            : DateTime.now();
+                                        _isStampingMode = true;
+                                      });
+                                    },
+                              icon: const Icon(Icons.approval_outlined, size: 20),
+                              label: const Text(
+                                'Stempel',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          SizedBox(
+                            height: 46,
+                            width: 52,
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                padding: EdgeInsets.zero,
+                                side: const BorderSide(
+                                  color: Color(0xFFFF5A5F),
+                                  width: 1.3,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              onPressed: (_isSaving || _isDeleting)
+                                  ? null
+                                  : _deleteCurrentPhotoPermanently,
+                              child: const Icon(
+                                Icons.delete_forever,
+                                color: Color(0xFFFF5A5F),
+                                size: 22,
                               ),
                             ),
                           ),
@@ -8127,8 +8302,56 @@ class _GalleryWatermarkEditorScreenState
                       ),
                     ),
                   ),
-                ],
+              ],
+            ),
+            if (_isDeleting)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  child: const Center(
+                    child: CircularProgressIndicator(color: Color(0xFFFFD000)),
+                  ),
+                ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniChipButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MiniChipButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFFFD000) : Colors.white10,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -8140,7 +8363,7 @@ class _WatermarkRowTile extends StatelessWidget {
   final String subtitle;
   final bool value;
   final ValueChanged<bool> onChanged;
-  final VoidCallback onTapContent;
+  final VoidCallback? onTapContent;
 
   const _WatermarkRowTile({
     required this.icon,
@@ -8148,31 +8371,31 @@ class _WatermarkRowTile extends StatelessWidget {
     required this.subtitle,
     required this.value,
     required this.onChanged,
-    required this.onTapContent,
+    this.onTapContent,
   });
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
           Icon(icon, color: Colors.white70, size: 22),
-          const SizedBox(width: 12),
+          const SizedBox(width: 14),
           Expanded(
             child: InkWell(
               onTap: onTapContent,
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(6),
               child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       title,
                       style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
                         color: Colors.white,
                       ),
                     ),
@@ -8202,45 +8425,6 @@ class _WatermarkRowTile extends StatelessWidget {
   }
 }
 
-class _MiniChipButton extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _MiniChipButton({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 9),
-          decoration: BoxDecoration(
-            color: selected
-                ? const Color(0xFFFFD000)
-                : Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: selected ? Colors.black : Colors.white,
-              fontWeight: FontWeight.w600,
-              fontSize: 12,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _BottomActionIcon extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -8259,7 +8443,7 @@ class _BottomActionIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = disabled
-        ? Colors.white38
+        ? Colors.white30
         : (active ? const Color(0xFFFFD000) : Colors.white);
     return GestureDetector(
       onTap: disabled ? null : onTap,
@@ -8270,15 +8454,19 @@ class _BottomActionIcon extends StatelessWidget {
             width: 44,
             height: 44,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white.withValues(alpha: disabled ? 0.05 : 0.1),
+              color: Colors.white12,
+              borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(icon, color: color, size: 22),
           ),
-          const SizedBox(height: 5),
+          const SizedBox(height: 4),
           Text(
             label,
-            style: TextStyle(color: color, fontSize: 12),
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: active ? FontWeight.bold : FontWeight.normal,
+            ),
           ),
         ],
       ),

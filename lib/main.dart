@@ -1493,31 +1493,6 @@ class _AppPrefsStore {
     });
     return _writeChain;
   }
-
-  static Future<void> updateFromWatermarkConfig(_WatermarkConfig cfg) {
-    return save(
-      _PersistentAppSettings(
-        showLogo: cfg.showLogo,
-        logoFilePath: cfg.logoFilePath,
-        showTime: cfg.showTime,
-        showAddress: cfg.showAddress,
-        customAddress: cfg.customAddress,
-        showCoords: cfg.showCoords,
-        showCompany: cfg.showCompany,
-        companyText: cfg.companyText,
-        showPersonName: cfg.showPersonName,
-        personNameText: cfg.personNameText,
-        formSize: cfg.formSize,
-        textColor: cfg.textColor,
-        aspectRatio: _current.aspectRatio,
-        qualityPreset: _current.qualityPreset,
-        shutterSoundEnabled: _current.shutterSoundEnabled,
-        gridEnabled: _current.gridEnabled,
-        volumeShutterEnabled: _current.volumeShutterEnabled,
-        saveDualPhotos: _current.saveDualPhotos,
-      ),
-    );
-  }
 }
 
 class _ShutterAudioService {
@@ -3127,7 +3102,7 @@ class _CameraScreenState extends State<CameraScreen>
       _shutterBlinkActive = false;
       _showFocusRing = false;
       _isDraggingExposure = false;
-      _LatestPhotosGridScreen.resetSessionQuota();
+      _LatestPhotosGridScreen.resetAllSessionCaches();
       unawaited(_NativeBrightnessService.setKeepScreenOn(false));
       unawaited(_NativeBrightnessService.restoreNormal());
       if (mounted &&
@@ -3152,7 +3127,7 @@ class _CameraScreenState extends State<CameraScreen>
       _isCoolingDown = false;
       _queuedCaptureTasks = 0;
       unawaited(_NativeBrightnessService.setKeepScreenOn(true));
-      _LatestPhotosGridScreen.resetSessionQuota();
+      _LatestPhotosGridScreen.resetAllSessionCaches();
       _screenFlashActive = false;
       unawaited(_NativeBrightnessService.restoreNormal());
       if (mounted) {
@@ -3542,7 +3517,7 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    _LatestPhotosGridScreen.resetSessionQuota();
+    _LatestPhotosGridScreen.resetAllSessionCaches();
     setState(() => _openDrawer = ActiveDrawer.none);
 
     _isSubScreenOpen = true;
@@ -3550,7 +3525,7 @@ class _CameraScreenState extends State<CameraScreen>
     try {
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => _LatestPhotosGridScreen(
+          builder: (_) => _AlbumFoldersScreen(
             initialConfig: _currentWatermarkConfig(),
             onConfigChanged: _applyWatermarkConfig,
           ),
@@ -3560,7 +3535,7 @@ class _CameraScreenState extends State<CameraScreen>
       _isSubScreenOpen = false;
       unawaited(_syncVolumeShutterInterception());
     }
-    _LatestPhotosGridScreen.resetSessionQuota();
+    _LatestPhotosGridScreen.resetAllSessionCaches();
   }
 
   Future<void> _pickLogoImage() async {
@@ -4220,7 +4195,7 @@ class _CameraScreenState extends State<CameraScreen>
         savedCount++;
       }
 
-      _LatestPhotosGridScreen.invalidateCache();
+      _LatestPhotosGridScreen.resetAllSessionCaches();
 
       if (mounted &&
           !_isPausedBackground &&
@@ -4980,7 +4955,7 @@ class _CameraScreenState extends State<CameraScreen>
     _cooldownTimer?.cancel();
     _shutterBlinkTimer?.cancel();
     _focusRingTimer?.cancel();
-    _LatestPhotosGridScreen.resetSessionQuota();
+    _LatestPhotosGridScreen.resetAllSessionCaches();
     unawaited(_NativeBrightnessService.setKeepScreenOn(false));
     unawaited(_NativeBrightnessService.restoreNormal());
     final ctrl = _controller;
@@ -5035,6 +5010,388 @@ class _CameraScreenState extends State<CameraScreen>
   }
 }
 
+class _AlbumFolderItem {
+  final String? bucketId;
+  final String title;
+  final String relativePath;
+  final String coverPath;
+  final int count;
+  final bool isAllVirtual;
+
+  const _AlbumFolderItem({
+    required this.bucketId,
+    required this.title,
+    required this.relativePath,
+    required this.coverPath,
+    required this.count,
+    this.isAllVirtual = false,
+  });
+}
+
+class _AlbumFoldersScreen extends StatefulWidget {
+  final _WatermarkConfig initialConfig;
+  final ValueChanged<_WatermarkConfig> onConfigChanged;
+
+  const _AlbumFoldersScreen({
+    required this.initialConfig,
+    required this.onConfigChanged,
+  });
+
+  @override
+  State<_AlbumFoldersScreen> createState() => _AlbumFoldersScreenState();
+}
+
+class _AlbumFoldersScreenState extends State<_AlbumFoldersScreen> {
+  static const MethodChannel _mediaStoreChannel =
+      MethodChannel('timestamp_by_putra/media_store');
+
+  late _WatermarkConfig _config;
+  bool _isLoading = true;
+  List<_AlbumFolderItem> _primaryAlbums = [];
+  List<_AlbumFolderItem> _otherAlbums = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _config = widget.initialConfig;
+    unawaited(_loadFolders());
+  }
+
+  String _localizeFolderTitle(String rawName, String relPath) {
+    final String lowerName = rawName.trim().toLowerCase();
+    final String lowerRel = relPath.trim().toLowerCase().replaceAll('\\', '/');
+
+    if (lowerName == 'camera' ||
+        lowerRel == 'dcim/camera/' ||
+        lowerRel.endsWith('/camera/')) {
+      return 'Kamera';
+    }
+    if (lowerName == 'screenshots' ||
+        lowerRel.contains('screenshots')) {
+      return 'Tangkapan Layar';
+    }
+    if (lowerName == 'download' ||
+        lowerName == 'downloads' ||
+        lowerRel == 'download/' ||
+        lowerRel == 'downloads/') {
+      return 'Unduhan';
+    }
+    return rawName.trim().isNotEmpty ? rawName.trim() : 'Folder';
+  }
+
+  bool _isCameraBucket(_AlbumFolderItem item) {
+    final String n = item.title.toLowerCase();
+    final String r = item.relativePath.toLowerCase().replaceAll('\\', '/');
+    return n == 'kamera' ||
+        n == 'camera' ||
+        r == 'dcim/camera/' ||
+        r.endsWith('/camera/');
+  }
+
+  bool _isScreenshotBucket(_AlbumFolderItem item) {
+    final String n = item.title.toLowerCase();
+    final String r = item.relativePath.toLowerCase().replaceAll('\\', '/');
+    return n == 'tangkapan layar' ||
+        n == 'screenshots' ||
+        r.contains('screenshots');
+  }
+
+  Future<void> _loadFolders() async {
+    if (mounted) {
+      setState(() => _isLoading = true);
+    }
+
+    if (Platform.isAndroid) {
+      try {
+        await _mediaStoreChannel
+            .invokeMethod('requestMediaPermissions')
+            .timeout(const Duration(seconds: 4));
+      } catch (_) {}
+    }
+
+    int totalAllCount = 0;
+    String latestAllCover = '';
+    final List<_AlbumFolderItem> parsedFolders = [];
+
+    if (Platform.isAndroid) {
+      try {
+        final dynamic rawRes = await _mediaStoreChannel
+            .invokeMethod('getAlbumFolders')
+            .timeout(const Duration(seconds: 12));
+        if (rawRes is Map) {
+          totalAllCount = (rawRes['totalAllCount'] as num?)?.toInt() ?? 0;
+          latestAllCover =
+              rawRes['latestAllCoverPath']?.toString().trim() ?? '';
+          final dynamic rawList = rawRes['folders'];
+          if (rawList is List) {
+            for (final entry in rawList) {
+              if (entry is! Map) continue;
+              final String bId = entry['bucketId']?.toString().trim() ?? '';
+              final String bName =
+                  entry['bucketName']?.toString().trim() ?? '';
+              final String rel =
+                  entry['relativePath']?.toString().trim() ?? '';
+              final String cover =
+                  entry['coverPath']?.toString().trim() ?? '';
+              final int cnt = (entry['count'] as num?)?.toInt() ?? 0;
+              if (bId.isEmpty || cnt <= 0 || cover.isEmpty) continue;
+
+              parsedFolders.add(
+                _AlbumFolderItem(
+                  bucketId: bId,
+                  title: _localizeFolderTitle(bName, rel),
+                  relativePath: rel,
+                  coverPath: cover,
+                  count: cnt,
+                ),
+              );
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Gagal membaca getAlbumFolders: $e');
+      }
+    }
+
+    final List<_AlbumFolderItem> primary = [];
+    final List<_AlbumFolderItem> others = [];
+
+    if (totalAllCount > 0 && latestAllCover.isNotEmpty) {
+      primary.add(
+        _AlbumFolderItem(
+          bucketId: null,
+          title: 'Semua',
+          relativePath: '',
+          coverPath: latestAllCover,
+          count: totalAllCount,
+          isAllVirtual: true,
+        ),
+      );
+    }
+
+    _AlbumFolderItem? cameraFolder;
+    _AlbumFolderItem? screenshotFolder;
+
+    for (final f in parsedFolders) {
+      if (cameraFolder == null && _isCameraBucket(f)) {
+        cameraFolder = f;
+      } else if (screenshotFolder == null && _isScreenshotBucket(f)) {
+        screenshotFolder = f;
+      } else {
+        others.add(f);
+      }
+    }
+
+    if (cameraFolder != null) primary.add(cameraFolder);
+    if (screenshotFolder != null) primary.add(screenshotFolder);
+
+    if (!mounted) return;
+    setState(() {
+      _primaryAlbums = primary;
+      _otherAlbums = others;
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _openFolder(_AlbumFolderItem folder) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _LatestPhotosGridScreen(
+          bucketId: folder.bucketId,
+          folderTitle: folder.title,
+          initialConfig: _config,
+          onConfigChanged: (updatedCfg) {
+            if (!mounted) return;
+            setState(() => _config = updatedCfg);
+            widget.onConfigChanged(updatedCfg);
+          },
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+    await _loadFolders();
+  }
+
+  Widget _buildFolderCard(_AlbumFolderItem item) {
+    final File coverFile = File(item.coverPath);
+
+    return GestureDetector(
+      onTap: () => unawaited(_openFolder(item)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                width: double.infinity,
+                color: const Color(0xFF1A1D24),
+                child: Image.file(
+                  coverFile,
+                  cacheWidth: 280,
+                  filterQuality: FilterQuality.low,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => const Center(
+                    child: Icon(
+                      Icons.folder_outlined,
+                      color: Colors.white54,
+                      size: 34,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            item.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            '${item.count}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white60,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool hasAnyFolder =
+        _primaryAlbums.isNotEmpty || _otherAlbums.isNotEmpty;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: const Text(
+          'Album',
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+        ),
+      ),
+      body: _isLoading
+          ? const Center(
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: Color(0xFFFFD000),
+              ),
+            )
+          : !hasAnyFolder
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.photo_library_outlined,
+                          size: 48,
+                          color: Colors.white54,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Album foto belum terbaca. Pastikan izin akses foto/media sudah diizinkan.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                        const SizedBox(height: 14),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFFFD000),
+                            foregroundColor: Colors.black,
+                          ),
+                          onPressed: _loadFolders,
+                          child: const Text(
+                            'Muat Ulang',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : RefreshIndicator(
+                  color: const Color(0xFFFFD000),
+                  onRefresh: _loadFolders,
+                  child: CustomScrollView(
+                    slivers: [
+                      if (_primaryAlbums.isNotEmpty)
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+                          sliver: SliverGrid(
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 3,
+                              crossAxisSpacing: 12,
+                              mainAxisSpacing: 16,
+                              childAspectRatio: 0.72,
+                            ),
+                            delegate: SliverChildBuilderDelegate(
+                              (ctx, idx) =>
+                                  _buildFolderCard(_primaryAlbums[idx]),
+                              childCount: _primaryAlbums.length,
+                            ),
+                          ),
+                        ),
+                      if (_otherAlbums.isNotEmpty) ...[
+                        const SliverToBoxAdapter(
+                          child: Padding(
+                            padding: EdgeInsets.fromLTRB(14, 10, 14, 12),
+                            child: Text(
+                              'Album Lainnya',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
+                          sliver: SliverGrid(
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 3,
+                              crossAxisSpacing: 12,
+                              mainAxisSpacing: 16,
+                              childAspectRatio: 0.72,
+                            ),
+                            delegate: SliverChildBuilderDelegate(
+                              (ctx, idx) =>
+                                  _buildFolderCard(_otherAlbums[idx]),
+                              childCount: _otherAlbums.length,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+    );
+  }
+}
+
 class _MediaEntry {
   final File file;
   final DateTime modified;
@@ -5074,31 +5431,42 @@ class _MonthlyPhotoSection {
 }
 
 class _LatestPhotosGridScreen extends StatefulWidget {
+  final String? bucketId;
+  final String folderTitle;
   final _WatermarkConfig initialConfig;
   final ValueChanged<_WatermarkConfig> onConfigChanged;
 
   const _LatestPhotosGridScreen({
+    this.bucketId,
+    this.folderTitle = 'Semua',
     required this.initialConfig,
     required this.onConfigChanged,
   });
 
   static const int _quotaStep = 2500;
-  static int _sessionQuotaLimit = _quotaStep;
-  static int? _cachedQuotaLimit;
-  static List<_MediaEntry>? _cachedEntries;
-  static bool _cachedHasMore = false;
+  static final Map<String, int> _quotaByBucket = {};
+  static final Map<String, List<_MediaEntry>> _entriesCacheByBucket = {};
+  static final Map<String, bool> _hasMoreCacheByBucket = {};
 
-  static void resetSessionQuota() {
-    _sessionQuotaLimit = _quotaStep;
-    _cachedQuotaLimit = null;
-    _cachedEntries = null;
-    _cachedHasMore = false;
+  static String _cacheKeyFor(String? bucketId) {
+    final trimmed = bucketId?.trim() ?? '';
+    return trimmed.isEmpty ? '__ALL__' : trimmed;
   }
 
-  static void invalidateCache() {
-    _cachedQuotaLimit = null;
-    _cachedEntries = null;
-    _cachedHasMore = false;
+  static void resetAllSessionCaches() {
+    _quotaByBucket.clear();
+    _entriesCacheByBucket.clear();
+    _hasMoreCacheByBucket.clear();
+  }
+
+  static void invalidateBucketCache(String? bucketId) {
+    final key = _cacheKeyFor(bucketId);
+    _entriesCacheByBucket.remove(key);
+    _hasMoreCacheByBucket.remove(key);
+    if (key != '__ALL__') {
+      _entriesCacheByBucket.remove('__ALL__');
+      _hasMoreCacheByBucket.remove('__ALL__');
+    }
   }
 
   @override
@@ -5179,11 +5547,21 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     '.heif',
   };
 
+  String get _bucketCacheKey =>
+      _LatestPhotosGridScreen._cacheKeyFor(widget.bucketId);
+
+  int get _currentBucketQuota =>
+      _LatestPhotosGridScreen._quotaByBucket[_bucketCacheKey] ??
+      _LatestPhotosGridScreen._quotaStep;
+
+  set _currentBucketQuota(int val) {
+    _LatestPhotosGridScreen._quotaByBucket[_bucketCacheKey] = val;
+  }
+
   @override
   void initState() {
     super.initState();
-    _LatestPhotosGridScreen._sessionQuotaLimit =
-        _LatestPhotosGridScreen._quotaStep;
+    _currentBucketQuota = _LatestPhotosGridScreen._quotaStep;
     _config = widget.initialConfig;
     _scrollController = ScrollController()..addListener(_onScroll);
     unawaited(_loadAllPhotos(forceRefresh: true));
@@ -5256,7 +5634,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     });
 
     if (savedNew == true) {
-      _LatestPhotosGridScreen.invalidateCache();
+      _LatestPhotosGridScreen.resetAllSessionCaches();
       await _loadAllPhotos(forceRefresh: true);
     }
   }
@@ -5275,7 +5653,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     final int deleted =
         await _PermanentDeleteService.deleteFilesPermanently(targets);
     if (deleted > 0) {
-      _LatestPhotosGridScreen.invalidateCache();
+      _LatestPhotosGridScreen.invalidateBucketCache(widget.bucketId);
       await _loadAllPhotos(forceRefresh: true);
     }
 
@@ -5381,7 +5759,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   }
 
   String _resolveDateLabelAtFraction(double fraction) {
-    if (_entries.isEmpty) return 'Terbaru';
+    if (_entries.isEmpty) return widget.folderTitle;
     final int idx = (fraction * (_entries.length - 1))
         .round()
         .clamp(0, _entries.length - 1);
@@ -5392,8 +5770,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     if (_isExpandingQuota || _isLoading || !_hasMoreBeyondQuota) return;
     _isExpandingQuota = true;
     final int prevCount = _entries.length;
-    _LatestPhotosGridScreen._sessionQuotaLimit +=
-        _LatestPhotosGridScreen._quotaStep;
+    _currentBucketQuota += _LatestPhotosGridScreen._quotaStep;
     if (mounted) {
       setState(() {});
     }
@@ -5538,15 +5915,19 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
   Future<_MediaQueryBatchResult> _queryMediaStoreNative({
     required int limit,
+    String? bucketId,
   }) async {
     if (!Platform.isAndroid) {
       return const _MediaQueryBatchResult(entries: [], hasMore: false);
     }
     try {
-      final dynamic rawRes = await _mediaStoreChannel.invokeMethod(
-        'getAllImages',
-        {'limit': limit},
-      ).timeout(const Duration(seconds: 12));
+      final Map<String, dynamic> args = {'limit': limit};
+      if (bucketId != null && bucketId.trim().isNotEmpty) {
+        args['bucketId'] = bucketId.trim();
+      }
+      final dynamic rawRes = await _mediaStoreChannel
+          .invokeMethod('getAllImages', args)
+          .timeout(const Duration(seconds: 12));
       if (rawRes == null) {
         return const _MediaQueryBatchResult(entries: [], hasMore: false);
       }
@@ -5675,13 +6056,16 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     bool forceRefresh = false,
     bool showFullScreenLoader = true,
   }) async {
-    final int activeQuota = _LatestPhotosGridScreen._sessionQuotaLimit;
+    final String key = _bucketCacheKey;
+    final int activeQuota = _currentBucketQuota;
+    final List<_MediaEntry>? cached =
+        _LatestPhotosGridScreen._entriesCacheByBucket[key];
+
     if (!forceRefresh &&
-        _LatestPhotosGridScreen._cachedEntries != null &&
-        _LatestPhotosGridScreen._cachedQuotaLimit == activeQuota &&
-        _LatestPhotosGridScreen._cachedEntries!.isNotEmpty) {
+        cached != null &&
+        cached.isNotEmpty &&
+        cached.length <= activeQuota) {
       if (mounted) {
-        final cached = _LatestPhotosGridScreen._cachedEntries!;
         setState(() {
           _entries = cached;
           _fullSections = _buildMonthlySections(cached);
@@ -5689,7 +6073,8 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
             _entries.length,
             max(_visibleCount, _initialVisibleCount),
           );
-          _hasMoreBeyondQuota = _LatestPhotosGridScreen._cachedHasMore;
+          _hasMoreBeyondQuota =
+              _LatestPhotosGridScreen._hasMoreCacheByBucket[key] ?? false;
           _isLoading = false;
         });
       }
@@ -5702,15 +6087,16 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
 
     await _ensureMediaPermissions();
 
-    _MediaQueryBatchResult batch =
-        await _queryMediaStoreNative(limit: activeQuota);
-    if (batch.entries.isEmpty) {
+    _MediaQueryBatchResult batch = await _queryMediaStoreNative(
+      limit: activeQuota,
+      bucketId: widget.bucketId,
+    );
+    if (batch.entries.isEmpty && widget.bucketId == null) {
       batch = await _scanDirectoriesFallback(limit: activeQuota);
     }
 
-    _LatestPhotosGridScreen._cachedQuotaLimit = activeQuota;
-    _LatestPhotosGridScreen._cachedEntries = batch.entries;
-    _LatestPhotosGridScreen._cachedHasMore = batch.hasMore;
+    _LatestPhotosGridScreen._entriesCacheByBucket[key] = batch.entries;
+    _LatestPhotosGridScreen._hasMoreCacheByBucket[key] = batch.hasMore;
 
     if (!mounted) return;
     setState(() {
@@ -5812,7 +6198,7 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     );
 
     if (changed == true && mounted) {
-      _LatestPhotosGridScreen.invalidateCache();
+      _LatestPhotosGridScreen.resetAllSessionCaches();
       await _loadAllPhotos(forceRefresh: true);
     }
   }
@@ -6041,7 +6427,9 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
   Widget _buildBottomPaginationFooter(int total) {
     final bool hasMoreInBatch = _visibleCount < total;
     final int nextTargetTotal =
-        _LatestPhotosGridScreen._sessionQuotaLimit + _LatestPhotosGridScreen._quotaStep;
+        _currentBucketQuota + _LatestPhotosGridScreen._quotaStep;
+    final String folderDesc =
+        widget.bucketId == null ? 'semua foto' : 'folder ${widget.folderTitle}';
 
     if (hasMoreInBatch) {
       return Padding(
@@ -6064,79 +6452,55 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 18, 16, 28),
         child: Center(
-          child: _isExpandingQuota
-              ? Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.2,
-                        color: Color(0xFFFFD000),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Memuat +2500 foto lama (target $nextTargetTotal foto)...',
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Menampilkan $total foto terbaru',
-                      style: const TextStyle(
-                        color: Colors.white60,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFFFFD000),
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 12,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: () => unawaited(_expandQuotaByStep()),
-                      icon: const Icon(Icons.history, size: 20),
-                      label: Text(
-                        'Muat +2500 Foto Lama Lagi (Jadi $nextTargetTotal)',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                  ],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Menampilkan $total foto terbaru di $folderDesc',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white60,
+                  fontSize: 12,
                 ),
+              ),
+              const SizedBox(height: 10),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFFFD000),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: _isExpandingQuota ? null : _expandQuotaByStep,
+                icon: _isExpandingQuota
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Icon(Icons.history),
+                label: Text(
+                  _isExpandingQuota
+                      ? 'Memuat 2500 foto berikutnya...'
+                      : 'Muat +2500 Foto Lama Lagi (Jadi $nextTargetTotal)',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 18),
-      child: Center(
-        child: Text(
-          'Semua foto dimuat ($total foto)',
-          style: const TextStyle(
-            color: Colors.white54,
-            fontSize: 12,
-          ),
-        ),
-      ),
-    );
+    return const SizedBox(height: 24);
   }
 
   @override
@@ -6146,104 +6510,125 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
     _scrubFractionNotifier.dispose();
     _scrubDraggingNotifier.dispose();
     _scrubDatePillNotifier.dispose();
-    _LatestPhotosGridScreen.resetSessionQuota();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final double w = MediaQuery.of(context).size.width;
-    if (w > 0) _cachedViewportWidth = w;
-
-    final total = _entries.length;
-    final sections = _buildVisibleSections(_visibleCount);
-    final int selectedCount = _selectedPaths.length;
-
-    final String appBarTitle = _selectionMode
-        ? (selectedCount > 0 ? '$selectedCount ditandai' : 'Tandai foto')
-        : (total > 0 ? 'Terbaru ($total)' : 'Terbaru');
+    final int total = _entries.length;
+    final List<_MonthlyPhotoSection> visibleSections =
+        _buildVisibleSections(_visibleCount);
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
+        leading: _selectionMode
+            ? IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: _toggleSelectionMode,
+              )
+            : IconButton(
+                icon: const Icon(Icons.arrow_back, color: Colors.white),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
         title: Text(
-          appBarTitle,
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          _selectionMode
+              ? (_selectedPaths.isEmpty
+                  ? 'Pilih Foto (2–6 Kolase / Hapus)'
+                  : '${_selectedPaths.length} Dipilih')
+              : '${widget.folderTitle} ($total)',
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         actions: [
-          if (total > 0)
+          if (!_selectionMode && total > 0 && !_isLoading)
             TextButton(
-              onPressed: _isDeleting ? null : _toggleSelectionMode,
-              child: Text(
-                _selectionMode ? 'Batal' : 'Tandai',
+              onPressed: _toggleSelectionMode,
+              child: const Text(
+                'Tandai',
                 style: TextStyle(
-                  color:
-                      _selectionMode ? const Color(0xFFFFD000) : Colors.white,
+                  color: Colors.white,
                   fontWeight: FontWeight.w600,
                 ),
               ),
             ),
         ],
       ),
-      bottomNavigationBar: _buildSelectionActionBar(),
-      body: _isLoading
-          ? const Center(
-              child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                color: Color(0xFFFFD000),
-              ),
-            )
-          : total == 0
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.photo_library_outlined,
-                          size: 48,
-                          color: Colors.white54,
-                        ),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'Foto belum terbaca. Pastikan izin akses foto/media sudah diizinkan.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white70, fontSize: 13),
-                        ),
-                        const SizedBox(height: 14),
-                        FilledButton(
-                          onPressed: () => _loadAllPhotos(forceRefresh: true),
-                          child: const Text('Muat Ulang'),
-                        ),
-                      ],
-                    ),
+      body: Stack(
+        children: [
+          _isLoading
+              ? const Center(
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Color(0xFFFFD000),
                   ),
                 )
-              : Stack(
-                  children: [
-                    RefreshIndicator(
+              : total == 0
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.photo_library_outlined,
+                              size: 48,
+                              color: Colors.white54,
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'Belum ada foto ditemukan di ${widget.folderTitle}.',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFFFD000),
+                                foregroundColor: Colors.black,
+                              ),
+                              onPressed: () =>
+                                  _loadAllPhotos(forceRefresh: true),
+                              child: const Text(
+                                'Muat Ulang',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : RefreshIndicator(
+                      color: const Color(0xFFFFD000),
                       onRefresh: () => _loadAllPhotos(forceRefresh: true),
                       child: CustomScrollView(
                         controller: _scrollController,
-                        cacheExtent: 150,
                         slivers: [
-                          for (final sec in sections) ...[
+                          for (final sec in visibleSections) ...[
                             SliverToBoxAdapter(
                               child: SizedBox(
                                 height: _headerHeight,
                                 child: Padding(
-                                  padding:
-                                      const EdgeInsets.fromLTRB(12, 14, 12, 8),
-                                  child: Text(
-                                    sec.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
+                                  padding: const EdgeInsets.fromLTRB(
+                                    10,
+                                    12,
+                                    10,
+                                    6,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      sec.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -6259,115 +6644,107 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                                   crossAxisCount: 3,
                                   crossAxisSpacing: _gridSpacing,
                                   mainAxisSpacing: _gridSpacing,
+                                  childAspectRatio: 1.0,
                                 ),
                                 delegate: SliverChildBuilderDelegate(
-                                  (ctx, idx) {
-                                    final File file = sec.entries[idx].file;
+                                  (ctx, localIdx) {
+                                    final entry = sec.entries[localIdx];
                                     final int globalIdx =
-                                        sec.startGlobalIndex + idx;
-                                    final int selIndex =
-                                        _selectedPaths.indexOf(file.path);
-                                    final bool isChecked = selIndex != -1;
-                                    final int orderBadge =
-                                        (isChecked && selIndex < _maxCollagePhotos)
-                                            ? (selIndex + 1)
-                                            : 0;
+                                        sec.startGlobalIndex + localIdx;
+                                    final String path = entry.file.path;
+                                    final int selOrder =
+                                        _selectedPaths.indexOf(path);
+                                    final bool isSelected = selOrder != -1;
 
                                     return GestureDetector(
-                                      onLongPress: () =>
-                                          _enterSelectionWithPath(file.path),
+                                      onLongPress: () {
+                                        if (!_selectionMode) {
+                                          _enterSelectionWithPath(path);
+                                        }
+                                      },
                                       onTap: () {
                                         if (_selectionMode) {
-                                          _toggleSelectPath(file.path);
+                                          _toggleSelectPath(path);
                                         } else {
-                                          unawaited(
-                                            _openPhotoWatermarkEditorAtIndex(
-                                              globalIdx,
-                                            ),
+                                          _openPhotoWatermarkEditorAtIndex(
+                                            globalIdx,
                                           );
                                         }
                                       },
-                                      child: ColoredBox(
-                                        color: const Color(0xFF14171E),
-                                        child: Stack(
-                                          fit: StackFit.expand,
-                                          children: [
-                                            Image.file(
-                                              file,
-                                              cacheWidth: 96,
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          Container(
+                                            color: const Color(0xFF1A1D24),
+                                            child: Image.file(
+                                              entry.file,
+                                              cacheWidth: 260,
                                               filterQuality: FilterQuality.low,
                                               fit: BoxFit.cover,
                                               gaplessPlayback: true,
                                               errorBuilder: (_, __, ___) =>
-                                                  const ColoredBox(
-                                                color: Color(0xFF1C2029),
+                                                  const Center(
                                                 child: Icon(
                                                   Icons.broken_image_outlined,
-                                                  color: Colors.white54,
+                                                  color: Colors.white38,
                                                 ),
                                               ),
                                             ),
-                                            if (isChecked)
+                                          ),
+                                          if (_selectionMode) ...[
+                                            if (isSelected)
                                               Container(
-                                                color: Colors.black
-                                                    .withValues(alpha: 0.34),
-                                              ),
-                                            if (_selectionMode || isChecked)
-                                              Positioned(
-                                                top: 6,
-                                                right: 6,
-                                                child: Container(
-                                                  width: 24,
-                                                  height: 24,
-                                                  decoration: BoxDecoration(
-                                                    shape: BoxShape.circle,
-                                                    color: isChecked
-                                                        ? const Color(
-                                                            0xFFFFD000,
-                                                          )
-                                                        : Colors.black
-                                                            .withValues(
-                                                              alpha: 0.45,
-                                                            ),
-                                                    border: Border.all(
-                                                      color: Colors.white,
-                                                      width: 1.5,
+                                                decoration: BoxDecoration(
+                                                  color: Colors.black
+                                                      .withValues(alpha: 0.25),
+                                                  border: Border.all(
+                                                    color: const Color(
+                                                      0xFFFFD000,
                                                     ),
+                                                    width: 2.5,
                                                   ),
-                                                  child: isChecked
-                                                      ? Center(
-                                                          child: orderBadge > 0
-                                                              ? Text(
-                                                                  '$orderBadge',
-                                                                  style:
-                                                                      const TextStyle(
-                                                                    color:
-                                                                        Colors
-                                                                            .black,
-                                                                    fontSize: 12,
-                                                                    fontWeight:
-                                                                        FontWeight
-                                                                            .w800,
-                                                                  ),
-                                                                )
-                                                              : const Icon(
-                                                                  Icons.check,
-                                                                  size: 14,
-                                                                  color: Colors
-                                                                      .black,
-                                                                ),
+                                                ),
+                                              ),
+                                            Positioned(
+                                              top: 6,
+                                              right: 6,
+                                              child: Container(
+                                                width: 24,
+                                                height: 24,
+                                                decoration: BoxDecoration(
+                                                  shape: BoxShape.circle,
+                                                  color: isSelected
+                                                      ? const Color(0xFFFFD000)
+                                                      : Colors.black
+                                                          .withValues(
+                                                              alpha: 0.55),
+                                                  border: Border.all(
+                                                    color: Colors.white,
+                                                    width: 1.5,
+                                                  ),
+                                                ),
+                                                child: Center(
+                                                  child: isSelected
+                                                      ? Text(
+                                                          '${selOrder + 1}',
+                                                          style:
+                                                              const TextStyle(
+                                                            color: Colors.black,
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                FontWeight.bold,
+                                                          ),
                                                         )
                                                       : null,
                                                 ),
                                               ),
+                                            ),
                                           ],
-                                        ),
+                                        ],
                                       ),
                                     );
                                   },
                                   childCount: sec.entries.length,
-                                  addAutomaticKeepAlives: false,
-                                  addRepaintBoundaries: true,
                                 ),
                               ),
                             ),
@@ -6378,9 +6755,20 @@ class _LatestPhotosGridScreenState extends State<_LatestPhotosGridScreen> {
                         ],
                       ),
                     ),
-                    _buildRightFastScrubber(),
-                  ],
+          if (!_isLoading && total >= 6 && !_selectionMode)
+            _buildRightFastScrubber(),
+          if (_isDeleting)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.55),
+                child: const Center(
+                  child: CircularProgressIndicator(color: Color(0xFFFFD000)),
                 ),
+              ),
+            ),
+        ],
+      ),
+      bottomNavigationBar: _buildSelectionActionBar(),
     );
   }
 }
@@ -6401,450 +6789,305 @@ class _CollageStagePreviewScreen extends StatefulWidget {
 
 class _CollageStagePreviewScreenState
     extends State<_CollageStagePreviewScreen> {
-  static const int _minSlots = 2;
-  static const int _maxSlots = 6;
-  static const double _previewGap = 4.0;
-  static const double _previewOuterPad = 4.0;
+  final Random _random = Random();
 
-  final ImagePicker _picker = ImagePicker();
-  final Random _rng = Random();
+  late List<File> _slotFiles;
+  late List<Offset> _slotPans;
+  late List<double> _slotAspectRatios;
+  late CollageLayoutId _selectedLayout;
+  late _WatermarkConfig _config;
+  late DateTime _stampDateTime;
 
-  late int _slotCount;
-  late CollageLayoutId _layoutId;
-  late List<File?> _slots;
-  late List<Offset> _slotPanNorms;
-  final Map<String, Size> _photoDimsCache = {};
-  int? _draggingSlotIndex;
-  bool _hasDirtyChanges = false;
+  bool _applyStamp = false;
   bool _isSaving = false;
+  int? _activeSlotIndex;
+
+  double _gap = 4.0;
+  double _outerPadding = 6.0;
+  Color _bgColor = Colors.white;
+
+  static const List<Color> _bgSwatches = [
+    Colors.white,
+    Colors.black,
+    Color(0xFFF3F4F6),
+    Color(0xFF1F2937),
+    Color(0xFFFEF3C7),
+    Color(0xFFDBEAFE),
+    Color(0xFFFCE7F3),
+  ];
 
   @override
   void initState() {
     super.initState();
-    final List<File> initial = widget.selectedFiles.take(_maxSlots).toList();
-    _slotCount = initial.length.clamp(_minSlots, _maxSlots);
-    _layoutId = _CollageLayoutCatalog.defaultForCount(_slotCount).id;
-    _slots = List<File?>.generate(
-      _slotCount,
-      (i) => i < initial.length ? initial[i] : null,
-    );
-    _slotPanNorms = List<Offset>.generate(_slotCount, (_) => Offset.zero);
-    for (final f in _slots) {
-      if (f != null) unawaited(_cacheImageDimensions(f));
-    }
+    _slotFiles = List<File>.from(widget.selectedFiles);
+    _slotPans = List<Offset>.filled(_slotFiles.length, Offset.zero);
+    _slotAspectRatios = List<double>.filled(_slotFiles.length, 3.0 / 4.0);
+    _selectedLayout =
+        _CollageLayoutCatalog.defaultForCount(_slotFiles.length).id;
+    _config = widget.initialConfig;
+    _stampDateTime = _config.isManualTime
+        ? _config.manualDateTime
+        : DateTime.now();
+    unawaited(_detectInitialImageAspects());
   }
 
-  Future<void> _cacheImageDimensions(File file) async {
-    if (_photoDimsCache.containsKey(file.path)) return;
-    try {
-      if (!await file.exists()) return;
-      final Uint8List bytes = await file.readAsBytes();
-      final Size? dims = await compute(_decodeDimensionsIsolate, bytes);
-      if (dims == null || dims.width <= 0 || dims.height <= 0 || !mounted) {
-        return;
-      }
-      setState(() {
-        _photoDimsCache[file.path] = dims;
-      });
-    } catch (_) {}
-  }
+  Future<void> _detectInitialImageAspects() async {
+    final List<File> filesSnapshot = List<File>.from(_slotFiles);
+    final List<double> detected = List<double>.from(_slotAspectRatios);
 
-  static Size? _decodeDimensionsIsolate(Uint8List bytes) {
-    if (bytes.length < 64) return null;
-    final img.Image? decoded = img.decodeImage(bytes);
-    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
-      return null;
-    }
-    final img.Image oriented = img.bakeOrientation(decoded);
-    return Size(oriented.width.toDouble(), oriented.height.toDouble());
-  }
-
-  List<double> _currentSlotAspectRatios({double fallback = 1.0}) {
-    final List<double> ratios = [];
-    for (int i = 0; i < _slotCount; i++) {
-      final File? f = i < _slots.length ? _slots[i] : null;
-      if (f != null) {
-        final Size? dims = _photoDimsCache[f.path];
-        if (dims != null && dims.width > 0 && dims.height > 0) {
-          ratios.add(dims.width / dims.height);
-          continue;
+    for (int i = 0; i < filesSnapshot.length; i++) {
+      try {
+        if (!await filesSnapshot[i].exists()) continue;
+        final Uint8List bytes = await filesSnapshot[i].readAsBytes();
+        final _ImageAspectInfo? info =
+            await compute(_inspectAspectFromBytesIsolate, bytes);
+        if (info != null &&
+            info.aspectRatio.isFinite &&
+            info.aspectRatio > 0.05 &&
+            info.aspectRatio < 20.0) {
+          detected[i] = info.aspectRatio;
         }
-      }
-      ratios.add(fallback);
+      } catch (_) {}
     }
-    return ratios;
-  }
 
-  Offset _panForSlot(int index) {
-    if (index < 0 || index >= _slotPanNorms.length) return Offset.zero;
-    return _slotPanNorms[index];
-  }
-
-  void _setPanForSlot(int index, Offset nextPan) {
-    if (index < 0 || index >= _slotPanNorms.length) return;
-    _slotPanNorms[index] = Offset(
-      nextPan.dx.clamp(-1.0, 1.0),
-      nextPan.dy.clamp(-1.0, 1.0),
-    );
-  }
-
-  void _resetPanForSlot(int index) {
-    if (index < 0 || index >= _slotPanNorms.length) return;
+    if (!mounted) return;
     setState(() {
-      _slotPanNorms[index] = Offset.zero;
-      _hasDirtyChanges = true;
+      for (int i = 0;
+          i < min(detected.length, _slotAspectRatios.length);
+          i++) {
+        _slotAspectRatios[i] = detected[i];
+      }
     });
   }
 
-  void _handleSlotPanDrag(
-    int index,
-    Offset deltaPx,
+  void _swapSlots(int fromIdx, int toIdx) {
+    if (fromIdx == toIdx ||
+        fromIdx < 0 ||
+        toIdx < 0 ||
+        fromIdx >= _slotFiles.length ||
+        toIdx >= _slotFiles.length) {
+      return;
+    }
+    setState(() {
+      final File tmpFile = _slotFiles[fromIdx];
+      _slotFiles[fromIdx] = _slotFiles[toIdx];
+      _slotFiles[toIdx] = tmpFile;
+
+      final Offset tmpPan = _slotPans[fromIdx];
+      _slotPans[fromIdx] = _slotPans[toIdx];
+      _slotPans[toIdx] = tmpPan;
+
+      final double tmpRatio = _slotAspectRatios[fromIdx];
+      _slotAspectRatios[fromIdx] = _slotAspectRatios[toIdx];
+      _slotAspectRatios[toIdx] = tmpRatio;
+
+      _activeSlotIndex = toIdx;
+    });
+  }
+
+  void _handleSlotPanUpdate(
+    int slotIdx,
+    DragUpdateDetails details,
     double slotW,
     double slotH,
   ) {
-    if (_isSaving || index < 0 || index >= _slots.length) return;
-    final File? file = _slots[index];
-    if (file == null) return;
-
-    final Size? dims = _photoDimsCache[file.path];
-    if (dims == null || dims.width <= 0 || dims.height <= 0) {
-      unawaited(_cacheImageDimensions(file));
-      return;
-    }
-    if (slotW <= 1 || slotH <= 1) return;
-
-    final double srcRatio = dims.width / dims.height;
-    final double dstRatio = slotW / slotH;
-
-    double maxShiftX = 0.0;
-    double maxShiftY = 0.0;
-
-    if (srcRatio > dstRatio + 0.005) {
-      final double renderedW = slotH * srcRatio;
-      maxShiftX = max(0.0, (renderedW - slotW) / 2.0);
-    } else if (dstRatio > srcRatio + 0.005) {
-      final double renderedH = slotW / srcRatio;
-      maxShiftY = max(0.0, (renderedH - slotH) / 2.0);
-    }
-
-    if (maxShiftX <= 0.5 && maxShiftY <= 0.5) return;
-
-    final Offset currentNorm = _panForSlot(index);
-    final double currentShiftX = currentNorm.dx * maxShiftX;
-    final double currentShiftY = currentNorm.dy * maxShiftY;
-
-    final double nextShiftX =
-        (currentShiftX + deltaPx.dx).clamp(-maxShiftX, maxShiftX);
-    final double nextShiftY =
-        (currentShiftY + deltaPx.dy).clamp(-maxShiftY, maxShiftY);
-
-    final double nextNormX =
-        maxShiftX > 0.5 ? (nextShiftX / maxShiftX).clamp(-1.0, 1.0) : 0.0;
-    final double nextNormY =
-        maxShiftY > 0.5 ? (nextShiftY / maxShiftY).clamp(-1.0, 1.0) : 0.0;
-
+    if (slotIdx < 0 || slotIdx >= _slotPans.length) return;
+    final double dxNorm = details.delta.dx / max(40.0, slotW * 0.5);
+    final double dyNorm = details.delta.dy / max(40.0, slotH * 0.5);
+    final Offset cur = _slotPans[slotIdx];
     setState(() {
-      _setPanForSlot(index, Offset(nextNormX, nextNormY));
-      _hasDirtyChanges = true;
-    });
-  }
-
-  void _changeSlotCount(int delta) {
-    if (_isSaving) return;
-    final int nextCount = (_slotCount + delta).clamp(_minSlots, _maxSlots);
-    if (nextCount == _slotCount) return;
-
-    final List<File?> nextSlots = List<File?>.filled(nextCount, null);
-    final List<Offset> nextPans = List<Offset>.filled(nextCount, Offset.zero);
-    for (int i = 0; i < nextCount; i++) {
-      if (i < _slots.length) {
-        nextSlots[i] = _slots[i];
-        nextPans[i] = _slotPanNorms[i];
-      } else if (i < widget.selectedFiles.length) {
-        nextSlots[i] = widget.selectedFiles[i];
-        unawaited(_cacheImageDimensions(widget.selectedFiles[i]));
-      }
-    }
-
-    final List<_CollageLayoutDef> matchingLayouts =
-        _CollageLayoutCatalog.layoutsForCount(nextCount);
-    final CollageLayoutId nextLayout =
-        matchingLayouts.any((l) => l.id == _layoutId)
-            ? _layoutId
-            : matchingLayouts.first.id;
-
-    setState(() {
-      _slotCount = nextCount;
-      _slots = nextSlots;
-      _slotPanNorms = nextPans;
-      _layoutId = nextLayout;
-      _hasDirtyChanges = true;
-    });
-  }
-
-  void _selectLayout(CollageLayoutId id) {
-    if (_isSaving || _layoutId == id) return;
-    setState(() {
-      _layoutId = id;
-      _hasDirtyChanges = true;
-    });
-  }
-
-  Future<void> _pickPhotoForSlot(int slotIndex) async {
-    if (_isSaving || slotIndex < 0 || slotIndex >= _slots.length) return;
-    try {
-      final XFile? picked = await _picker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 92,
+      _activeSlotIndex = slotIdx;
+      _slotPans[slotIdx] = Offset(
+        (cur.dx + dxNorm).clamp(-1.0, 1.0),
+        (cur.dy + dyNorm).clamp(-1.0, 1.0),
       );
-      if (picked != null && mounted) {
-        final File newFile = File(picked.path);
-        unawaited(_cacheImageDimensions(newFile));
-        setState(() {
-          _slots[slotIndex] = newFile;
-          _slotPanNorms[slotIndex] = Offset.zero;
-          _hasDirtyChanges = true;
-        });
-      }
-    } catch (e) {
-      debugPrint('Gagal memilih foto slot kolase: $e');
-    }
+    });
   }
 
-  Future<bool> _confirmCancel() async {
-    if (_isSaving) return false;
-    if (!_hasDirtyChanges) {
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop(false);
-      }
-      return true;
-    }
-
-    final bool? discard = await showDialog<bool>(
+  Future<void> _pickStampDateTime() async {
+    final DateTime? pickedDate = await showDatePicker(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1D24),
-        title: const Text('Batalkan kolase?'),
-        content: const Text(
-          'Perubahan kolase saat ini akan dibuang dan kembali ke album.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Lanjut mengedit'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFFD9383A),
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Buang'),
-          ),
-        ],
-      ),
+      locale: const Locale('id', 'ID'),
+      initialDate: _stampDateTime,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
     );
-    if (discard == true && mounted) {
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop(false);
-      }
-      return true;
-    }
-    return false;
-  }
+    if (pickedDate == null || !mounted) return;
 
-  int _targetHdCanvasWidth(int count) {
-    if (count <= 3) return 1440;
-    if (count <= 5) return 1600;
-    return 1800;
-  }
-
-  Future<Uint8List?> _loadCroppedSlotBytesAsync({
-    required File file,
-    required int dstW,
-    required int dstH,
-    required Offset panNorm,
-  }) async {
-    if (!await file.exists()) return null;
-    final Uint8List bytes = await file.readAsBytes();
-    if (bytes.length < 64) return null;
-    return compute(
-      _processSlotCropIsolate,
-      _SlotCropRequest(
-        bytes: bytes,
-        dstW: dstW,
-        dstH: dstH,
-        panX: panNorm.dx,
-        panY: panNorm.dy,
-      ),
+    final TimeOfDay? pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_stampDateTime),
     );
+    if (pickedTime == null || !mounted) return;
+
+    setState(() {
+      _stampDateTime = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+        pickedTime.hour,
+        pickedTime.minute,
+        0,
+      );
+      _applyStamp = true;
+    });
   }
 
-  Future<void> _saveHdCollage() async {
-    if (_isSaving) return;
-
-    final List<File> activeFiles =
-        _slots.whereType<File>().take(_slotCount).toList();
-    if (activeFiles.length < _slotCount || _slotCount < _minSlots) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Isi semua slot foto terlebih dahulu sebelum menyimpan'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-      }
-      return;
-    }
-
+  Future<void> _saveHighResCollage() async {
+    if (_isSaving || _slotFiles.isEmpty) return;
     setState(() => _isSaving = true);
-    String? tempOutPath;
 
+    String? tempOutPath;
     try {
-      final List<double> slotRatios = [];
-      for (final f in activeFiles) {
-        Size? dims = _photoDimsCache[f.path];
-        if (dims == null && await f.exists()) {
-          final Uint8List raw = await f.readAsBytes();
-          dims = await compute(_decodeDimensionsIsolate, raw);
-          if (dims != null) {
-            _photoDimsCache[f.path] = dims;
-          }
-        }
-        if (dims != null && dims.width > 0 && dims.height > 0) {
-          slotRatios.add(dims.width / dims.height);
-        } else {
-          slotRatios.add(1.0);
+      final double adaptiveAspect =
+          _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
+        layoutId: _selectedLayout,
+        slotAspectRatios: _slotAspectRatios,
+        canvasW: 1080.0,
+        gap: _gap * 2.5,
+        outerPadding: _outerPadding * 2.5,
+      );
+
+      const int outW = 1080;
+      final int outH = max(720, min(3240, (outW / adaptiveAspect).round()));
+      final double scaleToOut = outW / 360.0;
+
+      final List<_CollageSlotRect> outSlots =
+          _CollageLayoutCatalog.computeSlots(
+        layoutId: _selectedLayout,
+        canvasW: outW.toDouble(),
+        canvasH: outH.toDouble(),
+        gap: _gap * scaleToOut,
+        outerPadding: _outerPadding * scaleToOut,
+        slotAspectRatios: _slotAspectRatios,
+      );
+
+      final List<Uint8List?> processedSlotJpgs =
+          List<Uint8List?>.filled(outSlots.length, null);
+
+      for (final slot in outSlots) {
+        if (slot.index >= _slotFiles.length) continue;
+        final File f = _slotFiles[slot.index];
+        if (!await f.exists()) continue;
+        final Uint8List rawBytes = await f.readAsBytes();
+        final Offset pan = slot.index < _slotPans.length
+            ? _slotPans[slot.index]
+            : Offset.zero;
+
+        final Uint8List? croppedBytes = await compute(
+          _processSlotCropIsolate,
+          _SlotCropRequest(
+            bytes: rawBytes,
+            dstW: max(16, slot.w.round()),
+            dstH: max(16, slot.h.round()),
+            panX: pan.dx,
+            panY: pan.dy,
+          ),
+        );
+        processedSlotJpgs[slot.index] = croppedBytes;
+      }
+
+      final recorder = ui.PictureRecorder();
+      final canvas =
+          Canvas(recorder, Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()));
+
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
+        Paint()..color = _bgColor,
+      );
+
+      for (final slot in outSlots) {
+        final Uint8List? slotBytes = processedSlotJpgs[slot.index];
+        if (slotBytes == null || slotBytes.isEmpty) continue;
+        final codec = await ui.instantiateImageCodec(slotBytes);
+        final frame = await codec.getNextFrame();
+        final ui.Image slotUiImg = frame.image;
+        try {
+          canvas.drawImageRect(
+            slotUiImg,
+            Rect.fromLTWH(
+              0,
+              0,
+              slotUiImg.width.toDouble(),
+              slotUiImg.height.toDouble(),
+            ),
+            Rect.fromLTWH(slot.x, slot.y, slot.w, slot.h),
+            Paint()..filterQuality = FilterQuality.high,
+          );
+        } finally {
+          slotUiImg.dispose();
         }
       }
 
-      final int canvasW = _targetHdCanvasWidth(_slotCount);
-      final double hdPad = max(6.0, (canvasW * 0.01).roundToDouble());
-      final double hdGap = max(6.0, (canvasW * 0.01).roundToDouble());
-
-      final double adaptiveRatio =
-          _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
-        layoutId: _layoutId,
-        slotAspectRatios: slotRatios,
-        canvasW: canvasW.toDouble(),
-        gap: hdGap,
-        outerPadding: hdPad,
-      );
-      final int canvasH = max(320, (canvasW / adaptiveRatio).round());
-
-      final List<_CollageSlotRect> hdSlots = _CollageLayoutCatalog.computeSlots(
-        layoutId: _layoutId,
-        canvasW: canvasW.toDouble(),
-        canvasH: canvasH.toDouble(),
-        gap: hdGap,
-        outerPadding: hdPad,
-        slotAspectRatios: slotRatios,
-      );
-
-      final List<ui.Image?> slotImages =
-          List<ui.Image?>.filled(hdSlots.length, null);
-
-      try {
-        for (int i = 0; i < hdSlots.length && i < activeFiles.length; i++) {
-          final _CollageSlotRect slot = hdSlots[i];
-          final int dstW = max(1, slot.w.round());
-          final int dstH = max(1, slot.h.round());
-          final Offset panNorm = _panForSlot(i);
-          final Uint8List? croppedJpg = await _loadCroppedSlotBytesAsync(
-            file: activeFiles[i],
-            dstW: dstW,
-            dstH: dstH,
-            panNorm: panNorm,
-          );
-          if (croppedJpg != null) {
-            final ui.Codec codec = await ui.instantiateImageCodec(croppedJpg);
-            final ui.FrameInfo frame = await codec.getNextFrame();
-            slotImages[i] = frame.image;
-          }
-        }
-
-        final ui.PictureRecorder recorder = ui.PictureRecorder();
-        final Canvas canvas = Canvas(
-          recorder,
-          Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()),
-        );
-
-        canvas.drawRect(
-          Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()),
-          Paint()..color = const Color(0xFFFFFFFF),
-        );
-
-        final Paint imgPaint = Paint()..filterQuality = FilterQuality.high;
-        for (int i = 0; i < hdSlots.length; i++) {
-          final _CollageSlotRect slot = hdSlots[i];
-          final ui.Image? im = slotImages[i];
-          if (im == null) continue;
-          canvas.drawImageRect(
-            im,
-            Rect.fromLTWH(0, 0, im.width.toDouble(), im.height.toDouble()),
-            Rect.fromLTWH(slot.x, slot.y, slot.w, slot.h),
-            imgPaint,
-          );
-        }
-
-        final ui.Image composed =
-            await recorder.endRecording().toImage(canvasW, canvasH);
-        Uint8List rgbaBytes;
-        try {
-          final ByteData? byteData =
-              await composed.toByteData(format: ui.ImageByteFormat.rawRgba);
-          if (byteData == null) {
-            throw Exception('Gagal mengekstrak piksel kolase HD');
-          }
-          rgbaBytes = Uint8List.fromList(byteData.buffer.asUint8List());
-        } finally {
-          composed.dispose();
-        }
-
-        final Uint8List cleanJpg = await compute(
-          _processCompositeDecodedIsolate,
-          _CompositeDecodedRequest(
-            baseRgbaBytes: rgbaBytes,
-            width: canvasW,
-            height: canvasH,
-            overlayRgbaBytes: null,
+      if (_applyStamp) {
+        final ui.Image stampOverlay = await _StampRenderer.renderOverlayImage(
+          targetW: outW,
+          targetH: outH,
+          activeDt: _stampDateTime,
+          cfg: _config.copyWith(
+            isManualTime: true,
+            manualDateTime: _stampDateTime,
           ),
         );
+        try {
+          canvas.drawImage(stampOverlay, Offset.zero, Paint());
+        } finally {
+          stampOverlay.dispose();
+        }
+      }
 
-        final Directory tempDir = await getTemporaryDirectory();
-        final String uniqueId =
-            '${DateTime.now().millisecondsSinceEpoch}_${_rng.nextInt(9999)}';
-        tempOutPath = '${tempDir.path}/collage_hd_$uniqueId.jpg';
-        final File outFile = File(tempOutPath);
-        await outFile.writeAsBytes(cleanJpg, flush: true);
-
-        await Gal.putImage(outFile.path);
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Kolase HD $_slotCount foto (${canvasW}x${canvasH}px) tersimpan ke galeri',
-              ),
-              backgroundColor: Colors.green,
-            ),
-          );
-          Navigator.of(context).pop(true);
+      final ui.Image finalUiImg =
+          await recorder.endRecording().toImage(outW, outH);
+      Uint8List? rawRgba;
+      try {
+        final byteData =
+            await finalUiImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+        if (byteData != null) {
+          rawRgba = Uint8List.fromList(byteData.buffer.asUint8List());
         }
       } finally {
-        for (final im in slotImages) {
-          im?.dispose();
-        }
+        finalUiImg.dispose();
       }
+
+      if (rawRgba == null || rawRgba.isEmpty) {
+        throw Exception('Gagal merender kanvas kolase');
+      }
+
+      final Uint8List finalJpgBytes = await compute(
+        _processCompositeDecodedIsolate,
+        _CompositeDecodedRequest(
+          baseRgbaBytes: rawRgba,
+          width: outW,
+          height: outH,
+          overlayRgbaBytes: null,
+        ),
+      );
+
+      final dir = await getTemporaryDirectory();
+      final String uniqueId =
+          '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
+      tempOutPath = '${dir.path}/collage_hd_$uniqueId.jpg';
+      final outFile = File(tempOutPath);
+      await outFile.writeAsBytes(finalJpgBytes, flush: true);
+
+      await Gal.putImage(outFile.path);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Kolase HD berhasil disimpan ke Galeri'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.of(context).pop(true);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Gagal menyimpan kolase HD: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Gagal menyimpan kolase: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     } finally {
       if (tempOutPath != null) {
         try {
@@ -6858,372 +7101,392 @@ class _CollageStagePreviewScreenState
     }
   }
 
-  Widget _buildLayoutThumbnail(_CollageLayoutDef def, bool isSelected) {
-    const double thumbW = 46.0;
-    const double thumbH = 56.0;
-    final List<_CollageSlotRect> miniSlots = _CollageLayoutCatalog.computeSlots(
+  Widget _buildLayoutThumbIcon(_CollageLayoutDef def, bool isSelected) {
+    final List<_CollageSlotRect> miniSlots =
+        _CollageLayoutCatalog.computeSlots(
       layoutId: def.id,
-      canvasW: thumbW,
-      canvasH: thumbH,
+      canvasW: 40,
+      canvasH: 48,
       gap: 2.0,
       outerPadding: 3.0,
     );
 
-    return GestureDetector(
-      onTap: () => _selectLayout(def.id),
-      child: Container(
-        margin: const EdgeInsets.only(right: 10),
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? const Color(0xFFFFD000).withValues(alpha: 0.16)
-              : const Color(0xFF181B22),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected ? const Color(0xFFFFD000) : Colors.white24,
-            width: isSelected ? 2.0 : 1.0,
-          ),
+    return Container(
+      width: 54,
+      height: 62,
+      decoration: BoxDecoration(
+        color: isSelected
+            ? const Color(0xFFFFD000).withValues(alpha: 0.16)
+            : const Color(0xFF1A1D24),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isSelected ? const Color(0xFFFFD000) : Colors.white24,
+          width: isSelected ? 2.0 : 1.0,
         ),
+      ),
+      child: Center(
         child: SizedBox(
-          width: thumbW,
-          height: thumbH,
+          width: 40,
+          height: 48,
           child: Stack(
-            children: [
-              for (final s in miniSlots)
-                Positioned(
-                  left: s.x,
-                  top: s.y,
-                  width: s.w,
-                  height: s.h,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: isSelected
-                          ? const Color(0xFFFFD000)
-                          : Colors.white54,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
+            children: miniSlots.map((r) {
+              return Positioned(
+                left: r.x,
+                top: r.y,
+                width: r.w,
+                height: r.h,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color:
+                        isSelected ? const Color(0xFFFFD000) : Colors.white60,
+                    borderRadius: BorderRadius.circular(1.5),
                   ),
                 ),
-            ],
+              );
+            }).toList(),
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildInteractiveSlot({
-    required _CollageSlotRect slot,
-    required File? file,
-  }) {
-    final int idx = slot.index;
-    final Offset panNorm = _panForSlot(idx);
-    final bool isDraggingThis = _draggingSlotIndex == idx;
-
-    return Positioned(
-      left: slot.x,
-      top: slot.y,
-      width: slot.w,
-      height: slot.h,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => _pickPhotoForSlot(idx),
-        onDoubleTap: file != null ? () => _resetPanForSlot(idx) : null,
-        onPanStart: file != null
-            ? (_) {
-                if (!_isSaving) {
-                  setState(() => _draggingSlotIndex = idx);
-                }
-              }
-            : null,
-        onPanUpdate: file != null
-            ? (details) =>
-                _handleSlotPanDrag(idx, details.delta, slot.w, slot.h)
-            : null,
-        onPanEnd: file != null
-            ? (_) {
-                if (_draggingSlotIndex == idx && mounted) {
-                  setState(() => _draggingSlotIndex = null);
-                }
-              }
-            : null,
-        onPanCancel: file != null
-            ? () {
-                if (_draggingSlotIndex == idx && mounted) {
-                  setState(() => _draggingSlotIndex = null);
-                }
-              }
-            : null,
-        child: Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFFECEFF4),
-            border: isDraggingThis
-                ? Border.all(
-                    color: const Color(0xFFFFD000),
-                    width: 2.0,
-                  )
-                : null,
-          ),
-          child: file != null
-              ? Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ClipRect(
-                      child: Image.file(
-                        file,
-                        cacheWidth: 960,
-                        fit: BoxFit.cover,
-                        alignment: Alignment(-panNorm.dx, -panNorm.dy),
-                        gaplessPlayback: true,
-                        errorBuilder: (_, __, ___) => const Center(
-                          child: Icon(
-                            Icons.broken_image_outlined,
-                            color: Colors.black45,
-                          ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      right: 5,
-                      bottom: 5,
-                      child: Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.55),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.swap_horiz,
-                          size: 13,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ],
-                )
-              : const Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.add_photo_alternate_outlined,
-                        color: Colors.black54,
-                        size: 26,
-                      ),
-                      SizedBox(height: 4),
-                      Text(
-                        'Tambah',
-                        style: TextStyle(
-                          color: Colors.black54,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStageCanvas() {
-    final List<double> slotRatios = _currentSlotAspectRatios();
-
-    return LayoutBuilder(
-      builder: (context, outerBox) {
-        final double maxW = max(120.0, outerBox.maxWidth - 24.0);
-        final double maxH = max(120.0, outerBox.maxHeight - 16.0);
-
-        final double ar =
-            _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
-          layoutId: _layoutId,
-          slotAspectRatios: slotRatios,
-          canvasW: maxW,
-          gap: _previewGap,
-          outerPadding: _previewOuterPad,
-        );
-
-        double stageW = maxW;
-        double stageH = stageW / ar;
-        if (stageH > maxH) {
-          stageH = maxH;
-          stageW = stageH * ar;
-        }
-
-        final List<_CollageSlotRect> previewSlots =
-            _CollageLayoutCatalog.computeSlots(
-          layoutId: _layoutId,
-          canvasW: stageW,
-          canvasH: stageH,
-          gap: _previewGap,
-          outerPadding: _previewOuterPad,
-          slotAspectRatios: slotRatios,
-        );
-
-        return Center(
-          child: Container(
-            width: stageW,
-            height: stageH,
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFFFFF),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.65),
-                  blurRadius: 16,
-                  offset: const Offset(0, 6),
-                ),
-              ],
-            ),
-            child: Stack(
-              children: [
-                for (final slot in previewSlots)
-                  _buildInteractiveSlot(
-                    slot: slot,
-                    file: slot.index < _slots.length ? _slots[slot.index] : null,
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final List<_CollageLayoutDef> availableLayouts =
-        _CollageLayoutCatalog.layoutsForCount(_slotCount);
-    final int filledCount = _slots.whereType<File>().take(_slotCount).length;
-    final bool canSave = filledCount == _slotCount && !_isSaving;
+        _CollageLayoutCatalog.layoutsForCount(_slotFiles.length);
+    final _CollageLayoutDef currentDef =
+        _CollageLayoutCatalog.findById(_selectedLayout);
 
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) {
-          unawaited(_confirmCancel());
-        }
-      },
-      child: Scaffold(
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
         backgroundColor: Colors.black,
-        appBar: AppBar(
-          backgroundColor: Colors.black,
-          leading: IconButton(
-            onPressed: _isSaving ? null : () => unawaited(_confirmCancel()),
-            icon: const Icon(Icons.close, color: Colors.white),
-            tooltip: 'Batal',
-          ),
-          title: Text(
-            'Kolase ($_slotCount Foto)',
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-          ),
-          actions: [
-            Padding(
-              padding: const EdgeInsets.only(right: 10),
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor:
-                      canSave ? const Color(0xFFFFD000) : Colors.white12,
-                  foregroundColor: canSave ? Colors.black : Colors.white38,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-                onPressed: canSave ? _saveHdCollage : null,
-                child: _isSaving
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.black,
-                        ),
-                      )
-                    : const Text(
-                        'Simpan HD',
-                        style: TextStyle(fontWeight: FontWeight.w700),
+        title: Text(
+          'Kolase (${_slotFiles.length} Foto)',
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFFFD000),
+                foregroundColor: Colors.black,
+              ),
+              onPressed: _isSaving ? null : _saveHighResCollage,
+              icon: _isSaving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.black,
                       ),
+                    )
+                  : const Icon(Icons.check, size: 18),
+              label: Text(
+                _isSaving ? 'Menyimpan...' : 'Simpan',
+                style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
-          ],
-        ),
-        body: Column(
-          children: [
-            Expanded(
-              child: _buildStageCanvas(),
-            ),
-            Container(
-              color: const Color(0xFF14171E),
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 16),
-              child: SafeArea(
-                top: false,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'Jumlah Foto',
-                          style: TextStyle(
-                            color: Colors.white70,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+              child: LayoutBuilder(
+                builder: (context, outerBox) {
+                  final double ar =
+                      _CollageLayoutCatalog.computeAdaptiveCanvasAspectRatio(
+                    layoutId: currentDef.id,
+                    slotAspectRatios: _slotAspectRatios,
+                    canvasW: max(120.0, outerBox.maxWidth),
+                    gap: _gap,
+                    outerPadding: _outerPadding,
+                  );
+                  double canvasW = outerBox.maxWidth;
+                  double canvasH = canvasW / ar;
+                  if (canvasH > outerBox.maxHeight) {
+                    canvasH = outerBox.maxHeight;
+                    canvasW = canvasH * ar;
+                  }
+
+                  final List<_CollageSlotRect> slots =
+                      _CollageLayoutCatalog.computeSlots(
+                    layoutId: currentDef.id,
+                    canvasW: canvasW,
+                    canvasH: canvasH,
+                    gap: _gap,
+                    outerPadding: _outerPadding,
+                    slotAspectRatios: _slotAspectRatios,
+                  );
+
+                  return Center(
+                    child: Container(
+                      width: canvasW,
+                      height: canvasH,
+                      decoration: BoxDecoration(
+                        color: _bgColor,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.5),
+                            blurRadius: 12,
                           ),
-                        ),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              onPressed: (_slotCount > _minSlots && !_isSaving)
-                                  ? () => _changeSlotCount(-1)
-                                  : null,
-                              icon: const Icon(Icons.remove_circle_outline),
-                              color: Colors.white,
-                              visualDensity: VisualDensity.compact,
-                            ),
-                            Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 8),
-                              child: Text(
-                                '$_slotCount',
-                                style: const TextStyle(
-                                  color: Color(0xFFFFD000),
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800,
-                                ),
+                        ],
+                      ),
+                      child: Stack(
+                        children: [
+                          for (final slot in slots)
+                            Positioned(
+                              left: slot.x,
+                              top: slot.y,
+                              width: slot.w,
+                              height: slot.h,
+                              child: DragTarget<int>(
+                                onWillAcceptWithDetails: (details) =>
+                                    details.data != slot.index,
+                                onAcceptWithDetails: (details) =>
+                                    _swapSlots(details.data, slot.index),
+                                builder: (ctx, candidateData, rejectedData) {
+                                  final bool isDropTarget =
+                                      candidateData.isNotEmpty;
+                                  final bool isActive =
+                                      _activeSlotIndex == slot.index;
+                                  final Offset pan =
+                                      slot.index < _slotPans.length
+                                          ? _slotPans[slot.index]
+                                          : Offset.zero;
+
+                                  return LongPressDraggable<int>(
+                                    data: slot.index,
+                                    feedback: Material(
+                                      color: Colors.transparent,
+                                      child: SizedBox(
+                                        width: slot.w * 0.72,
+                                        height: slot.h * 0.72,
+                                        child: Opacity(
+                                          opacity: 0.85,
+                                          child: Image.file(
+                                            _slotFiles[slot.index],
+                                            cacheWidth: 320,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    child: GestureDetector(
+                                      onTap: () {
+                                        setState(
+                                          () => _activeSlotIndex = slot.index,
+                                        );
+                                      },
+                                      onPanUpdate: (details) =>
+                                          _handleSlotPanUpdate(
+                                        slot.index,
+                                        details,
+                                        slot.w,
+                                        slot.h,
+                                      ),
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          border: isDropTarget
+                                              ? Border.all(
+                                                  color:
+                                                      const Color(0xFFFFD000),
+                                                  width: 3,
+                                                )
+                                              : (isActive
+                                                  ? Border.all(
+                                                      color: const Color(
+                                                        0xFFFFD000,
+                                                      ),
+                                                      width: 1.8,
+                                                    )
+                                                  : null),
+                                        ),
+                                        child: ClipRect(
+                                          child: Image.file(
+                                            _slotFiles[slot.index],
+                                            cacheWidth: 720,
+                                            fit: BoxFit.cover,
+                                            alignment: Alignment(
+                                              pan.dx,
+                                              pan.dy,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
                               ),
                             ),
-                            IconButton(
-                              onPressed: (_slotCount < _maxSlots && !_isSaving)
-                                  ? () => _changeSlotCount(1)
-                                  : null,
-                              icon: const Icon(Icons.add_circle_outline),
-                              color: Colors.white,
-                              visualDensity: VisualDensity.compact,
+                          if (_applyStamp)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: _buildStampOverlayWidget(
+                                activeDt: _stampDateTime,
+                                cfg: _config.copyWith(
+                                  isManualTime: true,
+                                  manualDateTime: _stampDateTime,
+                                ),
+                                boxWidth: canvasW,
+                                boxHeight: canvasH,
+                              ),
                             ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      height: 70,
-                      child: ListView(
-                        scrollDirection: Axis.horizontal,
-                        children: [
-                          for (final def in availableLayouts)
-                            _buildLayoutThumbnail(def, def.id == _layoutId),
                         ],
                       ),
                     ),
-                  ],
-                ),
+                  );
+                },
               ),
             ),
-          ],
-        ),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(bottom: 4),
+            child: Text(
+              'Geser foto untuk atur posisi • Tahan & seret untuk tukar kotak',
+              style: TextStyle(color: Colors.white54, fontSize: 11),
+            ),
+          ),
+          Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFF161920),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+            ),
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    height: 66,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: availableLayouts.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 10),
+                      itemBuilder: (ctx, idx) {
+                        final def = availableLayouts[idx];
+                        final bool isSel = def.id == _selectedLayout;
+                        return GestureDetector(
+                          onTap: () => setState(() => _selectedLayout = def.id),
+                          child: _buildLayoutThumbIcon(def, isSel),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 58,
+                        child: Text(
+                          'Jarak',
+                          style: TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ),
+                      Expanded(
+                        child: Slider(
+                          value: _gap,
+                          min: 0,
+                          max: 18,
+                          activeColor: const Color(0xFFFFD000),
+                          onChanged: (v) => setState(() => _gap = v),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const SizedBox(
+                        width: 44,
+                        child: Text(
+                          'Tepi',
+                          style: TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ),
+                      Expanded(
+                        child: Slider(
+                          value: _outerPadding,
+                          min: 0,
+                          max: 24,
+                          activeColor: const Color(0xFFFFD000),
+                          onChanged: (v) => setState(() => _outerPadding = v),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      const Text(
+                        'Latar:',
+                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: SizedBox(
+                          height: 28,
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: _bgSwatches.length,
+                            separatorBuilder: (_, __) =>
+                                const SizedBox(width: 8),
+                            itemBuilder: (ctx, i) {
+                              final c = _bgSwatches[i];
+                              final bool sel = _bgColor == c;
+                              return GestureDetector(
+                                onTap: () => setState(() => _bgColor = c),
+                                child: Container(
+                                  width: 26,
+                                  height: 26,
+                                  decoration: BoxDecoration(
+                                    color: c,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: sel
+                                          ? const Color(0xFFFFD000)
+                                          : Colors.white38,
+                                      width: sel ? 2.5 : 1.0,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilterChip(
+                        selected: _applyStamp,
+                        label: Text(
+                          _applyStamp ? 'Stempel ON' : 'Stempel OFF',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        onSelected: (v) => setState(() => _applyStamp = v),
+                      ),
+                      if (_applyStamp) ...[
+                        const SizedBox(width: 4),
+                        IconButton(
+                          onPressed: _pickStampDateTime,
+                          icon: const Icon(
+                            Icons.edit_calendar,
+                            size: 19,
+                            color: Color(0xFFFFD000),
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Ubah Tanggal & Jam Stempel',
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -7255,13 +7518,11 @@ class _GalleryWatermarkEditorScreenState
   late List<File> _files;
   late PageController _pageController;
   late int _currentIndex;
-  late _WatermarkConfig _cfg;
-  bool _showStampOverlay = false;
-  bool _drawerOpen = false;
+  late _WatermarkConfig _config;
+  late DateTime _stampDateTime;
   bool _isSaving = false;
   bool _isDeleting = false;
-  bool _anySavedOrDeleted = false;
-  final Map<String, double> _aspectCache = {};
+  bool _hasAnyModification = false;
 
   @override
   void initState() {
@@ -7269,36 +7530,69 @@ class _GalleryWatermarkEditorScreenState
     _files = List<File>.from(widget.photoFiles);
     _currentIndex = widget.initialIndex.clamp(0, max(0, _files.length - 1));
     _pageController = PageController(initialPage: _currentIndex);
-    _cfg = widget.initialConfig;
-    if (_files.isNotEmpty) {
-      unawaited(_ensureAspectCached(_files[_currentIndex]));
-    }
+    _config = widget.initialConfig;
+    _stampDateTime =
+        _config.isManualTime ? _config.manualDateTime : DateTime.now();
   }
 
-  File get _currentFile => _files[_currentIndex];
+  File get _currentPhotoFile => _files[_currentIndex];
 
-  Future<void> _ensureAspectCached(File file) async {
-    final String path = file.path;
-    if (_aspectCache.containsKey(path)) return;
-    try {
-      if (!await file.exists()) return;
-      final Uint8List bytes = await file.readAsBytes();
-      final _ImageAspectInfo? info =
-          await compute(_inspectAspectFromBytesIsolate, bytes);
-      if (info != null && mounted) {
-        setState(() {
-          _aspectCache[path] = info.aspectRatio;
-        });
-      }
-    } catch (_) {}
-  }
-
-  void _updateCfg(_WatermarkConfig next) {
-    setState(() => _cfg = next);
+  void _updateConfig(_WatermarkConfig next) {
+    setState(() => _config = next);
     widget.onConfigUpdated(next);
   }
 
-  Future<void> _pickLogo() async {
+  Future<void> _deleteCurrentPhotoPermanently() async {
+    if (_files.isEmpty || _isDeleting || _isSaving) return;
+    final File target = _currentPhotoFile;
+    final bool ok =
+        await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
+      context,
+      count: 1,
+    );
+    if (!ok || !mounted) return;
+
+    setState(() => _isDeleting = true);
+    final int deleted =
+        await _PermanentDeleteService.deleteFilesPermanently([target.path]);
+
+    if (!mounted) return;
+    if (deleted > 0) {
+      _hasAnyModification = true;
+      setState(() {
+        _files.removeAt(_currentIndex);
+        _isDeleting = false;
+        if (_files.isNotEmpty) {
+          _currentIndex = _currentIndex.clamp(0, _files.length - 1);
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Foto dihapus permanen'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      if (_files.isEmpty) {
+        Navigator.of(context).pop(true);
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_pageController.hasClients) {
+            _pageController.jumpToPage(_currentIndex);
+          }
+        });
+      }
+    } else {
+      setState(() => _isDeleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Penghapusan permanen dibatalkan atau ditolak'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+  }
+
+  Future<void> _pickLogoImage() async {
     try {
       final XFile? picked = await _picker.pickImage(
         source: ImageSource.gallery,
@@ -7307,23 +7601,20 @@ class _GalleryWatermarkEditorScreenState
       if (picked != null && mounted) {
         final permanentPath = await _AppPrefsStore.persistLogoFile(picked.path);
         if (!mounted) return;
-        _updateCfg(
-          _cfg.copyWith(logoFilePath: permanentPath, showLogo: true),
+        _updateConfig(
+          _config.copyWith(logoFilePath: permanentPath, showLogo: true),
         );
       }
     } catch (e) {
-      debugPrint('Gagal memilih logo di galeri: $e');
+      debugPrint('Gagal memilih logo di editor album: $e');
     }
   }
 
-  Future<void> _pickManualDateTime() async {
-    final DateTime base =
-        _cfg.isManualTime ? _cfg.manualDateTime : DateTime.now();
-
+  Future<void> _pickStampDateTime() async {
     final DateTime? pickedDate = await showDatePicker(
       context: context,
       locale: const Locale('id', 'ID'),
-      initialDate: base,
+      initialDate: _stampDateTime,
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
     );
@@ -7331,39 +7622,42 @@ class _GalleryWatermarkEditorScreenState
 
     final TimeOfDay? pickedTime = await showTimePicker(
       context: context,
-      initialTime: TimeOfDay.fromDateTime(base),
+      initialTime: TimeOfDay.fromDateTime(_stampDateTime),
     );
     if (pickedTime == null || !mounted) return;
 
-    _updateCfg(
-      _cfg.copyWith(
-        manualDateTime: DateTime(
-          pickedDate.year,
-          pickedDate.month,
-          pickedDate.day,
-          pickedTime.hour,
-          pickedTime.minute,
-          0,
-        ),
-        isManualTime: true,
+    setState(() {
+      _stampDateTime = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+        pickedTime.hour,
+        pickedTime.minute,
+        0,
+      );
+    });
+    _updateConfig(
+      _config.copyWith(
         showTime: true,
+        isManualTime: true,
+        manualDateTime: _stampDateTime,
       ),
     );
   }
 
-  Future<void> _editTextField({
+  Future<void> _showEditTextDialog({
     required String title,
     required String hint,
-    required String initialVal,
-    required ValueChanged<String> onApply,
+    required String currentValue,
+    required ValueChanged<String> onSaved,
   }) async {
-    final ctrl = TextEditingController(text: initialVal);
-    final res = await showDialog<String>(
+    final controller = TextEditingController(text: currentValue);
+    final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(title),
         content: TextField(
-          controller: ctrl,
+          controller: controller,
           autofocus: true,
           maxLines: 3,
           decoration: InputDecoration(
@@ -7377,22 +7671,22 @@ class _GalleryWatermarkEditorScreenState
             child: const Text('Batal'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            onPressed: () => Navigator.pop(ctx, controller.text),
             child: const Text('Simpan'),
           ),
         ],
       ),
     );
-    ctrl.dispose();
+    controller.dispose();
 
-    if (res != null && mounted) {
-      onApply(res.trim());
+    if (result != null && mounted) {
+      onSaved(result.trim());
     }
   }
 
-  Future<void> _pickSizeAndColorDialog() async {
-    StampFormSize tempSize = _cfg.formSize;
-    StampTextColor tempColor = _cfg.textColor;
+  Future<void> _showSizePickerDialog() async {
+    StampFormSize tempSize = _config.formSize;
+    StampTextColor tempColor = _config.textColor;
 
     await showDialog<void>(
       context: context,
@@ -7426,7 +7720,7 @@ class _GalleryWatermarkEditorScreenState
                     title: Text(item.$2),
                     onTap: () {
                       tempSize = item.$1;
-                      if (mounted) _updateCfg(_cfg.copyWith(formSize: item.$1));
+                      _updateConfig(_config.copyWith(formSize: item.$1));
                       setDialogState(() {});
                     },
                   ),
@@ -7450,13 +7744,18 @@ class _GalleryWatermarkEditorScreenState
                       label: Text(_StampRenderer.colorLabel(c)),
                       onSelected: (_) {
                         tempColor = c;
-                        if (mounted) {
-                          _updateCfg(_cfg.copyWith(textColor: c));
-                        }
+                        _updateConfig(_config.copyWith(textColor: c));
                         setDialogState(() {});
                       },
                     );
                   }).toList(),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  tempColor == StampTextColor.black
+                      ? 'Shadow aktif: Putih (karena teks Hitam)'
+                      : 'Shadow aktif: Hitam',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
                 ),
               ],
             ),
@@ -7472,112 +7771,51 @@ class _GalleryWatermarkEditorScreenState
     );
   }
 
-  Future<void> _deleteCurrentPhotoPermanently() async {
-    if (_files.isEmpty || _isDeleting || _isSaving) return;
-    final File target = _currentFile;
-    final bool ok =
-        await _PermanentDeleteService.confirmPermanentDeleteAndPermission(
-      context,
-      count: 1,
-    );
-    if (!ok || !mounted) return;
-
-    setState(() => _isDeleting = true);
-    final int deleted =
-        await _PermanentDeleteService.deleteFilesPermanently([target.path]);
-
-    if (!mounted) return;
-    setState(() => _isDeleting = false);
-
-    if (deleted > 0) {
-      _anySavedOrDeleted = true;
-      setState(() {
-        _aspectCache.remove(target.path);
-        _files.removeAt(_currentIndex);
-        if (_files.isNotEmpty) {
-          _currentIndex = _currentIndex.clamp(0, _files.length - 1);
-          unawaited(_ensureAspectCached(_files[_currentIndex]));
-        }
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Foto berhasil dihapus permanen'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      if (_files.isEmpty) {
-        Navigator.of(context).pop(true);
-      } else {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && _pageController.hasClients) {
-            _pageController.jumpToPage(_currentIndex);
-          }
-        });
-      }
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Penghapusan permanen dibatalkan atau ditolak'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-    }
-  }
-
-  Future<void> _saveStampedCopyToGallery() async {
+  Future<void> _saveStampedCopy() async {
     if (_isSaving || _files.isEmpty) return;
-    setState(() {
-      _isSaving = true;
-      _drawerOpen = false;
-    });
+    setState(() => _isSaving = true);
 
     String? tempOutPath;
     try {
-      final File targetFile = _currentFile;
-      if (!await targetFile.exists()) {
-        throw Exception('File foto sumber tidak ditemukan.');
-      }
-
-      final Uint8List sourceBytes = await targetFile.readAsBytes();
-      final DateTime stampDt =
-          _cfg.isManualTime ? _cfg.manualDateTime : DateTime.now();
+      final rawBytes = await _currentPhotoFile.readAsBytes();
+      final effectiveCfg = _config.copyWith(
+        isManualTime: true,
+        manualDateTime: _stampDateTime,
+      );
 
       final Uint8List stampedJpgBytes =
           await _StampRenderer.buildStampedJpgBytes(
-        baseJpgBytes: sourceBytes,
-        activeDt: stampDt,
-        cfg: _cfg,
+        baseJpgBytes: rawBytes,
+        activeDt: _stampDateTime,
+        cfg: effectiveCfg,
       );
 
-      final Directory tempDir = await getTemporaryDirectory();
-      final String uid =
+      final dir = await getTemporaryDirectory();
+      final String uniqueId =
           '${DateTime.now().millisecondsSinceEpoch}_${_random.nextInt(9999)}';
-      tempOutPath = '${tempDir.path}/album_stamp_$uid.jpg';
-      final File outFile = File(tempOutPath);
+      tempOutPath = '${dir.path}/album_stamp_$uniqueId.jpg';
+      final outFile = File(tempOutPath);
       await outFile.writeAsBytes(stampedJpgBytes, flush: true);
 
       await Gal.putImage(outFile.path);
-      _anySavedOrDeleted = true;
+      _hasAnyModification = true;
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Salinan foto dengan stempel berhasil disimpan'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Foto berstempel baru berhasil disimpan ke Galeri'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.of(context).pop(true);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Gagal menyimpan stempel foto: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Gagal menyimpan stempel: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     } finally {
       if (tempOutPath != null) {
         try {
@@ -7591,252 +7829,15 @@ class _GalleryWatermarkEditorScreenState
     }
   }
 
-  Widget _buildSinglePhotoViewport(File file) {
-    final DateTime activeDt =
-        _cfg.isManualTime ? _cfg.manualDateTime : DateTime.now();
-
-    return LayoutBuilder(
-      builder: (context, outerBox) {
-        final double? ratio = _aspectCache[file.path];
-        if (ratio == null) {
-          unawaited(_ensureAspectCached(file));
-        }
-        final double effectiveRatio = ratio ?? (3.0 / 4.0);
-
-        double boxW = outerBox.maxWidth;
-        double boxH = boxW / effectiveRatio;
-        if (outerBox.maxHeight.isFinite && boxH > outerBox.maxHeight) {
-          boxH = outerBox.maxHeight;
-          boxW = boxH * effectiveRatio;
-        }
-
-        return Center(
-          child: SizedBox(
-            width: boxW,
-            height: boxH,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.file(
-                  file,
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const Center(
-                    child: Icon(
-                      Icons.broken_image_outlined,
-                      size: 48,
-                      color: Colors.white54,
-                    ),
-                  ),
-                ),
-                if (_showStampOverlay)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: _buildStampOverlayWidget(
-                      activeDt: activeDt,
-                      cfg: _cfg,
-                      boxWidth: boxW,
-                      boxHeight: boxH,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildBottomEditDrawer() {
-    if (!_drawerOpen || !_showStampOverlay) {
-      return const SizedBox.shrink();
+  String _getFormSizeLabel() {
+    switch (_config.formSize) {
+      case StampFormSize.small:
+        return 'Kecil';
+      case StampFormSize.medium:
+        return 'Sedang';
+      case StampFormSize.large:
+        return 'Besar';
     }
-
-    final DateTime activeDt =
-        _cfg.isManualTime ? _cfg.manualDateTime : DateTime.now();
-    final String timeSub = _cfg.isManualTime
-        ? '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)} (Manual)'
-        : '${_StampRenderer.formatHari(activeDt)}, ${_StampRenderer.formatTanggalLengkap(activeDt)} ${_StampRenderer.formatJamMenit(activeDt)}';
-
-    final bool hasLogo = _cfg.logoFilePath != null &&
-        _cfg.logoFilePath!.isNotEmpty &&
-        File(_cfg.logoFilePath!).existsSync();
-
-    String sizeLabel = 'Sedang';
-    if (_cfg.formSize == StampFormSize.small) sizeLabel = 'Kecil';
-    if (_cfg.formSize == StampFormSize.large) sizeLabel = 'Besar';
-
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 330),
-      width: double.infinity,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1A1D24),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Sunting tanda air',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
-                  ),
-                ),
-                IconButton(
-                  onPressed: () => setState(() => _drawerOpen = false),
-                  icon: const Icon(Icons.close, color: Colors.white70),
-                  visualDensity: VisualDensity.compact,
-                ),
-              ],
-            ),
-            _WatermarkRowTile(
-              icon: Icons.image_outlined,
-              title: 'Logo',
-              subtitle: hasLogo
-                  ? 'Logo aktif (ketuk untuk ganti)'
-                  : 'Ketuk untuk memilih logo',
-              value: _cfg.showLogo,
-              onChanged: (val) {
-                if (val && !hasLogo) {
-                  _pickLogo();
-                } else {
-                  _updateCfg(_cfg.copyWith(showLogo: val));
-                }
-              },
-              onTapContent: _pickLogo,
-            ),
-            _WatermarkRowTile(
-              icon: Icons.schedule_outlined,
-              title: 'Waktu',
-              subtitle: timeSub,
-              value: _cfg.showTime,
-              onChanged: (val) => _updateCfg(
-                _cfg.copyWith(
-                  showTime: val,
-                  isManualTime: val ? _cfg.isManualTime : false,
-                ),
-              ),
-              onTapContent: _pickManualDateTime,
-            ),
-            _WatermarkRowTile(
-              icon: Icons.location_on_outlined,
-              title: 'Alamat',
-              subtitle: _cfg.customAddress.isNotEmpty
-                  ? _cfg.customAddress
-                  : 'Ketuk untuk mengedit alamat',
-              value: _cfg.showAddress,
-              onChanged: (val) => _updateCfg(_cfg.copyWith(showAddress: val)),
-              onTapContent: () => _editTextField(
-                title: 'Edit Alamat',
-                hint: 'Masukkan alamat lokasi...',
-                initialVal: _cfg.customAddress,
-                onApply: (v) => _updateCfg(
-                  _cfg.copyWith(customAddress: v, showAddress: true),
-                ),
-              ),
-            ),
-            _WatermarkRowTile(
-              icon: Icons.public_outlined,
-              title: 'Koordinat',
-              subtitle: _cfg.gpsCoordsText,
-              value: _cfg.showCoords,
-              onChanged: (val) => _updateCfg(_cfg.copyWith(showCoords: val)),
-              onTapContent: () => _editTextField(
-                title: 'Edit Koordinat',
-                hint: 'Masukkan koordinat GPS...',
-                initialVal: _cfg.gpsCoordsText,
-                onApply: (v) => _updateCfg(
-                  _cfg.copyWith(gpsCoordsText: v, showCoords: true),
-                ),
-              ),
-            ),
-            _WatermarkRowTile(
-              icon: Icons.notes_outlined,
-              title: 'Perusahaan',
-              subtitle: _cfg.companyText.isNotEmpty
-                  ? _cfg.companyText
-                  : 'Ketuk untuk mengedit',
-              value: _cfg.showCompany,
-              onChanged: (val) => _updateCfg(_cfg.copyWith(showCompany: val)),
-              onTapContent: () => _editTextField(
-                title: 'Edit Perusahaan',
-                hint: 'Nama instansi / perusahaan...',
-                initialVal: _cfg.companyText,
-                onApply: (v) =>
-                    _updateCfg(_cfg.copyWith(companyText: v, showCompany: true)),
-              ),
-            ),
-            _WatermarkRowTile(
-              icon: Icons.badge_outlined,
-              title: 'Nama',
-              subtitle: _cfg.personNameText.isNotEmpty
-                  ? _cfg.personNameText
-                  : 'Ketuk untuk mengedit',
-              value: _cfg.showPersonName,
-              onChanged: (val) =>
-                  _updateCfg(_cfg.copyWith(showPersonName: val)),
-              onTapContent: () => _editTextField(
-                title: 'Edit Nama',
-                hint: 'Nama petugas / pengguna...',
-                initialVal: _cfg.personNameText,
-                onApply: (v) => _updateCfg(
-                  _cfg.copyWith(personNameText: v, showPersonName: true),
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    onPressed: _pickSizeAndColorDialog,
-                    child: Text(
-                      'Warna & Ukuran (${_StampRenderer.colorLabel(_cfg.textColor)} • $sizeLabel)',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFFFD000),
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    onPressed: () => setState(() => _drawerOpen = false),
-                    child: const Text(
-                      'Selesai',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   @override
@@ -7847,15 +7848,22 @@ class _GalleryWatermarkEditorScreenState
 
   @override
   Widget build(BuildContext context) {
-    final int total = _files.length;
-    final String counterTitle =
-        total > 0 ? 'Foto ${_currentIndex + 1} / $total' : 'Foto';
+    final effectiveCfg = _config.copyWith(
+      isManualTime: true,
+      manualDateTime: _stampDateTime,
+    );
+    final String timeSubLabel =
+        '${_StampRenderer.formatHari(_stampDateTime)}, ${_StampRenderer.formatTanggalLengkap(_stampDateTime)} ${_StampRenderer.formatJamMenit(_stampDateTime)}';
+
+    final bool hasSavedLogo = _config.logoFilePath != null &&
+        _config.logoFilePath!.isNotEmpty &&
+        File(_config.logoFilePath!).existsSync();
 
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) {
-          Navigator.of(context).pop(_anySavedOrDeleted);
+          Navigator.of(context).pop(_hasAnyModification);
         }
       },
       child: Scaffold(
@@ -7864,23 +7872,50 @@ class _GalleryWatermarkEditorScreenState
           backgroundColor: Colors.black,
           leading: IconButton(
             icon: const Icon(Icons.arrow_back, color: Colors.white),
-            onPressed: () => Navigator.of(context).pop(_anySavedOrDeleted),
+            onPressed: () => Navigator.of(context).pop(_hasAnyModification),
           ),
           title: Text(
-            counterTitle,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            _files.isEmpty
+                ? 'Sunting Stempel'
+                : 'Foto ${_currentIndex + 1} / ${_files.length}',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           actions: [
             IconButton(
-              onPressed: (_isSaving || _isDeleting || total == 0)
+              onPressed: (_isDeleting || _isSaving || _files.isEmpty)
                   ? null
                   : _deleteCurrentPhotoPermanently,
               icon: const Icon(Icons.delete_forever, color: Color(0xFFFF5A5F)),
-              tooltip: 'Hapus Permanen',
+              tooltip: 'Hapus Permanen Foto Ini',
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFFFD000),
+                  foregroundColor: Colors.black,
+                ),
+                onPressed:
+                    (_isSaving || _isDeleting || _files.isEmpty) ? null : _saveStampedCopy,
+                icon: _isSaving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Icon(Icons.save_alt, size: 18),
+                label: Text(
+                  _isSaving ? 'Menyimpan...' : 'Simpan Baru',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
             ),
           ],
         ),
-        body: total == 0
+        body: _files.isEmpty
             ? const Center(
                 child: Text(
                   'Tidak ada foto tersisa.',
@@ -7892,219 +7927,208 @@ class _GalleryWatermarkEditorScreenState
                   Expanded(
                     child: PageView.builder(
                       controller: _pageController,
-                      itemCount: total,
+                      itemCount: _files.length,
                       onPageChanged: (idx) {
-                        setState(() {
-                          _currentIndex = idx;
-                        });
-                        unawaited(_ensureAspectCached(_files[idx]));
+                        setState(() => _currentIndex = idx);
                       },
-                      itemBuilder: (_, idx) =>
-                          _buildSinglePhotoViewport(_files[idx]),
+                      itemBuilder: (context, idx) {
+                        final fileItem = _files[idx];
+                        return Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: LayoutBuilder(
+                            builder: (context, outerBox) {
+                              return Center(
+                                child: Image.file(
+                                  fileItem,
+                                  fit: BoxFit.contain,
+                                  frameBuilder: (ctx, child, frame, wasSync) {
+                                    return Stack(
+                                      alignment: Alignment.bottomLeft,
+                                      children: [
+                                        child,
+                                        Positioned(
+                                          left: 0,
+                                          right: 0,
+                                          bottom: 0,
+                                          child: LayoutBuilder(
+                                            builder: (c, imgBox) {
+                                              final double renderedW =
+                                                  imgBox.maxWidth.isFinite
+                                                      ? imgBox.maxWidth
+                                                      : outerBox.maxWidth;
+                                              final double renderedH =
+                                                  imgBox.maxHeight.isFinite
+                                                      ? imgBox.maxHeight
+                                                      : outerBox.maxHeight;
+                                              return _buildStampOverlayWidget(
+                                                activeDt: _stampDateTime,
+                                                cfg: effectiveCfg,
+                                                boxWidth: renderedW,
+                                                boxHeight: renderedH,
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                ),
+                              );
+                            },
+                          ),
+                        );
+                      },
                     ),
                   ),
-                  _buildBottomEditDrawer(),
                   Container(
-                    color: const Color(0xFF14171E),
-                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
-                    child: SafeArea(
-                      top: false,
-                      child: Row(
+                    constraints: const BoxConstraints(maxHeight: 330),
+                    width: double.infinity,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF1A1D24),
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(18)),
+                    ),
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: _showStampOverlay
-                                    ? const Color(0xFFFFD000)
-                                    : Colors.white,
-                                side: BorderSide(
-                                  color: _showStampOverlay
-                                      ? const Color(0xFFFFD000)
-                                      : Colors.white30,
+                          _WatermarkRowTile(
+                            icon: Icons.image_outlined,
+                            title: 'Logo',
+                            subtitle: hasSavedLogo
+                                ? (_config.showLogo
+                                    ? 'Logo aktif (ketuk untuk ganti)'
+                                    : 'Logo tersimpan (ketuk untuk ganti)')
+                                : 'Ketuk untuk memilih logo',
+                            value: _config.showLogo,
+                            onChanged: (val) {
+                              if (val && !hasSavedLogo) {
+                                _pickLogoImage();
+                              } else {
+                                _updateConfig(_config.copyWith(showLogo: val));
+                              }
+                            },
+                            onTapContent: _pickLogoImage,
+                          ),
+                          _WatermarkRowTile(
+                            icon: Icons.schedule_outlined,
+                            title: 'Waktu & Tanggal Stempel',
+                            subtitle: timeSubLabel,
+                            value: _config.showTime,
+                            onChanged: (val) =>
+                                _updateConfig(_config.copyWith(showTime: val)),
+                            onTapContent: _pickStampDateTime,
+                          ),
+                          _WatermarkRowTile(
+                            icon: Icons.location_on_outlined,
+                            title: 'Alamat',
+                            subtitle: _config.customAddress.isNotEmpty
+                                ? _config.customAddress
+                                : 'Ketuk untuk mengedit alamat',
+                            value: _config.showAddress,
+                            onChanged: (val) => _updateConfig(
+                                _config.copyWith(showAddress: val)),
+                            onTapContent: () => _showEditTextDialog(
+                              title: 'Edit Alamat',
+                              hint: 'Masukkan alamat lokasi...',
+                              currentValue: _config.customAddress,
+                              onSaved: (v) => _updateConfig(
+                                _config.copyWith(
+                                  customAddress: v,
+                                  showAddress: true,
                                 ),
+                              ),
+                            ),
+                          ),
+                          _WatermarkRowTile(
+                            icon: Icons.public_outlined,
+                            title: 'Koordinat',
+                            subtitle: _config.gpsCoordsText,
+                            value: _config.showCoords,
+                            onChanged: (val) => _updateConfig(
+                                _config.copyWith(showCoords: val)),
+                            onTapContent: () => _showEditTextDialog(
+                              title: 'Edit Koordinat',
+                              hint: 'Contoh: -3.658037°S, 128.198605°T',
+                              currentValue: _config.gpsCoordsText,
+                              onSaved: (v) => _updateConfig(
+                                _config.copyWith(
+                                  gpsCoordsText: v,
+                                  showCoords: true,
+                                ),
+                              ),
+                            ),
+                          ),
+                          _WatermarkRowTile(
+                            icon: Icons.notes_outlined,
+                            title: 'Perusahaan',
+                            subtitle: _config.companyText.isNotEmpty
+                                ? _config.companyText
+                                : 'Ketuk untuk mengedit',
+                            value: _config.showCompany,
+                            onChanged: (val) => _updateConfig(
+                                _config.copyWith(showCompany: val)),
+                            onTapContent: () => _showEditTextDialog(
+                              title: 'Edit Perusahaan',
+                              hint: 'Nama instansi / perusahaan...',
+                              currentValue: _config.companyText,
+                              onSaved: (v) => _updateConfig(
+                                _config.copyWith(
+                                  companyText: v,
+                                  showCompany: true,
+                                ),
+                              ),
+                            ),
+                          ),
+                          _WatermarkRowTile(
+                            icon: Icons.badge_outlined,
+                            title: 'Nama',
+                            subtitle: _config.personNameText.isNotEmpty
+                                ? _config.personNameText
+                                : 'Ketuk untuk mengedit',
+                            value: _config.showPersonName,
+                            onChanged: (val) => _updateConfig(
+                                _config.copyWith(showPersonName: val)),
+                            onTapContent: () => _showEditTextDialog(
+                              title: 'Edit Nama',
+                              hint: 'Nama petugas / pengguna...',
+                              currentValue: _config.personNameText,
+                              onSaved: (v) => _updateConfig(
+                                _config.copyWith(
+                                  personNameText: v,
+                                  showPersonName: true,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                foregroundColor: Colors.black,
                                 padding:
                                     const EdgeInsets.symmetric(vertical: 12),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                               ),
-                              onPressed: _isSaving
-                                  ? null
-                                  : () {
-                                      setState(() {
-                                        if (!_showStampOverlay) {
-                                          _showStampOverlay = true;
-                                          _drawerOpen = true;
-                                        } else {
-                                          _drawerOpen = !_drawerOpen;
-                                        }
-                                      });
-                                    },
-                              icon: const Icon(Icons.edit_outlined, size: 18),
-                              label: Text(
-                                _showStampOverlay
-                                    ? (_drawerOpen
-                                        ? 'Tutup Form'
-                                        : 'Edit Stempel')
-                                    : 'Tambah Stempel',
+                              onPressed: _showSizePickerDialog,
+                              child: Text(
+                                'Warna & Ukuran (${_StampRenderer.colorLabel(_config.textColor)} • ${_getFormSizeLabel()})',
                                 style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
+                                    fontWeight: FontWeight.w600),
                               ),
                             ),
                           ),
-                          if (_showStampOverlay) ...[
-                            const SizedBox(width: 10),
-                            IconButton(
-                              onPressed: _isSaving
-                                  ? null
-                                  : () => setState(() {
-                                        _showStampOverlay = false;
-                                        _drawerOpen = false;
-                                      }),
-                              icon: const Icon(
-                                Icons.visibility_off_outlined,
-                                color: Colors.white70,
-                              ),
-                              tooltip: 'Sembunyikan Stempel',
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: FilledButton.icon(
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFFFFD000),
-                                  foregroundColor: Colors.black,
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 12),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                ),
-                                onPressed: _isSaving
-                                    ? null
-                                    : _saveStampedCopyToGallery,
-                                icon: _isSaving
-                                    ? const SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.black,
-                                        ),
-                                      )
-                                    : const Icon(Icons.save_alt, size: 18),
-                                label: const Text(
-                                  'Simpan Salinan',
-                                  style: TextStyle(fontWeight: FontWeight.w700),
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
                   ),
                 ],
               ),
-      ),
-    );
-  }
-}
-
-class _MiniChipButton extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _MiniChipButton({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            color: selected ? const Color(0xFFFFD000) : Colors.black38,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: selected ? const Color(0xFFFFD000) : Colors.white24,
-            ),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: selected ? Colors.black : Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BottomActionIcon extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool active;
-  final bool disabled;
-  final VoidCallback onTap;
-
-  const _BottomActionIcon({
-    required this.icon,
-    required this.label,
-    required this.active,
-    this.disabled = false,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final Color effectiveColor = disabled
-        ? Colors.white38
-        : (active ? const Color(0xFFFFD000) : Colors.white);
-
-    return GestureDetector(
-      onTap: disabled ? null : onTap,
-      child: Opacity(
-        opacity: disabled ? 0.6 : 1.0,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: active
-                    ? const Color(0xFFFFD000).withValues(alpha: 0.2)
-                    : Colors.white12,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                icon,
-                color: effectiveColor,
-                size: 24,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                color: effectiveColor,
-                fontSize: 11,
-                fontWeight: active ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -8130,7 +8154,7 @@ class _WatermarkRowTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         children: [
           Icon(icon, color: Colors.white70, size: 22),
@@ -8147,9 +8171,9 @@ class _WatermarkRowTile extends StatelessWidget {
                     Text(
                       title,
                       style: const TextStyle(
-                        color: Colors.white,
                         fontSize: 14,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.white,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -8158,8 +8182,8 @@ class _WatermarkRowTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Colors.white60,
                         fontSize: 12,
+                        color: Colors.white60,
                       ),
                     ),
                   ],
@@ -8171,6 +8195,90 @@ class _WatermarkRowTile extends StatelessWidget {
             value: value,
             activeTrackColor: const Color(0xFFFFD000),
             onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniChipButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MiniChipButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          decoration: BoxDecoration(
+            color: selected
+                ? const Color(0xFFFFD000)
+                : Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontWeight: FontWeight.w600,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BottomActionIcon extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  const _BottomActionIcon({
+    required this.icon,
+    required this.label,
+    required this.active,
+    this.disabled = false,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = disabled
+        ? Colors.white38
+        : (active ? const Color(0xFFFFD000) : Colors.white);
+    return GestureDetector(
+      onTap: disabled ? null : onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: disabled ? 0.05 : 0.1),
+            ),
+            child: Icon(icon, color: color, size: 22),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            label,
+            style: TextStyle(color: color, fontSize: 12),
           ),
         ],
       ),

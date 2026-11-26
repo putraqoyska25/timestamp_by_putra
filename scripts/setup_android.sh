@@ -254,7 +254,7 @@ class MainActivity : FlutterActivity() {
                     "requestMediaPermissions" -> requestMediaPermissions(result)
                     "getAllImages" -> {
                         val requestedLimit = call.argument<Int>("limit") ?: 2500
-                        val safeLimit = requestedLimit.coerceIn(1, 200000)
+                        val safeLimit = requestedLimit.coerceIn(1, 500000)
                         result.success(queryAllImagePaths(safeLimit))
                     }
                     "deletePermanently", "moveToTrash" -> {
@@ -329,9 +329,25 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun queryAllImagePaths(limit: Int = 2500): ArrayList<Any> {
+    private fun isSupportedPhotoPath(path: String): Boolean {
+        val lower = path.lowercase()
+        return lower.endsWith(".jpg") ||
+            lower.endsWith(".jpeg") ||
+            lower.endsWith(".png") ||
+            lower.endsWith(".webp") ||
+            lower.endsWith(".heic") ||
+            lower.endsWith(".heif")
+    }
+
+    private fun queryAllImagePaths(limit: Int = 2500): HashMap<String, Any> {
         val list = arrayListOf<Any>()
-        if (!hasAllMediaPermissions()) return list
+        var hasMore = false
+        if (!hasAllMediaPermissions()) {
+            return hashMapOf(
+                "items" to list,
+                "hasMore" to false,
+            )
+        }
 
         val seen = HashSet<String>()
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -360,9 +376,15 @@ class MainActivity : FlutterActivity() {
                 val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
                 val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
 
-                while (cursor.moveToNext() && list.size < limit) {
+                while (cursor.moveToNext()) {
                     val path = if (dataCol >= 0) (cursor.getString(dataCol) ?: "").trim() else ""
-                    if (path.isEmpty() || seen.contains(path)) continue
+                    if (path.isEmpty() || !isSupportedPhotoPath(path) || seen.contains(path)) {
+                        continue
+                    }
+                    if (list.size >= limit) {
+                        hasMore = true
+                        break
+                    }
                     val takenMs = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
                     val modSec = if (modCol >= 0) cursor.getLong(modCol) else 0L
                     val effectiveSec = when {
@@ -382,7 +404,10 @@ class MainActivity : FlutterActivity() {
         } catch (_: Exception) {
         }
 
-        return list
+        return hashMapOf(
+            "items" to list,
+            "hasMore" to hasMore,
+        )
     }
 
     private fun resolveMediaUriForPath(path: String): Uri? {

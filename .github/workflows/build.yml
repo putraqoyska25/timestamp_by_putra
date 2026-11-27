@@ -31,6 +31,12 @@ jobs:
       - name: Install Pillow for icon generation
         run: python3 -m pip install --upgrade pip && pip install pillow
 
+      - name: Ensure Android project scaffold exists
+        run: |
+          if [ ! -f "android/app/src/main/AndroidManifest.xml" ]; then
+            flutter create --platforms=android --org com.putra --project-name timestamp_by_putra .
+          fi
+
       - name: Run Android setup script
         run: |
           chmod +x scripts/setup_android.sh
@@ -74,7 +80,7 @@ jobs:
 
               tree = ET.parse(manifest_path)
               root = tree.getroot()
-              if f"{{{ns_tools}}}tools" not in root.attrib and "xmlns:tools" not in root.attrib:
+              if "xmlns:tools" not in root.attrib and f"{{{ns_tools}}}tools" not in root.attrib:
                   root.set("xmlns:tools", ns_tools)
 
               app = root.find("application")
@@ -135,9 +141,10 @@ jobs:
               with open(gradle_path, "w", encoding="utf-8") as f:
                   f.write(content)
           PY
+          grep -rn "io.flutter.app.FlutterApplication\|PluginRegistry.Registrar" android/ || true
 
       - name: Build release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --verbose
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

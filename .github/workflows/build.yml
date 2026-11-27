@@ -49,10 +49,31 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0"
 
-      - name: Ensure applicationId and disable LintVitalAnalyzeRelease
+      - name: Ensure applicationId, embedding v2, and disable LintVitalAnalyzeRelease
         run: |
           python3 - << 'PY'
-          import os, re
+          import os, re, xml.etree.ElementTree as ET
+
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          if os.path.exists(manifest_path):
+              ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+              ET.register_namespace('tools', 'http://schemas.android.com/tools')
+              ns_android = 'http://schemas.android.com/apk/res/android'
+              name_attr = f"{{{ns_android}}}name"
+              val_attr = f"{{{ns_android}}}value"
+
+              tree = ET.parse(manifest_path)
+              root = tree.getroot()
+              app = root.find("application")
+              if app is not None:
+                  nodes = [m for m in list(app.findall("meta-data")) if m.attrib.get(name_attr) == "flutterEmbedding"]
+                  if nodes:
+                      nodes[0].set(val_attr, "2")
+                      for extra in nodes[1:]:
+                          app.remove(extra)
+                  else:
+                      app.append(ET.Element("meta-data", {name_attr: "flutterEmbedding", val_attr: "2"}))
+                  tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
 
           for gradle_path in [
               "android/app/build.gradle",
@@ -80,20 +101,20 @@ jobs:
 
               if "lint {" not in content and "lint{" not in content:
                   lint_block = """
-android {
-    lint {
-        disable += "LintVitalAnalyzeRelease"
-        checkReleaseBuilds = false
-    }
-}
-""" if gradle_path.endswith(".kts") else """
-android {
-    lint {
-        disable 'LintVitalAnalyzeRelease'
-        checkReleaseBuilds false
-    }
-}
-"""
+          android {
+              lint {
+                  disable += "LintVitalAnalyzeRelease"
+                  checkReleaseBuilds = false
+              }
+          }
+          """ if gradle_path.endswith(".kts") else """
+          android {
+              lint {
+                  disable 'LintVitalAnalyzeRelease'
+                  checkReleaseBuilds false
+              }
+          }
+          """
                   content = content + "\n" + lint_block
 
               with open(gradle_path, "w", encoding="utf-8") as f:

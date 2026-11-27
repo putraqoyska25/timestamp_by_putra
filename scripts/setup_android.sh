@@ -684,7 +684,7 @@ class MainActivity : FlutterActivity() {
         val selection = whereClauses.joinToString(" AND ")
         val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
 
-        val items = ArrayList>(min(limit, 2500))
+        val items = mutableListOf>()
         var hasMore = false
 
         contentResolver.query(
@@ -1159,24 +1159,6 @@ class MainActivity : FlutterActivity() {
     }
 }
 EOF
-
-python3 - "$MAIN_ACTIVITY_KT" << 'PY'
-import re
-import sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    src = f.read()
-
-src = re.sub(
-    r'val items\s*=\s*ArrayList\s*(?:<[^>]*>|>|=)?\s*\(\s*min\s*\(\s*limit\s*,\s*2500\s*\)\s*\)',
-    'val items = ArrayList>(min(limit, 2500))',
-    src,
-)
-
-with open(path, "w", encoding="utf-8") as f:
-    f.write(src)
-PY
 
 chmod +x "$MAIN_ACTIVITY_KT"
 echo "=== Selesai konfigurasi Android & MainActivity ==="

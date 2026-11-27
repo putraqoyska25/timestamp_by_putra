@@ -27,6 +27,8 @@ VALUE_ATTR = f"{{{ANDROID_NS}}}value"
 
 tree = ET.parse(path)
 root = tree.getroot()
+if "xmlns:tools" not in root.attrib and f"{{{TOOLS_NS}}}tools" not in root.attrib:
+    root.set("xmlns:tools", TOOLS_NS)
 
 desired_permissions = [
     ("android.permission.CAMERA", {}),
@@ -148,7 +150,6 @@ package com.putra.timestamp_by_putra
 import android.Manifest
 import android.app.Activity
 import android.app.RecoverableSecurityException
-import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -165,7 +166,6 @@ import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.exifinterface.media.ExifInterface
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -763,37 +763,66 @@ class MainActivity : FlutterActivity() {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
     }
 
-    private fun readExifDegreeFromUriOrPath(uriStr: String, pathStr: String): Int {
-        try {
-            if (uriStr.isNotEmpty()) {
-                contentResolver.openInputStream(Uri.parse(uriStr))?.use { ins ->
-                    val exif = ExifInterface(ins)
-                    return when (exif.getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL,
-                    )) {
-                        ExifInterface.ORIENTATION_ROTATE_90 -> 90
-                        ExifInterface.ORIENTATION_ROTATE_180 -> 180
-                        ExifInterface.ORIENTATION_ROTATE_270 -> 270
-                        else -> 0
+    private fun readExifDegreeFromBytes(bytes: ByteArray): Int {
+        if (bytes.size < 4) return 0
+        var idx = 0
+        if ((bytes[0].toInt() and 0xFF) == 0xFF && (bytes[1].toInt() and 0xFF) == 0xD8) {
+            idx = 2
+            while (idx + 3 < bytes.size) {
+                if ((bytes[idx].toInt() and 0xFF) != 0xFF) break
+                val marker = bytes[idx + 1].toInt() and 0xFF
+                val segLen = ((bytes[idx + 2].toInt() and 0xFF) shl 8) or (bytes[idx + 3].toInt() and 0xFF)
+                if (segLen < 2 || idx + 2 + segLen > bytes.size) break
+                if (marker == 0xE1 && segLen >= 8) {
+                    val isExif = bytes[idx + 4].toInt() == 'E'.code &&
+                        bytes[idx + 5].toInt() == 'x'.code &&
+                        bytes[idx + 6].toInt() == 'i'.code &&
+                        bytes[idx + 7].toInt() == 'f'.code &&
+                        bytes[idx + 8].toInt() == 0 &&
+                        bytes[idx + 9].toInt() == 0
+                    if (isExif && segLen >= 16) {
+                        val tiffStart = idx + 10
+                        val littleEndian = bytes[tiffStart].toInt() == 'I'.code && bytes[tiffStart + 1].toInt() == 'I'.code
+                        fun u16(pos: Int): Int {
+                            if (pos + 1 >= bytes.size) return 0
+                            val b0 = bytes[pos].toInt() and 0xFF
+                            val b1 = bytes[pos + 1].toInt() and 0xFF
+                            return if (littleEndian) (b0 or (b1 shl 8)) else ((b0 shl 8) or b1)
+                        }
+                        fun u32(pos: Int): Long {
+                            if (pos + 3 >= bytes.size) return 0L
+                            val b0 = (bytes[pos].toInt() and 0xFF).toLong()
+                            val b1 = (bytes[pos + 1].toInt() and 0xFF).toLong()
+                            val b2 = (bytes[pos + 2].toInt() and 0xFF).toLong()
+                            val b3 = (bytes[pos + 3].toInt() and 0xFF).toLong()
+                            return if (littleEndian) {
+                                b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
+                            } else {
+                                (b0 shl 24) or (b1 shl 16) or (b2 shl 8) or b3
+                            }
+                        }
+                        val ifdOffset = u32(tiffStart + 4).toInt()
+                        val ifdPos = tiffStart + ifdOffset
+                        if (ifdPos + 1 < bytes.size) {
+                            val entries = u16(ifdPos)
+                            for (e in 0 until entries) {
+                                val entryPos = ifdPos + 2 + (e * 12)
+                                if (entryPos + 11 >= bytes.size) break
+                                val tag = u16(entryPos)
+                                if (tag == 0x0112) {
+                                    val orient = u16(entryPos + 8)
+                                    return when (orient) {
+                                        3 -> 180
+                                        6 -> 90
+                                        8 -> 270
+                                        else -> 0
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        } catch (_: Exception) {
-        }
-        if (pathStr.isNotEmpty()) {
-            try {
-                val exif = ExifInterface(pathStr)
-                return when (exif.getAttributeInt(
-                    ExifInterface.TAG_ORIENTATION,
-                    ExifInterface.ORIENTATION_NORMAL,
-                )) {
-                    ExifInterface.ORIENTATION_ROTATE_90 -> 90
-                    ExifInterface.ORIENTATION_ROTATE_180 -> 180
-                    ExifInterface.ORIENTATION_ROTATE_270 -> 270
-                    else -> 0
-                }
-            } catch (_: Exception) {
+                idx += 2 + segLen
             }
         }
         return 0
@@ -824,7 +853,7 @@ class MainActivity : FlutterActivity() {
         }
         val opts = BitmapFactory.Options().apply { inSampleSize = max(1, sample) }
         val decoded = BitmapFactory.decodeByteArray(fullBytes, 0, fullBytes.size, opts) ?: return null
-        val deg = readExifDegreeFromUriOrPath(uriStr = uriStr, pathStr = pathStr)
+        val deg = readExifDegreeFromBytes(fullBytes)
         val oriented = applyExifRotation(decoded, deg)
         val scale = min(1.0f, maxSide.toFloat() / max(1, max(oriented.width, oriented.height)))
         val finalBmp = if (scale < 0.99f) {

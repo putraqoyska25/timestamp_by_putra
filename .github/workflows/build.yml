@@ -1,12 +1,14 @@
-name: Build Timestamp Camera APK
+name: Build Timestamp by Putra APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,56 +19,86 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.27.1"
-          channel: "stable"
+          flutter-version: '3.27.1'
+          channel: stable
+          cache: true
 
-      - name: Ensure Android project & permissions exist
+      - name: Install Pillow for icon generation
+        run: python3 -m pip install --upgrade pip && pip install pillow
+
+      - name: Run Android setup script
         run: |
           chmod +x scripts/setup_android.sh
           ./scripts/setup_android.sh
 
-      - name: Verify custom launcher icon assets exist
+      - name: Verify launcher icons
         run: |
           ls -la android/app/src/main/res/mipmap-*/ic_launcher.png
+          ls -la android/app/src/main/res/mipmap-*/ic_launcher_round.png
 
-      - name: Ensure applicationId is com.putra.timestamp_by_putra
-        run: |
-          python3 - << 'PY'
-          from pathlib import Path
-          import re
-
-          for p in [Path("android/app/build.gradle.kts"), Path("android/app/build.gradle")]:
-              if p.exists():
-                  txt = p.read_text(encoding="utf-8")
-                  txt = re.sub(r'applicationId\s*=\s*"[^"]+"', 'applicationId = "com.putra.timestamp_by_putra"', txt)
-                  txt = re.sub(r'applicationId\s+"[^"]+"', 'applicationId "com.putra.timestamp_by_putra"', txt)
-                  p.write_text(txt, encoding="utf-8")
-          PY
-
-      - name: Disable lintVitalAnalyzeRelease in Gradle
-        run: |
-          python3 - << 'PY'
-          from pathlib import Path
-
-          for p in [Path("android/app/build.gradle.kts"), Path("android/app/build.gradle")]:
-              if p.exists():
-                  txt = p.read_text(encoding="utf-8")
-                  if "disable.add(\"LintVitalAnalyzeRelease\")" not in txt and "lint {" in txt:
-                      txt = txt.replace(
-                          "lint {",
-                          'lint {\n        disable.add("LintVitalAnalyzeRelease")',
-                          1,
-                      )
-                      p.write_text(txt, encoding="utf-8")
-          PY
-
-      - name: Install dependencies
+      - name: Get Flutter dependencies
         run: flutter pub get
+
+      - name: Ensure Android SDK 36 platform & build-tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Ensure applicationId and disable LintVitalAnalyzeRelease
+        run: |
+          python3 - << 'PY'
+          import os, re
+
+          for gradle_path in [
+              "android/app/build.gradle",
+              "android/app/build.gradle.kts",
+          ]:
+              if not os.path.exists(gradle_path):
+                  continue
+              with open(gradle_path, "r", encoding="utf-8") as f:
+                  content = f.read()
+
+              if gradle_path.endswith(".kts"):
+                  if 'applicationId = "com.putra.timestamp_by_putra"' not in content:
+                      content = re.sub(
+                          r'applicationId\s*=\s*"[^"]+"',
+                          'applicationId = "com.putra.timestamp_by_putra"',
+                          content,
+                      )
+              else:
+                  if 'applicationId "com.putra.timestamp_by_putra"' not in content:
+                      content = re.sub(
+                          r'applicationId\s+"[^"]+"',
+                          'applicationId "com.putra.timestamp_by_putra"',
+                          content,
+                      )
+
+              if "lint {" not in content and "lint{" not in content:
+                  lint_block = """
+android {
+    lint {
+        disable += "LintVitalAnalyzeRelease"
+        checkReleaseBuilds = false
+    }
+}
+""" if gradle_path.endswith(".kts") else """
+android {
+    lint {
+        disable 'LintVitalAnalyzeRelease'
+        checkReleaseBuilds false
+    }
+}
+"""
+                  content = content + "\n" + lint_block
+
+              with open(gradle_path, "w", encoding="utf-8") as f:
+                  f.write(content)
+          PY
 
       - name: Build release APK
         run: flutter build apk --release
@@ -76,3 +108,4 @@ jobs:
         with:
           name: timestamp-by-putra-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error

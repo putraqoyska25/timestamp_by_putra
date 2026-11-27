@@ -6,10 +6,53 @@ echo "=== Memulai konfigurasi Android & MainActivity untuk timestamp_by_putra ==
 MANIFEST_FILE="android/app/src/main/AndroidManifest.xml"
 BUILD_GRADLE_APP="android/app/build.gradle"
 BUILD_GRADLE_APP_KTS="android/app/build.gradle.kts"
-MAIN_ACTIVITY_KT="android/app/src/main/kotlin/com/putra/timestamp_by_putra/MainActivity.kt"
+GRADLE_PROPS="android/gradle.properties"
+KOTLIN_PKG_DIR="android/app/src/main/kotlin/com/putra/timestamp_by_putra"
+MAIN_ACTIVITY_KT="$KOTLIN_PKG_DIR/MainActivity.kt"
+MAIN_ACTIVITY_JAVA="android/app/src/main/java/com/putra/timestamp_by_putra/MainActivity.java"
 ICON_SRC="assets/icon/app_icon.png"
 
-mkdir -p "android/app/src/main/kotlin/com/putra/timestamp_by_putra"
+mkdir -p "$KOTLIN_PKG_DIR"
+
+if [ -f "$MAIN_ACTIVITY_JAVA" ]; then
+  rm -f "$MAIN_ACTIVITY_JAVA"
+fi
+
+if [ ! -f "$GRADLE_PROPS" ]; then
+  mkdir -p "android"
+  cat << 'EOF' > "$GRADLE_PROPS"
+org.gradle.jvmargs=-Xmx2048M -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.enableJetifier=true
+EOF
+else
+  python3 - "$GRADLE_PROPS" << 'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    lines = f.read().splitlines()
+
+existing_keys = set()
+for line in lines:
+    s = line.strip()
+    if not s or s.startswith("#") or "=" not in s:
+        continue
+    k = s.split("=", 1)[0].strip()
+    existing_keys.add(k)
+
+required = {
+    "android.useAndroidX": "true",
+    "android.enableJetifier": "true",
+}
+for k, v in required.items():
+    if k not in existing_keys:
+        lines.append(f"{k}={v}")
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+PY
+fi
 
 if [ -f "$MANIFEST_FILE" ]; then
   python3 - "$MANIFEST_FILE" << 'PY'

@@ -89,8 +89,7 @@ desired_permissions = [
     ("android.permission.READ_MEDIA_VIDEO", {}),
     ("android.permission.READ_MEDIA_VISUAL_USER_SELECTED", {}),
     ("android.permission.READ_EXTERNAL_STORAGE", {"android:maxSdkVersion": "32"}),
-    ("android.permission.WRITE_EXTERNAL_STORAGE", {
-        "android:maxSdkVersion": "28",
+    ("android:maxSdkVersion": "28",
         "tools:replace": "android:maxSdkVersion",
     }),
 ]
@@ -1159,6 +1158,24 @@ class MainActivity : FlutterActivity() {
     }
 }
 EOF
+
+python3 - "$MAIN_ACTIVITY_KT" << 'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    src = f.read()
+
+src = re.sub(
+    r'val items\s*=\s*ArrayList\s*(?:<[^>]*>|>|=)?\s*\(\s*min\s*\(\s*limit\s*,\s*2500\s*\)\s*\)',
+    'val items = ArrayList>(min(limit, 2500))',
+    src,
+)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(src)
+PY
 
 chmod +x "$MAIN_ACTIVITY_KT"
 echo "=== Selesai konfigurasi Android & MainActivity ==="

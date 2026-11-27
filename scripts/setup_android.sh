@@ -684,7 +684,7 @@ class MainActivity : FlutterActivity() {
         val selection = whereClauses.joinToString(" AND ")
         val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
 
-        val items = mutableListOf>()
+        val items = mutableListOf<Any>()
         var hasMore = false
 
         contentResolver.query(

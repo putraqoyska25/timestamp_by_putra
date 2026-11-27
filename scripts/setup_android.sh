@@ -89,7 +89,8 @@ desired_permissions = [
     ("android.permission.READ_MEDIA_VIDEO", {}),
     ("android.permission.READ_MEDIA_VISUAL_USER_SELECTED", {}),
     ("android.permission.READ_EXTERNAL_STORAGE", {"android:maxSdkVersion": "32"}),
-    ("android:maxSdkVersion": "28",
+    ("android.permission.WRITE_EXTERNAL_STORAGE", {
+        "android:maxSdkVersion": "28",
         "tools:replace": "android:maxSdkVersion",
     }),
 ]

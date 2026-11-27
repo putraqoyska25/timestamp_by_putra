@@ -56,22 +56,29 @@ fi
 
 if [ -f "$MANIFEST_FILE" ]; then
   python3 - "$MANIFEST_FILE" << 'PY'
+import re
 import sys
-import xml.etree.ElementTree as ET
 
 path = sys.argv[1]
-ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
-ET.register_namespace('tools', 'http://schemas.android.com/tools')
+with open(path, "r", encoding="utf-8") as f:
+    xml_src = f.read()
 
-ANDROID_NS = 'http://schemas.android.com/apk/res/android'
-TOOLS_NS = 'http://schemas.android.com/tools'
-NAME_ATTR = f"{{{ANDROID_NS}}}name"
-VALUE_ATTR = f"{{{ANDROID_NS}}}value"
+def dedup_manifest_tag(match):
+    tag_body = match.group(1)
+    seen_keys = set()
+    cleaned_attrs = []
+    for attr_m in re.finditer(r'([A-Za-z0-9_:-]+)\s*=\s*("[^"]*"|\'[^\']*\')', tag_body):
+        k = attr_m.group(1)
+        v = attr_m.group(2)
+        if k in seen_keys:
+            continue
+        seen_keys.add(k)
+        cleaned_attrs.append(f'{k}={v}')
+    if "xmlns:tools" not in seen_keys:
+        cleaned_attrs.append('xmlns:tools="http://schemas.android.com/tools"')
+    return "<manifest " + " ".join(cleaned_attrs) + ">"
 
-tree = ET.parse(path)
-root = tree.getroot()
-if "xmlns:tools" not in root.attrib and f"{{{TOOLS_NS}}}tools" not in root.attrib:
-    root.set("xmlns:tools", TOOLS_NS)
+xml_src = re.sub(r'<manifest\b([^>]*)>', dedup_manifest_tag, xml_src, count=1, flags=re.DOTALL)
 
 desired_permissions = [
     ("android.permission.CAMERA", {}),
@@ -81,45 +88,34 @@ desired_permissions = [
     ("android.permission.READ_MEDIA_IMAGES", {}),
     ("android.permission.READ_MEDIA_VIDEO", {}),
     ("android.permission.READ_MEDIA_VISUAL_USER_SELECTED", {}),
-    ("android.permission.READ_EXTERNAL_STORAGE", {f"{{{ANDROID_NS}}}maxSdkVersion": "32"}),
+    ("android.permission.READ_EXTERNAL_STORAGE", {"android:maxSdkVersion": "32"}),
     ("android.permission.WRITE_EXTERNAL_STORAGE", {
-        f"{{{ANDROID_NS}}}maxSdkVersion": "28",
-        f"{{{TOOLS_NS}}}replace": "android:maxSdkVersion",
+        "android:maxSdkVersion": "28",
+        "tools:replace": "android:maxSdkVersion",
     }),
 ]
 
-existing_perms = {}
-for elem in list(root.findall("uses-permission")):
-    name = elem.attrib.get(NAME_ATTR, "")
-    if name:
-        existing_perms[name] = elem
+for perm_name, attrs in desired_permissions:
+    if f'android:name="{perm_name}"' not in xml_src:
+        extra_str = "".join(f' {k}="{v}"' for k, v in attrs.items())
+        perm_tag = f'    <uses-permission android:name="{perm_name}"{extra_str} />\n'
+        xml_src = re.sub(r'(<manifest\b[^>]*>)', r'\1\n' + perm_tag, xml_src, count=1)
 
-for perm_name, extra_attrs in desired_permissions:
-    elem = existing_perms.get(perm_name)
-    if elem is None:
-        elem = ET.Element("uses-permission", {NAME_ATTR: perm_name})
-        root.insert(0, elem)
-    for k, v in extra_attrs.items():
-        elem.set(k, v)
+if 'android:name="flutterEmbedding"' in xml_src:
+    xml_src = re.sub(
+        r'(<meta-data\b[^>]*android:name="flutterEmbedding"[^>]*android:value=")[^"]*(")',
+        r'\g<1>2\g<2>',
+        xml_src,
+    )
+elif "</application>" in xml_src:
+    xml_src = xml_src.replace(
+        "</application>",
+        '        <meta-data\n            android:name="flutterEmbedding"\n            android:value="2" />\n    </application>',
+        1,
+    )
 
-app_elem = root.find("application")
-if app_elem is not None:
-    embedding_nodes = []
-    for md in list(app_elem.findall("meta-data")):
-        if md.attrib.get(NAME_ATTR) == "flutterEmbedding":
-            embedding_nodes.append(md)
-    if embedding_nodes:
-        embedding_nodes[0].set(VALUE_ATTR, "2")
-        for extra_md in embedding_nodes[1:]:
-            app_elem.remove(extra_md)
-    else:
-        new_md = ET.Element("meta-data", {
-            NAME_ATTR: "flutterEmbedding",
-            VALUE_ATTR: "2",
-        })
-        app_elem.append(new_md)
-
-tree.write(path, encoding="utf-8", xml_declaration=True)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(xml_src)
 PY
 fi
 

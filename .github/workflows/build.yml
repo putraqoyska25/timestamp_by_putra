@@ -67,32 +67,45 @@ jobs:
       - name: Ensure applicationId, embedding v2, and disable LintVitalAnalyzeRelease
         run: |
           python3 - << 'PY'
-          import os, re, xml.etree.ElementTree as ET
+          import os, re
 
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           if os.path.exists(manifest_path):
-              ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
-              ET.register_namespace('tools', 'http://schemas.android.com/tools')
-              ns_android = 'http://schemas.android.com/apk/res/android'
-              ns_tools = 'http://schemas.android.com/tools'
-              name_attr = f"{{{ns_android}}}name"
-              val_attr = f"{{{ns_android}}}value"
+              with open(manifest_path, "r", encoding="utf-8") as f:
+                  xml_src = f.read()
 
-              tree = ET.parse(manifest_path)
-              root = tree.getroot()
-              if "xmlns:tools" not in root.attrib and f"{{{ns_tools}}}tools" not in root.attrib:
-                  root.set("xmlns:tools", ns_tools)
+              def dedup_manifest_tag(match):
+                  tag_body = match.group(1)
+                  seen_keys = set()
+                  cleaned_attrs = []
+                  for attr_m in re.finditer(r'([A-Za-z0-9_:-]+)\s*=\s*("[^"]*"|\'[^\']*\')', tag_body):
+                      k = attr_m.group(1)
+                      v = attr_m.group(2)
+                      if k in seen_keys:
+                          continue
+                      seen_keys.add(k)
+                      cleaned_attrs.append(f'{k}={v}')
+                  if "xmlns:tools" not in seen_keys:
+                      cleaned_attrs.append('xmlns:tools="http://schemas.android.com/tools"')
+                  return "<manifest " + " ".join(cleaned_attrs) + ">"
 
-              app = root.find("application")
-              if app is not None:
-                  nodes = [m for m in list(app.findall("meta-data")) if m.attrib.get(name_attr) == "flutterEmbedding"]
-                  if nodes:
-                      nodes[0].set(val_attr, "2")
-                      for extra in nodes[1:]:
-                          app.remove(extra)
-                  else:
-                      app.append(ET.Element("meta-data", {name_attr: "flutterEmbedding", val_attr: "2"}))
-                  tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+              xml_src = re.sub(r'<manifest\b([^>]*)>', dedup_manifest_tag, xml_src, count=1, flags=re.DOTALL)
+
+              if 'android:name="flutterEmbedding"' in xml_src:
+                  xml_src = re.sub(
+                      r'(<meta-data\b[^>]*android:name="flutterEmbedding"[^>]*android:value=")[^"]*(")',
+                      r'\g<1>2\g<2>',
+                      xml_src,
+                  )
+              elif "</application>" in xml_src:
+                  xml_src = xml_src.replace(
+                      "</application>",
+                      '        <meta-data\n            android:name="flutterEmbedding"\n            android:value="2" />\n    </application>',
+                      1,
+                  )
+
+              with open(manifest_path, "w", encoding="utf-8") as f:
+                  f.write(xml_src)
 
           for gradle_path in [
               "android/app/build.gradle",
@@ -131,7 +144,7 @@ jobs:
                       lint_block = (
                           "\nandroid {\n"
                           "    lint {\n"
-                          "        disable 'LintVitalAnalyzeRelease'\n"
+                          '        disable \'LintVitalAnalyzeRelease\'\n'
                           "        checkReleaseBuilds false\n"
                           "    }\n"
                           "}\n"
